@@ -1,0 +1,193 @@
+#!/usr/bin/env python3
+"""
+Upload Battle of Bots data/ folder to Supabase Storage (bucket: dashboard-data).
+Runs after mirror.sh on the Mac. Idempotent — safe to re-run.
+
+Reads credentials from Battle of Bots/.env.local:
+  SUPABASE_URL=https://xxxxx.supabase.co
+  SUPABASE_SERVICE_ROLE_KEY=eyJ...     # required; bypasses RLS for uploads
+
+Uploads only files that changed (sha256 manifest cached at data/.upload-manifest.json).
+Mirrors directory structure exactly (data/snapshot.json -> snapshot.json in bucket,
+data/bots/vps1/123-456.json -> bots/vps1/123-456.json, etc.).
+"""
+from __future__ import annotations
+
+import hashlib
+import json
+import mimetypes
+import os
+import sys
+import time
+from pathlib import Path
+from urllib import error as urlerror
+from urllib import parse as urlparse
+from urllib import request as urlrequest
+
+ROOT = Path(__file__).resolve().parent.parent  # .../battle-of-bots
+DATA_DIR = ROOT / "data"
+ENV_FILE = ROOT / ".env.local"
+MANIFEST_FILE = DATA_DIR / ".upload-manifest.json"
+BUCKET = "dashboard-data"
+
+# Files we never upload (local-only or sensitive)
+SKIP_NAMES = {
+    ".DS_Store",
+    "server.stdout.log",
+    "server.stderr.log",
+    ".upload-manifest.json",
+}
+SKIP_SUFFIXES = (".log", ".tmp")
+
+
+# ----------------------- env -----------------------
+
+def load_env() -> dict[str, str]:
+    if not ENV_FILE.exists():
+        die(f"missing {ENV_FILE}")
+    env: dict[str, str] = {}
+    for raw in ENV_FILE.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, v = line.split("=", 1)
+        env[k.strip()] = v.strip().strip('"').strip("'")
+    return env
+
+
+def die(msg: str, code: int = 1) -> None:
+    print(f"[upload] FATAL: {msg}", file=sys.stderr)
+    sys.exit(code)
+
+
+# ----------------------- manifest -----------------------
+
+def load_manifest() -> dict[str, str]:
+    if not MANIFEST_FILE.exists():
+        return {}
+    try:
+        return json.loads(MANIFEST_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def save_manifest(manifest: dict[str, str]) -> None:
+    MANIFEST_FILE.write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
+
+
+def file_sha256(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        for chunk in iter(lambda: f.read(64 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+# ----------------------- supabase HTTP -----------------------
+
+class Uploader:
+    def __init__(self, url: str, service_key: str) -> None:
+        self.base = url.rstrip("/")
+        self.key = service_key
+
+    def _headers(self, content_type: str | None = None) -> dict[str, str]:
+        h = {
+            "Authorization": f"Bearer {self.key}",
+            "apikey": self.key,
+        }
+        if content_type:
+            h["Content-Type"] = content_type
+        return h
+
+    def upload(self, object_path: str, file_path: Path) -> None:
+        """PUT to /storage/v1/object/<bucket>/<path>?upsert=true"""
+        mime, _ = mimetypes.guess_type(file_path.name)
+        if not mime:
+            mime = "application/octet-stream"
+        encoded = "/".join(urlparse.quote(p, safe="") for p in object_path.split("/"))
+        endpoint = f"{self.base}/storage/v1/object/{BUCKET}/{encoded}"
+        headers = self._headers(mime)
+        headers["x-upsert"] = "true"
+        headers["cache-control"] = "no-cache, max-age=0"
+        with file_path.open("rb") as f:
+            body = f.read()
+        req = urlrequest.Request(endpoint, data=body, headers=headers, method="POST")
+        try:
+            with urlrequest.urlopen(req, timeout=60) as resp:
+                if resp.status >= 300:
+                    raise RuntimeError(f"http {resp.status}")
+        except urlerror.HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")[:200]
+            raise RuntimeError(f"http {exc.code}: {detail}") from None
+
+
+# ----------------------- main -----------------------
+
+def should_skip(path: Path) -> bool:
+    if path.name in SKIP_NAMES:
+        return True
+    if any(path.name.endswith(s) for s in SKIP_SUFFIXES):
+        return True
+    return False
+
+
+def iter_data_files() -> list[tuple[Path, str]]:
+    """Yield (absolute_path, object_path_in_bucket)."""
+    if not DATA_DIR.exists():
+        die(f"missing {DATA_DIR}")
+    out: list[tuple[Path, str]] = []
+    for p in DATA_DIR.rglob("*"):
+        if p.is_dir() or should_skip(p):
+            continue
+        rel = p.relative_to(DATA_DIR).as_posix()
+        out.append((p, rel))
+    return out
+
+
+def main() -> int:
+    env = load_env()
+    url = env.get("SUPABASE_URL")
+    key = env.get("SUPABASE_SERVICE_ROLE_KEY")
+    if not url or not key:
+        die("SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY must be set in .env.local")
+
+    uploader = Uploader(url, key)
+    manifest = load_manifest()
+    new_manifest: dict[str, str] = {}
+    files = iter_data_files()
+
+    started = time.time()
+    uploaded = 0
+    skipped = 0
+    failed: list[str] = []
+
+    print(f"[upload] {len(files)} files in data/")
+    for abs_path, obj_path in files:
+        digest = file_sha256(abs_path)
+        new_manifest[obj_path] = digest
+        if manifest.get(obj_path) == digest:
+            skipped += 1
+            continue
+        try:
+            uploader.upload(obj_path, abs_path)
+            uploaded += 1
+            if uploaded % 25 == 0:
+                print(f"[upload]   {uploaded} uploaded...")
+        except Exception as exc:  # noqa: BLE001
+            failed.append(f"{obj_path}: {exc}")
+            new_manifest.pop(obj_path, None)  # don't mark as uploaded
+
+    save_manifest(new_manifest)
+    dur = time.time() - started
+    print(
+        f"[upload] done in {dur:.1f}s  uploaded={uploaded}  unchanged={skipped}  failed={len(failed)}"
+    )
+    if failed:
+        for line in failed[:10]:
+            print(f"[upload]   FAIL {line}", file=sys.stderr)
+        return 2
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

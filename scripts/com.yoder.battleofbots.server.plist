@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.yoder.battleofbots.server</string>
+
+    <!-- Serves the dashboard over http://127.0.0.1:8765 perpetually.
+         KeepAlive=true restarts automatically if it dies. RunAtLoad=true starts on login/boot. -->
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/python3</string>
+        <string>-m</string>
+        <string>http.server</string>
+        <string>8765</string>
+        <string>--bind</string>
+        <string>127.0.0.1</string>
+        <string>--directory</string>
+        <string>/Users/yodyiznaga/battle-of-bots</string>
+    </array>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/yodyiznaga/battle-of-bots/data/server.stdout.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/yodyiznaga/battle-of-bots/data/server.stderr.log</string>
+</dict>
+</plist>

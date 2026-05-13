@@ -1,0 +1,13 @@
+# Files that should live in the repo but NOT be deployed to Vercel.
+# Vercel only ships the public dashboard (HTML/CSS/JS); ops scripts stay private.
+
+scripts/
+supabase/
+README.md
+.env.example
+
+# Build/lock artifacts that don't apply
+*.log
+__pycache__/
+*.pyc
+.DS_Store

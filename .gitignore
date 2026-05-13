@@ -1,0 +1,54 @@
+# ============================================================
+# Kiz Capital — Battle of Bots
+# Anything containing secrets, local-only state, or auto-generated data.
+# ============================================================
+
+# Secrets / env / credentials  --- NEVER commit
+.env
+.env.*
+!.env.example
+vps-access.local.md
+allowed_emails.local.txt
+auth.local.sqlite
+auth.local.sqlite-*
+*.pem
+*.key
+id_rsa*
+id_ed25519*
+secrets/
+credentials.json
+.aws/
+.ssh/
+
+# Supabase / Vercel CLI local state
+.supabase/
+.vercel/
+
+# Data folder — lives in Supabase Storage, NOT in GitHub.
+# Vercel deploy must not ship local JSONs (would be stale + exposes data).
+data/
+
+# Catch-all for any stray artifacts
+*.log
+mirror.log
+launchd.stdout.log
+launchd.stderr.log
+
+# macOS / editor noise
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+.idea/
+.vscode/
+*~
+
+# Python caches
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# Node (in case)
+node_modules/

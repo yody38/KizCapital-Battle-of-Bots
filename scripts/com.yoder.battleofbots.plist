@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.yoder.battleofbots</string>
+
+    <!-- Mirrors snapshots from VPS + uploads to Supabase Storage.
+         Runs every 30 min (XX:05 and XX:35) so the public dashboard
+         on Vercel refreshes twice per hour. -->
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>/Users/yodyiznaga/battle-of-bots/scripts/mirror.sh</string>
+    </array>
+
+    <key>StartCalendarInterval</key>
+    <array>
+        <dict><key>Minute</key><integer>5</integer></dict>
+        <dict><key>Minute</key><integer>35</integer></dict>
+    </array>
+
+    <!-- Run at load and at login too, so dashboard is immediately fresh. -->
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/yodyiznaga/battle-of-bots/data/launchd.stdout.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/yodyiznaga/battle-of-bots/data/launchd.stderr.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin</string>
+        <key>HOME</key>
+        <string>/Users/yodyiznaga</string>
+    </dict>
+</dict>
+</plist>

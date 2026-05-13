@@ -1,0 +1,1815 @@
+"""Post-merge enrichment for Battle of Bots.
+
+Reads merged snapshot.json + per-bot files (with daily_equity_series), and:
+  1. Builds correlation matrix (Pearson) of daily returns between bots that
+     have at least MIN_CORR_TRADES closed trades. Output: data/correlations.json
+  2. Computes Promotion Score (0-100) and promotion_status per bot using
+     transparent weights + hard gating filters. Writes back into snapshot.json.
+  3. Monte Carlo stress test per bot (bootstrap of trade returns) → stress block.
+  4. Walk-Forward / OOS validation per bot → oos block.
+  5. Forward Tracker: append-only history of READY/NEAR bots → candidates_history.jsonl.
+  6. Portfolio Optimizer: risk-parity allocation over top candidates → portfolio.json.
+
+Run with: python3 post_merge.py <data_dir>
+"""
+from __future__ import annotations
+
+import json
+import math
+import os
+import random
+import sys
+from datetime import datetime, timezone
+
+# --- Configuration -------------------------------------------------------
+
+WEIGHTS = {
+    "calmar": 0.25,
+    "months_positive_pct": 0.20,
+    "sortino": 0.15,
+    "decay": 0.15,            # 1.0 - decay penalty
+    "profit_factor": 0.10,
+    "age": 0.10,              # months_active vs 12
+    "trade_count": 0.05,      # trades vs 200
+}
+
+# Normalization caps (bot at cap = 1.0; above = 1.0; negative = 0.0).
+CAPS = {
+    "calmar": 5.0,            # net 5x maxDD = perfect
+    "sortino": 3.0,           # annualized sortino
+    "profit_factor": 3.0,     # PF 3 = perfect
+    "age_months": 12.0,
+    "trades_target": 200.0,
+}
+
+# Hard gating filters: failing any one => promotion_status = "NO".
+GATING = {
+    "min_trades": 30,
+    "min_months_active": 3,
+    "max_drawdown_pct_of_balance": 15.0,
+    "min_net_profit": 0.0,    # must be net profitable
+    "exclude_decay_flag": True,
+    "exclude_magic_zero": True,
+}
+
+# Status thresholds (kept for compatibility; superseded by rank-based assignment below).
+STATUS = [
+    ("READY", 75),
+    ("NEAR", 60),
+    ("WATCH", 40),
+    ("NO", 0),
+]
+
+# Rank-based status caps: SIEMPRE garantizan top5/top5/top10 entre los bots que pasan gating,
+# ordenados por promotion_score. Cualquier bot que pasa gating pero queda fuera del top 20 → NO.
+STATUS_RANK_CAPS = {"READY": 5, "NEAR": 5, "WATCH": 10}
+
+MIN_CORR_TRADES = 25          # min trades to be in correlation matrix
+MAX_CORR_BOTS = 60            # cap matrix size
+
+# --- Monte Carlo / OOS / Portfolio config -------------------------------
+
+MC_RUNS = 2000                # bootstrap iterations
+MC_HORIZON_TRADES = None      # None = same length as historical trades
+MC_MIN_TRADES = 30            # below this, skip Monte Carlo
+MC_SEED = 42                  # deterministic across runs
+
+OOS_FOLDS_MAX = 5             # rolling walk-forward splits (cap)
+OOS_MIN_TRADES = 40           # below this, skip OOS
+OOS_MIN_FOLD_SIZE = 6         # min train/test rows per fold
+OOS_PERM_TRIALS = 1000        # permutation test resamples
+
+PORTFOLIO_MAX_BOTS = 10       # cap allocator at top N
+PORTFOLIO_CAPITALS = [25000, 50000, 100000]
+PORTFOLIO_MIN_STATUS = ("READY", "NEAR")
+
+# --- Bayesian shrinkage (cohort-adjusted) -------------------------------
+SHRINKAGE_K0 = 50.0           # prior strength (n_eff at which weight = 0.5)
+SHRINKAGE_MIN_COHORT = 3      # min bots in a cohort to trust its prior
+SHRINKAGE_AGE_BUCKETS = (3, 6, 12, 24)  # months_active buckets
+
+# --- Drift Watchdog (Page-Hinkley) --------------------------------------
+PH_DELTA = 0.005              # tolerance (in $/day units of daily_net)
+PH_LAMBDA_FACTOR = 4.0        # lambda = factor × stdev(daily_net)
+PH_MIN_DAYS = 30              # below this, no drift evaluation
+PH_RESET_AFTER_DAYS = 0       # 0 = first breakpoint sticky; >0 = reset window
+
+# --- Capacity Forecaster ------------------------------------------------
+LIQUIDITY_TIER = {            # primary symbol → tier (1=major, 2=minor, 3=exotic)
+    # Tier 1 — majors
+    "EURUSD": 1, "GBPUSD": 1, "USDJPY": 1, "USDCHF": 1, "AUDUSD": 1,
+    "USDCAD": 1, "NZDUSD": 1,
+    # Tier 2 — minors / crosses
+    "EURJPY": 2, "GBPJPY": 2, "EURGBP": 2, "AUDJPY": 2, "CHFJPY": 2,
+    "CADJPY": 2, "AUDNZD": 2, "EURAUD": 2, "EURCAD": 2, "EURCHF": 2,
+    "EURNZD": 2, "GBPAUD": 2, "GBPCAD": 2, "GBPCHF": 2, "GBPNZD": 2,
+    "AUDCAD": 2, "AUDCHF": 2, "NZDJPY": 2, "NZDCAD": 2, "NZDCHF": 2,
+    "CADCHF": 2,
+    # Tier 3 — metals / exotics (XAU, XAG, oil etc.)
+}
+TIER_BASE_CAPACITY = {1: 250000.0, 2: 80000.0, 3: 25000.0}
+TIER_LIQUIDITY_FACTOR = {1: 1.0, 2: 0.55, 3: 0.20}
+
+# --- Historical event windows (real macro regimes for replay) -----------
+EVENT_WINDOWS = [
+    {"id": "covid",      "name": "COVID Crash",            "icon": "🦠", "start": "2020-02-20", "end": "2020-04-30"},
+    {"id": "ukraine",    "name": "Russia–Ukraine War",     "icon": "🪖", "start": "2022-02-24", "end": "2022-04-30"},
+    {"id": "banking",    "name": "Banking Crisis SVB/CS",  "icon": "🏦", "start": "2023-03-08", "end": "2023-04-15"},
+    {"id": "fed_pivot",  "name": "Fed Pivot 2024",         "icon": "💸", "start": "2024-08-01", "end": "2024-12-15"},
+]
+
+# --- Bootstrap CI config ------------------------------------------------
+CI_RUNS = 1000
+CI_LEVEL = 0.95
+CI_MIN_DAYS = 30
+CI_MIN_TRADES = 30
+CI_SEED = 4242
+
+
+
+# --- Helpers -------------------------------------------------------------
+
+def clamp01(x):
+    return max(0.0, min(1.0, x))
+
+
+def norm_calmar(c):
+    if c is None or c <= 0:
+        return 0.0
+    return clamp01(c / CAPS["calmar"])
+
+
+def norm_sortino(s):
+    if s is None or s <= 0:
+        return 0.0
+    return clamp01(s / CAPS["sortino"])
+
+
+def norm_pf(pf):
+    if pf is None or pf <= 1:
+        return 0.0
+    return clamp01((pf - 1) / (CAPS["profit_factor"] - 1))
+
+
+def norm_age(months):
+    if months is None or months <= 0:
+        return 0.0
+    return clamp01(months / CAPS["age_months"])
+
+
+def norm_trades(n):
+    if not n:
+        return 0.0
+    return clamp01(n / CAPS["trades_target"])
+
+
+def norm_months_pos(pct):
+    if pct is None:
+        return 0.0
+    return clamp01(pct / 100.0)
+
+
+def norm_decay(decay_ratio, decay_flag):
+    """1.0 = healthy (recent ≈ lifetime). 0 = dead. Flag forces 0."""
+    if decay_flag:
+        return 0.0
+    if decay_ratio is None:
+        return 0.5
+    if decay_ratio <= 0:
+        return 0.0
+    if decay_ratio >= 1.0:
+        return 1.0
+    return clamp01(decay_ratio)
+
+
+def compute_score(bot, account_balance):
+    """Returns (score_0_100, components_dict, gating_pass_dict, fails_list)."""
+    components = {
+        "calmar": norm_calmar(bot.get("calmar")),
+        "months_positive_pct": norm_months_pos(bot.get("months_positive_pct")),
+        "sortino": norm_sortino(bot.get("sortino")),
+        "decay": norm_decay(bot.get("decay_ratio"), bot.get("decay_flag")),
+        "profit_factor": norm_pf(bot.get("profit_factor")),
+        "age": norm_age(bot.get("months_active")),
+        "trade_count": norm_trades(bot.get("trades")),
+    }
+    raw = sum(components[k] * WEIGHTS[k] for k in WEIGHTS)
+    score = round(raw * 100, 1)
+
+    fails = []
+    gating = {}
+    g = GATING
+    gating["min_trades"] = (bot.get("trades", 0) or 0) >= g["min_trades"]
+    if not gating["min_trades"]:
+        fails.append(f"trades < {g['min_trades']}")
+    gating["min_months_active"] = (bot.get("months_active", 0) or 0) >= g["min_months_active"]
+    if not gating["min_months_active"]:
+        fails.append(f"meses activo < {g['min_months_active']}")
+    dd_pct = None
+    if account_balance and bot.get("max_drawdown"):
+        dd_pct = (bot["max_drawdown"] / account_balance) * 100
+    gating["dd_under_cap"] = (dd_pct is None) or (dd_pct <= g["max_drawdown_pct_of_balance"])
+    if not gating["dd_under_cap"]:
+        fails.append(f"DD {dd_pct:.1f}% > {g['max_drawdown_pct_of_balance']}%")
+    gating["net_profitable"] = (bot.get("net_profit", 0) or 0) > g["min_net_profit"]
+    if not gating["net_profitable"]:
+        fails.append("net profit ≤ 0")
+    gating["no_decay_flag"] = not (g["exclude_decay_flag"] and bot.get("decay_flag"))
+    if not gating["no_decay_flag"]:
+        fails.append("decay detectado")
+    gating["valid_magic"] = not (g["exclude_magic_zero"] and (bot.get("magic", 0) == 0))
+    if not gating["valid_magic"]:
+        fails.append("magic = 0")
+
+    all_pass = all(gating.values())
+    if not all_pass:
+        status = "NO"
+    else:
+        status = next(s for s, t in STATUS if score >= t)
+
+    return {
+        "score": score,
+        "components": {k: round(v, 3) for k, v in components.items()},
+        "gating": gating,
+        "fails": fails,
+        "status": status,
+        "dd_pct_of_balance": round(dd_pct, 2) if dd_pct is not None else None,
+    }
+
+
+def load_per_bot_series(data_dir, vps, login, magic):
+    path = os.path.join(data_dir, "bots", vps, f"{login}-{magic}.json")
+    try:
+        with open(path) as f:
+            return json.load(f).get("daily_equity_series", [])
+    except (OSError, json.JSONDecodeError):
+        return []
+
+
+def pearson(xs, ys):
+    n = min(len(xs), len(ys))
+    if n < 5:
+        return None
+    xs = xs[:n]
+    ys = ys[:n]
+    mx = sum(xs) / n
+    my = sum(ys) / n
+    num = 0.0
+    dx2 = 0.0
+    dy2 = 0.0
+    for i in range(n):
+        dx = xs[i] - mx
+        dy = ys[i] - my
+        num += dx * dy
+        dx2 += dx * dx
+        dy2 += dy * dy
+    den = math.sqrt(dx2 * dy2)
+    return (num / den) if den > 0 else None
+
+
+def build_correlation_matrix(snapshot, data_dir):
+    """Build correlation matrix from daily_equity_series of qualifying bots."""
+    bots = snapshot.get("bots", [])
+    candidates = [b for b in bots
+                  if (b.get("trades") or 0) >= MIN_CORR_TRADES
+                  and b.get("magic")
+                  and (b.get("promotion_score") is not None)]
+    candidates.sort(key=lambda b: -(b.get("promotion_score") or 0))
+    candidates = candidates[:MAX_CORR_BOTS]
+
+    series_by_bot = {}
+    for b in candidates:
+        key = f"{b['vps']}-{b['account_login']}-{b['magic']}"
+        sr = load_per_bot_series(data_dir, b["vps"], b["account_login"], b["magic"])
+        if not sr:
+            continue
+        # Build per-day daily_net dict.
+        series_by_bot[key] = {row["date"]: row.get("daily_net", 0.0) for row in sr}
+
+    keys = list(series_by_bot.keys())
+    # All unique dates in union
+    all_dates = sorted({d for sr in series_by_bot.values() for d in sr})
+
+    # Build aligned vectors (zeroes for missing days)
+    vectors = {}
+    for k in keys:
+        sr = series_by_bot[k]
+        vectors[k] = [sr.get(d, 0.0) for d in all_dates]
+
+    matrix = {}
+    for i, ki in enumerate(keys):
+        matrix[ki] = {}
+        for j, kj in enumerate(keys):
+            if i == j:
+                matrix[ki][kj] = 1.0
+            elif kj in matrix and ki in matrix[kj]:
+                matrix[ki][kj] = matrix[kj][ki]
+            else:
+                c = pearson(vectors[ki], vectors[kj])
+                matrix[ki][kj] = round(c, 3) if c is not None else None
+
+    bot_meta = {}
+    for b in candidates:
+        key = f"{b['vps']}-{b['account_login']}-{b['magic']}"
+        if key in series_by_bot:
+            bot_meta[key] = {
+                "vps": b["vps"],
+                "login": b["account_login"],
+                "magic": b["magic"],
+                "symbols": b.get("symbols", []),
+                "promotion_score": b.get("promotion_score"),
+                "promotion_status": b.get("promotion_status"),
+                "net_profit": b.get("net_profit"),
+                "trades": b.get("trades"),
+            }
+
+    return {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "bot_count": len(bot_meta),
+        "min_trades": MIN_CORR_TRADES,
+        "max_bots": MAX_CORR_BOTS,
+        "bots": bot_meta,
+        "matrix": matrix,
+    }
+
+
+def load_per_bot(data_dir, vps, login, magic):
+    path = os.path.join(data_dir, "bots", vps, f"{login}-{magic}.json")
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def percentile(sorted_xs, p):
+    if not sorted_xs:
+        return None
+    if len(sorted_xs) == 1:
+        return sorted_xs[0]
+    k = (len(sorted_xs) - 1) * p
+    lo = int(math.floor(k))
+    hi = int(math.ceil(k))
+    if lo == hi:
+        return sorted_xs[lo]
+    frac = k - lo
+    return sorted_xs[lo] * (1 - frac) + sorted_xs[hi] * frac
+
+
+def stdev(xs):
+    n = len(xs)
+    if n < 2:
+        return 0.0
+    m = sum(xs) / n
+    return math.sqrt(sum((x - m) ** 2 for x in xs) / (n - 1))
+
+
+# --- 1. Monte Carlo bootstrap stress test --------------------------------
+
+def _bootstrap_paths(nets, horizon, runs, seed):
+    """Run `runs` bootstrap simulations of length `horizon` and return
+    (sorted final_nets, sorted max_dds). Uses replacement-sampling.
+    """
+    rng = random.Random(seed)
+    final_nets = []
+    max_dds = []
+    for _ in range(runs):
+        cum = 0.0
+        peak = 0.0
+        run_max_dd = 0.0
+        for _ in range(horizon):
+            n = nets[rng.randrange(len(nets))]
+            cum += n
+            if cum > peak:
+                peak = cum
+            dd = peak - cum
+            if dd > run_max_dd:
+                run_max_dd = dd
+        final_nets.append(cum)
+        max_dds.append(run_max_dd)
+    final_nets.sort()
+    max_dds.sort()
+    return final_nets, max_dds
+
+
+def monte_carlo_stress(trades, account_balance, observed_max_dd):
+    """Bootstrap-resample trade nets to project DD distribution and ruin probability."""
+    nets = [t.get("net", 0.0) for t in trades if t.get("net") is not None]
+    if len(nets) < MC_MIN_TRADES:
+        return None
+    horizon = MC_HORIZON_TRADES or len(nets)
+    bal = account_balance or 0
+    ruin_threshold = bal * 0.5 if bal > 0 else None
+    final_nets, max_dds = _bootstrap_paths(nets, horizon, MC_RUNS, MC_SEED)
+    ruined = sum(1 for d in max_dds if ruin_threshold is not None and d >= ruin_threshold)
+
+    return {
+        "runs": MC_RUNS,
+        "horizon_trades": horizon,
+        "observed_max_dd": observed_max_dd,
+        "dd_p50": round(percentile(max_dds, 0.50), 2),
+        "dd_p95": round(percentile(max_dds, 0.95), 2),
+        "dd_p99": round(percentile(max_dds, 0.99), 2),
+        "dd_pct_balance_p95": (
+            round((percentile(max_dds, 0.95) / bal) * 100, 2)
+            if bal > 0 else None
+        ),
+        "net_p25": round(percentile(final_nets, 0.25), 2),
+        "net_p50": round(percentile(final_nets, 0.50), 2),
+        "net_p75": round(percentile(final_nets, 0.75), 2),
+        "prob_negative": round(sum(1 for n in final_nets if n < 0) / len(final_nets), 3),
+        "prob_ruin": round(ruined / MC_RUNS, 3) if ruin_threshold is not None else None,
+    }
+
+
+# --- 2. Walk-Forward / Out-of-Sample validation --------------------------
+
+def walk_forward(trades):
+    """Rolling 5-fold split. Compare per-trade Sharpe-like (mean/stdev) train vs test.
+    Plus permutation test for statistical significance of the mean.
+    """
+    nets = [t.get("net", 0.0) for t in trades if t.get("net") is not None]
+    n = len(nets)
+    if n < OOS_MIN_TRADES:
+        return None
+
+    # Adaptive folds: try max, scale down to keep fold_size >= OOS_MIN_FOLD_SIZE.
+    n_folds = OOS_FOLDS_MAX
+    while n_folds >= 2 and n // (n_folds + 1) < OOS_MIN_FOLD_SIZE:
+        n_folds -= 1
+    if n_folds < 2:
+        return None
+    fold_size = n // (n_folds + 1)
+    folds = []
+    for k in range(1, n_folds + 1):
+        train_end = k * fold_size
+        test_end = min((k + 1) * fold_size, n)
+        train = nets[:train_end]
+        test = nets[train_end:test_end]
+        if len(test) < OOS_MIN_FOLD_SIZE or len(train) < OOS_MIN_FOLD_SIZE:
+            continue
+        m_tr = sum(train) / len(train)
+        s_tr = stdev(train) or 1e-9
+        m_te = sum(test) / len(test)
+        s_te = stdev(test) or 1e-9
+        sharpe_tr = m_tr / s_tr
+        sharpe_te = m_te / s_te
+        folds.append({
+            "k": k,
+            "train_n": len(train),
+            "test_n": len(test),
+            "sharpe_train": round(sharpe_tr, 3),
+            "sharpe_test": round(sharpe_te, 3),
+            "test_net": round(sum(test), 2),
+            "test_profitable": sum(test) > 0,
+        })
+    if not folds:
+        return None
+
+    avg_sharpe_train = sum(f["sharpe_train"] for f in folds) / len(folds)
+    avg_sharpe_test = sum(f["sharpe_test"] for f in folds) / len(folds)
+    decay = (avg_sharpe_test / avg_sharpe_train) if avg_sharpe_train > 0 else 0.0
+    pct_test_profitable = sum(1 for f in folds if f["test_profitable"]) / len(folds) * 100
+
+    # Permutation test on full series mean.
+    rng = random.Random(MC_SEED + 1)
+    obs_mean = sum(nets) / n
+    abs_nets = [abs(x) for x in nets]
+    ge = 0
+    for _ in range(OOS_PERM_TRIALS):
+        s = 0.0
+        for v in abs_nets:
+            s += v if rng.random() < 0.5 else -v
+        if (s / n) >= obs_mean:
+            ge += 1
+    p_value = ge / OOS_PERM_TRIALS
+
+    # Score 0-1 combining decay and OOS profitability.
+    decay_norm = clamp01(decay)
+    oos_score = 0.5 * decay_norm + 0.5 * (pct_test_profitable / 100.0)
+
+    return {
+        "n_folds": n_folds,
+        "fold_size": fold_size,
+        "folds": folds,
+        "avg_sharpe_train": round(avg_sharpe_train, 3),
+        "avg_sharpe_test": round(avg_sharpe_test, 3),
+        "sharpe_decay": round(decay, 3),
+        "pct_folds_test_profitable": round(pct_test_profitable, 1),
+        "permutation_p_value": round(p_value, 4),
+        "is_significant": p_value < 0.05,
+        "oos_score": round(oos_score, 3),
+    }
+
+
+# --- 3. Forward Tracker (append-only history) ----------------------------
+
+def update_forward_tracker(snap, data_dir, today_iso):
+    """Append today's snapshot of every READY/NEAR bot to candidates_history.jsonl
+    and compute tracker metrics (days_since_first_seen, net_since, expected band).
+    """
+    history_path = os.path.join(data_dir, "candidates_history.jsonl")
+    history = []
+    if os.path.exists(history_path):
+        with open(history_path) as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    try:
+                        history.append(json.loads(line))
+                    except json.JSONDecodeError:
+                        pass
+
+    by_key = {}
+    for row in history:
+        k = (row.get("vps"), row.get("login"), row.get("magic"))
+        by_key.setdefault(k, []).append(row)
+
+    today_only = today_iso[:10]
+    appended = 0
+    with open(history_path, "a") as f:
+        for b in snap.get("bots", []):
+            status = b.get("promotion_status")
+            if status not in PORTFOLIO_MIN_STATUS:
+                continue
+            k = (b.get("vps"), b.get("account_login"), b.get("magic"))
+            existing = by_key.get(k, [])
+            if existing and existing[-1].get("date", "")[:10] == today_only:
+                continue  # already logged today
+            row = {
+                "date": today_iso,
+                "vps": b.get("vps"),
+                "login": b.get("account_login"),
+                "magic": b.get("magic"),
+                "status": status,
+                "score": b.get("promotion_score"),
+                "net_profit": b.get("net_profit"),
+                "trades": b.get("trades"),
+            }
+            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+            by_key.setdefault(k, []).append(row)
+            appended += 1
+
+    # Build tracker block per bot — embed first-seen + verdict directly into bot.
+    tracked = 0
+    for b in snap.get("bots", []):
+        k = (b.get("vps"), b.get("account_login"), b.get("magic"))
+        rows = by_key.get(k, [])
+        if not rows:
+            continue
+        first = rows[0]
+        first_date = first.get("date", "")[:10]
+        if not first_date:
+            continue
+        try:
+            d_first = datetime.fromisoformat(first_date)
+            d_today = datetime.fromisoformat(today_only)
+            days_since = (d_today - d_first).days
+        except ValueError:
+            continue
+        net_at_first = first.get("net_profit") or 0
+        current_net = b.get("net_profit") or 0
+        net_since = current_net - net_at_first
+
+        # Recompute bootstrap MC at the EXACT trades-expected for the elapsed period
+        # (linear scaling of MC quantiles is statistically wrong — risk scales as sqrt(t)).
+        verdict = None
+        expected_p25 = None
+        expected_p75 = None
+        expected_p50 = None
+        trades_count = b.get("trades") or 0
+        months_active = b.get("months_active") or 0
+        if trades_count >= MC_MIN_TRADES and months_active and days_since > 0:
+            per = load_per_bot(data_dir, b.get("vps"), b.get("account_login"), b.get("magic"))
+            trade_list = (per or {}).get("trades") or []
+            nets = [t.get("net", 0.0) for t in trade_list if t.get("net") is not None]
+            if len(nets) >= MC_MIN_TRADES:
+                # Expected trades during elapsed period, from historical frequency.
+                trades_per_day = len(nets) / max(1.0, months_active * 30.0)
+                expected_horizon = max(1, int(round(trades_per_day * days_since)))
+                # Use distinct seed per bot+date so we get fresh randomness day-to-day.
+                seed = MC_SEED ^ (b.get("magic") or 0) ^ hash(today_only) & 0x7FFFFFFF
+                fn_sorted, _ = _bootstrap_paths(nets, expected_horizon, 1000, seed)
+                expected_p25 = round(percentile(fn_sorted, 0.25), 2)
+                expected_p50 = round(percentile(fn_sorted, 0.50), 2)
+                expected_p75 = round(percentile(fn_sorted, 0.75), 2)
+            if days_since < 7:
+                verdict = "TOO_SOON"
+            elif expected_p25 is None:
+                verdict = None
+            elif net_since >= expected_p75:
+                verdict = "ABOVE"
+            elif net_since >= expected_p25:
+                verdict = "ON_TRACK"
+            else:
+                verdict = "BELOW"
+        b["tracker"] = {
+            "first_seen_date": first_date,
+            "first_seen_status": first.get("status"),
+            "days_since_first_seen": days_since,
+            "net_since_first_seen": round(net_since, 2),
+            "expected_p25": expected_p25,
+            "expected_p50": expected_p50,
+            "expected_p75": expected_p75,
+            "verdict": verdict,
+            "history_points": len(rows),
+            "method": "bootstrap MC at expected-trades horizon (1000 runs)",
+        }
+        tracked += 1
+
+    return {"appended": appended, "tracked": tracked}
+
+
+# --- 5. Regime / temporal robustness analysis ---------------------------
+
+def regime_analysis(trades):
+    """Without external OHLC, measure temporal robustness using close_time:
+      - Performance by day of week (Mon-Fri)
+      - Performance by hour of day (UTC, 0-23)
+      - Performance by trade duration bucket
+      - Concentration (Herfindahl): how concentrated is PnL in few buckets?
+    A bot whose net comes from one hour is fragile; one spread across hours is robust.
+    """
+    if not trades or len(trades) < 20:
+        return None
+
+    by_dow = {i: {"trades": 0, "wins": 0, "net": 0.0} for i in range(7)}
+    by_hour = {i: {"trades": 0, "wins": 0, "net": 0.0} for i in range(24)}
+    duration_buckets = [
+        ("<1h", 0, 3600),
+        ("1-6h", 3600, 21600),
+        ("6-24h", 21600, 86400),
+        (">24h", 86400, 10**9),
+    ]
+    by_dur = {label: {"trades": 0, "wins": 0, "net": 0.0} for label, _, _ in duration_buckets}
+
+    total_net = 0.0
+    counted = 0
+    for t in trades:
+        close_ts = t.get("close_time")
+        net = t.get("net")
+        if close_ts is None or net is None:
+            continue
+        try:
+            dt = datetime.fromtimestamp(close_ts, tz=timezone.utc)
+        except (ValueError, OSError, OverflowError):
+            continue
+        dow = dt.weekday()
+        hour = dt.hour
+        by_dow[dow]["trades"] += 1
+        by_dow[dow]["net"] += net
+        if net > 0:
+            by_dow[dow]["wins"] += 1
+        by_hour[hour]["trades"] += 1
+        by_hour[hour]["net"] += net
+        if net > 0:
+            by_hour[hour]["wins"] += 1
+        dur = t.get("duration_sec") or 0
+        for label, lo, hi in duration_buckets:
+            if lo <= dur < hi:
+                by_dur[label]["trades"] += 1
+                by_dur[label]["net"] += net
+                if net > 0:
+                    by_dur[label]["wins"] += 1
+                break
+        total_net += net
+        counted += 1
+
+    if counted < 20:
+        return None
+
+    # Herfindahl concentration (positive PnL only): sum((net_i / total_pos)^2)
+    pos_dow = [v["net"] for v in by_dow.values() if v["net"] > 0]
+    pos_hour = [v["net"] for v in by_hour.values() if v["net"] > 0]
+    pos_dur = [v["net"] for v in by_dur.values() if v["net"] > 0]
+    def herfindahl(xs):
+        s = sum(xs)
+        if s <= 0:
+            return None
+        return round(sum((x / s) ** 2 for x in xs), 3)
+    herf_dow = herfindahl(pos_dow)
+    herf_hour = herfindahl(pos_hour)
+    herf_dur = herfindahl(pos_dur)
+
+    # Robustness score: lower Herfindahl (more spread) = higher robustness.
+    # H ranges from 1/N (perfectly spread) to 1.0 (all in one bucket).
+    def robustness(h, n_buckets):
+        if h is None:
+            return 0.0
+        ideal = 1.0 / n_buckets
+        # Map h ∈ [ideal, 1.0] → robustness ∈ [1.0, 0.0]
+        return clamp01((1.0 - h) / (1.0 - ideal)) if ideal < 1 else 0.0
+    rob_dow = robustness(herf_dow, 5)
+    rob_hour = robustness(herf_hour, 24)
+    rob_dur = robustness(herf_dur, 4)
+    overall = round((rob_dow + rob_hour + rob_dur) / 3, 3)
+
+    def fmt_bucket(d):
+        return {
+            k: {
+                "trades": v["trades"],
+                "win_rate_pct": round(v["wins"] / v["trades"] * 100, 1) if v["trades"] else 0,
+                "net": round(v["net"], 2),
+            } for k, v in d.items()
+        }
+
+    return {
+        "by_day_of_week": fmt_bucket(by_dow),
+        "by_hour_utc": fmt_bucket(by_hour),
+        "by_duration": fmt_bucket(by_dur),
+        "herfindahl_dow": herf_dow,
+        "herfindahl_hour": herf_hour,
+        "herfindahl_duration": herf_dur,
+        "robustness_score": overall,
+        "interpretation": (
+            "ALTA robustez temporal" if overall >= 0.7 else
+            "MEDIA robustez temporal" if overall >= 0.5 else
+            "BAJA robustez (concentración alta)"
+        ),
+    }
+
+
+# --- Institutional metrics (CVaR, Ulcer, K-Ratio, SQN, Tail, Autocorr) --
+
+def _linreg_slope_se(ys):
+    """Simple OLS over y = a + b*t, t = 0..n-1. Returns (slope, stderr_of_slope, n)."""
+    n = len(ys)
+    if n < 5:
+        return None
+    xs = list(range(n))
+    mx = sum(xs) / n
+    my = sum(ys) / n
+    sxx = sum((x - mx) ** 2 for x in xs)
+    if sxx <= 0:
+        return None
+    sxy = sum((xs[i] - mx) * (ys[i] - my) for i in range(n))
+    slope = sxy / sxx
+    intercept = my - slope * mx
+    resid = [ys[i] - (intercept + slope * xs[i]) for i in range(n)]
+    rss = sum(r * r for r in resid)
+    if n - 2 <= 0:
+        return None
+    sigma2 = rss / (n - 2)
+    se_slope = math.sqrt(sigma2 / sxx) if sigma2 > 0 else 0.0
+    return slope, se_slope, n
+
+
+def institutional_metrics(daily_series, trades, account_balance):
+    """5 métricas faltantes para due-diligence institucional:
+      - cvar_95_pct: pérdida promedio diaria en peor 5% de días, % del balance
+      - ulcer_index_pct: RMS del DD% (profundidad × duración)
+      - martin_ratio: net annualized / Ulcer Index (variante superior a Calmar)
+      - k_ratio: linealidad de la equity curve (slope/SE × √n/n)
+      - sqn: System Quality Number (Van Tharp) sobre R-multiples = √N × mean/std
+      - tail_ratio: P95(daily_ret) / |P5(daily_ret)|. <1 = "vender opciones"
+      - return_autocorr_lag1: clustering de pérdidas (>0.2 invalida MC IID)
+    """
+    out = {
+        "cvar_95_pct": None,
+        "ulcer_index_pct": None,
+        "martin_ratio": None,
+        "k_ratio": None,
+        "sqn": None,
+        "sqn_band": None,
+        "tail_ratio": None,
+        "return_autocorr_lag1": None,
+        "interpretation": {},
+    }
+
+    # --- Daily-series-based metrics (CVaR, Ulcer, K-Ratio, Tail, Autocorr)
+    if daily_series and len(daily_series) >= 10:
+        daily_nets = [row.get("daily_net", 0.0) or 0.0 for row in daily_series]
+        dd_pcts = [row.get("dd_pct", 0.0) or 0.0 for row in daily_series]
+        cum_nets = [row.get("cum_net", 0.0) or 0.0 for row in daily_series]
+        n = len(daily_nets)
+        bal = account_balance or 0
+
+        # CVaR 95% — average loss in worst 5% of days, expressed as % balance
+        if bal > 0:
+            sorted_nets = sorted(daily_nets)
+            worst_count = max(1, int(math.ceil(n * 0.05)))
+            worst_slice = sorted_nets[:worst_count]
+            cvar = sum(worst_slice) / worst_count   # negative number = loss
+            out["cvar_95_pct"] = round(cvar / bal * 100, 3)
+
+        # Ulcer Index — RMS de dd_pct
+        if dd_pcts:
+            ui = math.sqrt(sum(d * d for d in dd_pcts) / len(dd_pcts))
+            out["ulcer_index_pct"] = round(ui, 3)
+            # Martin Ratio — net annualized return / Ulcer.
+            # Annualized return: net_total / balance × (365/days_active) × 100.
+            if bal > 0 and ui > 0 and n > 0:
+                net_total = cum_nets[-1] if cum_nets else 0.0
+                ann_return_pct = (net_total / bal) * (365.0 / n) * 100.0
+                out["martin_ratio"] = round(ann_return_pct / ui, 3)
+
+        # K-Ratio (Kestner modified) — linealidad de la curva cum_net
+        lr = _linreg_slope_se(cum_nets) if cum_nets else None
+        if lr is not None:
+            slope, se, nn = lr
+            if se > 0:
+                out["k_ratio"] = round((slope / se) * math.sqrt(nn) / nn, 3)
+
+        # Tail Ratio — daily returns como % del balance, para que sea adimensional
+        if bal > 0 and n >= 20:
+            rets = sorted([dn / bal for dn in daily_nets])
+            p5 = percentile(rets, 0.05)
+            p95 = percentile(rets, 0.95)
+            if p5 is not None and p95 is not None and p5 < 0:
+                out["tail_ratio"] = round(p95 / abs(p5), 3)
+
+        # Autocorrelación lag-1 sobre returns diarios
+        if n >= 20:
+            xs = daily_nets[:-1]
+            ys = daily_nets[1:]
+            ac = pearson(xs, ys)
+            if ac is not None:
+                out["return_autocorr_lag1"] = round(ac, 3)
+
+    # --- Trade-based metric (SQN)
+    nets = [t.get("net", 0.0) or 0.0 for t in (trades or []) if t.get("net") is not None]
+    if len(nets) >= 30:
+        m = sum(nets) / len(nets)
+        s = stdev(nets)
+        if s > 0:
+            sqn = math.sqrt(len(nets)) * m / s
+            out["sqn"] = round(sqn, 2)
+            if sqn < 1.6:
+                out["sqn_band"] = "MALO"
+            elif sqn < 2.0:
+                out["sqn_band"] = "PROMEDIO"
+            elif sqn < 3.0:
+                out["sqn_band"] = "BUENO"
+            elif sqn < 5.0:
+                out["sqn_band"] = "EXCELENTE"
+            elif sqn < 7.0:
+                out["sqn_band"] = "SANTO_GRIAL"
+            else:
+                out["sqn_band"] = "SOSPECHOSO_OVERFIT"
+
+    # --- Interpretation block (UI helper, no impact on gating)
+    interp = {}
+    if out["cvar_95_pct"] is not None:
+        c = out["cvar_95_pct"]
+        interp["cvar_95"] = (
+            "🟢 Cola benigna" if c > -1.0 else
+            "🟡 Cola moderada" if c > -3.0 else
+            "🟠 Cola grande" if c > -6.0 else
+            "🔴 Cola peligrosa"
+        )
+    if out["ulcer_index_pct"] is not None:
+        u = out["ulcer_index_pct"]
+        interp["ulcer"] = (
+            "🟢 DD plano" if u < 1.0 else
+            "🟡 DD aceptable" if u < 3.0 else
+            "🟠 Agonía moderada" if u < 6.0 else
+            "🔴 Agonía severa"
+        )
+    if out["k_ratio"] is not None:
+        k = out["k_ratio"]
+        interp["k_ratio"] = (
+            "🟢 Curva lineal (edge real)" if k > 0.20 else
+            "🟡 Curva consistente" if k > 0.10 else
+            "🟠 Crecimiento irregular" if k > 0.0 else
+            "🔴 Sin tendencia o decreciente"
+        )
+    if out["tail_ratio"] is not None:
+        t = out["tail_ratio"]
+        interp["tail_ratio"] = (
+            "🟢 Asimetría favorable" if t >= 1.2 else
+            "🟡 Simétrico" if t >= 0.85 else
+            "🟠 Asimetría adversa" if t >= 0.7 else
+            "🔴 Vender opciones (peligroso)"
+        )
+    if out["return_autocorr_lag1"] is not None:
+        a = out["return_autocorr_lag1"]
+        interp["autocorr"] = (
+            "🟢 Independiente (MC válido)" if abs(a) < 0.15 else
+            "🟡 Clustering leve" if a < 0.30 else
+            "🔴 Clustering severo (MC subestima DD)"
+        ) if a >= 0 else (
+            "🟢 Anti-correlado (mean-revert)"
+        )
+    out["interpretation"] = interp
+    return out
+
+
+# --- 4. Portfolio Optimizer (Risk Parity / Inv-Vol / Equal) -------------
+
+def build_portfolio(snap, data_dir):
+    """Compute risk-parity, inverse-volatility, and equal-weight allocations
+    over the top N (READY/NEAR) candidates by promotion_score.
+    """
+    bots = [b for b in snap.get("bots", [])
+            if b.get("promotion_status") in PORTFOLIO_MIN_STATUS
+            and b.get("magic")]
+    bots.sort(key=lambda b: -(b.get("promotion_score") or 0))
+    bots = bots[:PORTFOLIO_MAX_BOTS]
+    if not bots:
+        return None
+
+    # Pull daily series stdevs.
+    bot_data = []
+    for b in bots:
+        sr = load_per_bot_series(data_dir, b["vps"], b["account_login"], b["magic"])
+        daily_nets = [row.get("daily_net", 0.0) for row in sr]
+        s = stdev(daily_nets)
+        if s <= 0:
+            continue
+        mean_daily = sum(daily_nets) / len(daily_nets) if daily_nets else 0
+        bot_data.append({
+            "key": f"{b['vps']}-{b['account_login']}-{b['magic']}",
+            "vps": b["vps"],
+            "login": b["account_login"],
+            "magic": b["magic"],
+            "symbols": b.get("symbols", []),
+            "score": b.get("promotion_score"),
+            "status": b.get("promotion_status"),
+            "net_profit": b.get("net_profit"),
+            "trades": b.get("trades"),
+            "daily_stdev": s,
+            "daily_mean": mean_daily,
+            "annualized_return_pct": round(mean_daily * 252 / max(1, b.get("max_drawdown") or 1), 3),
+        })
+    if not bot_data:
+        return None
+
+    # Inverse volatility weights (= risk parity if assets uncorrelated).
+    inv_vols = [1.0 / b["daily_stdev"] for b in bot_data]
+    s_inv = sum(inv_vols)
+    inv_vol_weights = [w / s_inv for w in inv_vols]
+
+    # Equal weight.
+    n = len(bot_data)
+    equal_weights = [1.0 / n] * n
+
+    # Score-weighted (proportional to promotion_score).
+    score_sum = sum((b["score"] or 0) for b in bot_data) or 1.0
+    score_weights = [(b["score"] or 0) / score_sum for b in bot_data]
+
+    allocations = {}
+    for cap in PORTFOLIO_CAPITALS:
+        allocations[str(cap)] = {
+            "inverse_volatility": [
+                {**bot_data[i], "weight": round(w, 4), "capital_usd": round(cap * w, 2)}
+                for i, w in enumerate(inv_vol_weights)
+            ],
+            "equal_weight": [
+                {**bot_data[i], "weight": round(w, 4), "capital_usd": round(cap * w, 2)}
+                for i, w in enumerate(equal_weights)
+            ],
+            "score_weighted": [
+                {**bot_data[i], "weight": round(w, 4), "capital_usd": round(cap * w, 2)}
+                for i, w in enumerate(score_weights)
+            ],
+        }
+
+    return {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "n_bots": len(bot_data),
+        "method_default": "inverse_volatility",
+        "capitals": PORTFOLIO_CAPITALS,
+        "allocations": allocations,
+        "notes": "Risk parity ≈ inverse volatility when correlation ≈ 0. Equal weight = naive baseline. Score weighted = bias toward Promotion Score.",
+    }
+
+
+# --- 6. Bayesian shrinkage (cohort-adjusted) -----------------------------
+
+def _primary_symbol(bot):
+    syms = bot.get("symbols") or []
+    if not syms:
+        return None
+    # Strip broker suffix (e.g., "EURUSD.b" → "EURUSD")
+    return syms[0].split(".")[0].upper()
+
+
+def _age_bucket(months_active):
+    if not months_active:
+        return 0
+    for b in SHRINKAGE_AGE_BUCKETS:
+        if months_active <= b:
+            return b
+    return SHRINKAGE_AGE_BUCKETS[-1] + 1
+
+
+def _cohort_key(bot):
+    return (_primary_symbol(bot), _age_bucket(bot.get("months_active") or 0))
+
+
+def compute_shrunk_scores(snap):
+    """Empirical-Bayes shrinkage of promotion_score toward cohort prior.
+
+    Cohort = (primary_symbol, age_bucket). Shrinkage weight w = n_eff / (n_eff + k0)
+    where n_eff = sqrt(trades * months_active). Bots with low n_eff get pulled
+    hard toward the cohort mean (kills survivorship-by-luck on small samples).
+
+    Mutates each bot in-place adding:
+      - promotion_score_raw (original, never overwritten thereafter)
+      - promotion_score_shrunk (final)
+      - promotion_score (= shrunk; UI keeps using this field)
+      - shrinkage_meta = {cohort, cohort_n, cohort_prior, global_prior, n_eff, w, delta}
+      - promotion_status recomputed from shrunk score (gating preserved).
+    """
+    bots = snap.get("bots", [])
+    if not bots:
+        return None
+
+    # Use only gating-passing bots to compute priors (avoid bias from broken bots).
+    eligible = [b for b in bots if all((b.get("promotion_gating") or {}).values())
+                and b.get("promotion_score") is not None]
+    if not eligible:
+        return None
+
+    # Global prior: trades-weighted mean of eligible scores.
+    total_w = 0.0
+    weighted = 0.0
+    for b in eligible:
+        w = max(1, b.get("trades") or 1)
+        weighted += (b["promotion_score"]) * w
+        total_w += w
+    global_prior = weighted / total_w if total_w > 0 else 0.0
+
+    # Cohort priors (trades-weighted within cohort).
+    by_cohort = {}
+    for b in eligible:
+        ck = _cohort_key(b)
+        by_cohort.setdefault(ck, []).append(b)
+    cohort_prior = {}
+    for ck, members in by_cohort.items():
+        if len(members) < SHRINKAGE_MIN_COHORT:
+            continue
+        tw = sum(max(1, m.get("trades") or 1) for m in members)
+        cp = sum((m["promotion_score"]) * max(1, m.get("trades") or 1) for m in members) / tw
+        cohort_prior[ck] = {"prior": cp, "n": len(members)}
+
+    # Shrink every bot. CRITICAL: shrunk is a CONFIDENCE OVERLAY, not the
+    # primary status driver. promotion_score / promotion_status remain anchored
+    # to the raw score (which already passes hard gating), so the existing
+    # READY/NEAR/WATCH pyramid stays intact and the dashboard shows real
+    # candidates. The shrunk value + delta are surfaced as a separate
+    # confidence indicator (visible in Score tab + Query DSL).
+    promoted_counts = {}
+    for b in bots:
+        raw = b.get("promotion_score")
+        if raw is None:
+            continue
+        b.setdefault("promotion_score_raw", raw)
+        ck = _cohort_key(b)
+        cp = cohort_prior.get(ck)
+        prior_used = cp["prior"] if cp else global_prior
+        cohort_n = cp["n"] if cp else 0
+        n_eff = math.sqrt(max(1, b.get("trades") or 1) * max(1, b.get("months_active") or 1))
+        w = n_eff / (n_eff + SHRINKAGE_K0)
+        shrunk = w * raw + (1 - w) * prior_used
+        shrunk = round(shrunk, 1)
+        delta = round(shrunk - raw, 2)
+        # Confidence label: how aligned is the shrunk vs raw (small |delta| = high confidence).
+        if abs(delta) < 2:
+            confidence = "HIGH"
+        elif abs(delta) < 5:
+            confidence = "MEDIUM"
+        else:
+            confidence = "LOW"
+        b["promotion_score_shrunk"] = shrunk
+        # promotion_score stays = raw; do NOT overwrite (preserves original status pyramid).
+        b["shrinkage_meta"] = {
+            "cohort_key": f"{ck[0] or '∅'}/{ck[1]}",
+            "cohort_n": cohort_n,
+            "cohort_prior_used": cp is not None,
+            "prior_value": round(prior_used, 2),
+            "global_prior": round(global_prior, 2),
+            "n_eff": round(n_eff, 2),
+            "weight_observed": round(w, 3),
+            "weight_prior": round(1 - w, 3),
+            "delta": delta,
+            "confidence": confidence,
+        }
+        promoted_counts[b.get("promotion_status") or "?"] = promoted_counts.get(b.get("promotion_status") or "?", 0) + 1
+
+    return {
+        "global_prior": round(global_prior, 2),
+        "cohorts_with_prior": len(cohort_prior),
+        "cohorts_total": len(by_cohort),
+        "k0": SHRINKAGE_K0,
+        "status_counts_post_shrinkage": promoted_counts,
+    }
+
+
+# --- 7. Drift Watchdog (Page-Hinkley over daily_net) ---------------------
+
+def page_hinkley_drift(daily_series):
+    """Sequential change-point detection over `daily_net`.
+    Returns dict with breakpoint info or None if insufficient data / no drift.
+    """
+    if not daily_series or len(daily_series) < PH_MIN_DAYS:
+        return None
+    nets = [row.get("daily_net", 0.0) or 0.0 for row in daily_series]
+    dates = [row.get("date") for row in daily_series]
+    n = len(nets)
+
+    sd = stdev(nets)
+    if sd <= 0:
+        return None
+    lam = PH_LAMBDA_FACTOR * sd
+
+    # Running estimate of mean (cumulative).
+    running_mean = nets[0]
+    cum_dev = 0.0
+    cum_min = 0.0
+    breakpoint_idx = None
+    breakpoint_severity = 0.0
+    for i in range(1, n):
+        running_mean = running_mean + (nets[i] - running_mean) / (i + 1)
+        # Negative-direction drift: detect when daily_net falls persistently below mean.
+        cum_dev += (nets[i] - running_mean - PH_DELTA)
+        if cum_dev > 0:
+            cum_dev = 0.0
+            cum_min = 0.0
+            continue
+        if cum_dev < cum_min:
+            cum_min = cum_dev
+        gap = -cum_dev - (-cum_min)  # always >=0
+        # Page-Hinkley fires when the descending excursion crosses lambda.
+        excursion = abs(cum_min)
+        if excursion > lam and breakpoint_idx is None:
+            breakpoint_idx = i
+            breakpoint_severity = round(excursion / lam, 2)
+            break
+
+    if breakpoint_idx is None:
+        return {
+            "flag": False,
+            "lambda": round(lam, 4),
+            "stdev_daily": round(sd, 4),
+            "n_days": n,
+        }
+
+    bp_date = dates[breakpoint_idx]
+    before = nets[:breakpoint_idx]
+    after = nets[breakpoint_idx:]
+    before_sum = sum(before)
+    after_sum = sum(after)
+    days_before = len(before)
+    days_after = len(after)
+    before_per_day = before_sum / max(1, days_before)
+    after_per_day = after_sum / max(1, days_after)
+    today_iso = datetime.now(timezone.utc).date().isoformat()
+    days_since_break = None
+    try:
+        d_bp = datetime.fromisoformat(bp_date).date()
+        d_today = datetime.fromisoformat(today_iso).date()
+        days_since_break = (d_today - d_bp).days
+    except (ValueError, TypeError):
+        pass
+
+    return {
+        "flag": True,
+        "breakpoint_date": bp_date,
+        "breakpoint_idx": breakpoint_idx,
+        "severity": breakpoint_severity,           # excursion / lambda (1.0 = exact threshold)
+        "lambda": round(lam, 4),
+        "stdev_daily": round(sd, 4),
+        "n_days": n,
+        "days_before": days_before,
+        "days_after": days_after,
+        "days_since_break": days_since_break,
+        "net_before_per_day": round(before_per_day, 4),
+        "net_after_per_day": round(after_per_day, 4),
+        "net_delta_per_day": round(after_per_day - before_per_day, 4),
+        "interpretation": (
+            "DRIFT SEVERO" if breakpoint_severity >= 2.0 else
+            "DRIFT MODERADO" if breakpoint_severity >= 1.3 else
+            "DRIFT INCIPIENTE"
+        ),
+    }
+
+
+# --- 8. Capacity Forecaster + Real-vs-Demo divergence --------------------
+
+def _liquidity_tier_for(bot):
+    sym = _primary_symbol(bot)
+    if not sym:
+        return 3
+    if sym in LIQUIDITY_TIER:
+        return LIQUIDITY_TIER[sym]
+    # Heuristics for unmapped symbols.
+    if sym.startswith(("XAU", "XAG", "OIL", "BRENT", "WTI")):
+        return 3
+    if "JPY" in sym or "EUR" in sym or "GBP" in sym or "USD" in sym:
+        return 2
+    return 3
+
+
+def compute_capacity(bot, trades):
+    """Estimate USD capacity before slippage degrades the strategy.
+
+    Heuristic: capacity is bounded by how much volume the bot pushes per unit
+    time on its primary symbol. The faster the cadence and the lower the
+    liquidity tier, the smaller the safe capital.
+
+    capacity_usd = base_tier × liquidity_factor × pace_factor × position_factor
+
+    where pace_factor ↓ as trades_per_day ↑ (scalpers cap lower) and
+          position_factor ↓ as avg_volume → broker-typical maxima.
+    """
+    if not trades:
+        return None
+    tier = _liquidity_tier_for(bot)
+    base = TIER_BASE_CAPACITY[tier]
+    liq = TIER_LIQUIDITY_FACTOR[tier]
+
+    months = bot.get("months_active") or 1
+    n_trades = bot.get("trades") or len(trades)
+    days_active = max(1.0, months * 30.0)
+    trades_per_day = n_trades / days_active
+
+    durations = [t.get("duration_sec", 0) or 0 for t in trades]
+    durations = [d for d in durations if d > 0]
+    avg_dur_h = (sum(durations) / len(durations) / 3600.0) if durations else 24.0
+
+    volumes = [t.get("volume", 0) or 0 for t in trades if t.get("volume")]
+    avg_vol = sum(volumes) / len(volumes) if volumes else 0.01
+
+    # Pace factor: scalpers (>10 trades/day) capped harder than swing (<1/day).
+    if trades_per_day >= 20:
+        pace_factor = 0.10
+    elif trades_per_day >= 10:
+        pace_factor = 0.25
+    elif trades_per_day >= 3:
+        pace_factor = 0.50
+    elif trades_per_day >= 1:
+        pace_factor = 0.75
+    else:
+        pace_factor = 1.0
+
+    # Position factor: 0.01 lot baseline = 1.0; degrades as you scale.
+    # Avg lot 0.05 → 0.8; 0.10 → 0.6; 0.50 → 0.3; 1.0+ → 0.15.
+    if avg_vol <= 0.02:
+        position_factor = 1.0
+    elif avg_vol <= 0.05:
+        position_factor = 0.8
+    elif avg_vol <= 0.10:
+        position_factor = 0.6
+    elif avg_vol <= 0.50:
+        position_factor = 0.3
+    else:
+        position_factor = 0.15
+
+    capacity = base * liq * pace_factor * position_factor
+    # Confidence band: ±35%.
+    cap_low = round(capacity * 0.65, 0)
+    cap_high = round(capacity * 1.35, 0)
+
+    return {
+        "capacity_usd": round(capacity, 0),
+        "capacity_usd_low": cap_low,
+        "capacity_usd_high": cap_high,
+        "tier": tier,
+        "tier_label": ["", "Major", "Minor/Cross", "Exotic/Metals"][tier],
+        "trades_per_day": round(trades_per_day, 2),
+        "avg_duration_hours": round(avg_dur_h, 2),
+        "avg_volume_lots": round(avg_vol, 3),
+        "pace_factor": pace_factor,
+        "liquidity_factor": liq,
+        "position_factor": position_factor,
+        "verdict": (
+            "🟢 ESCALABLE" if capacity >= 50000 else
+            "🟡 CAPACIDAD MEDIA" if capacity >= 15000 else
+            "🟠 CAPACIDAD LIMITADA" if capacity >= 5000 else
+            "🔴 NO ESCALABLE"
+        ),
+    }
+
+
+def detect_real_accounts(snap):
+    """Return set of (vps, login) tuples for accounts flagged as real."""
+    real = set()
+    for a in snap.get("accounts", []):
+        # Heuristic: balance_kind, account_type, is_real, or explicit known reals.
+        kind = (a.get("account_kind") or a.get("type") or "").lower()
+        if "real" in kind or a.get("is_real"):
+            real.add((a.get("vps"), a.get("login")))
+            continue
+        # Project-known real accounts (VPS5).
+        if a.get("vps") == "vps5" and a.get("login") in (25425, 32081):
+            real.add((a.get("vps"), a.get("login")))
+    return real
+
+
+def compute_real_vs_demo_divergence(bot, real_accounts):
+    """If the bot runs on a real account AND a same-magic twin runs on demo,
+    surface a comparison block. For now we only know magic+symbols match;
+    twins are flagged but no per-trade matching (requires sync ts which broker
+    differs slightly). This emits the structural block for the UI to render.
+    """
+    key = (bot.get("vps"), bot.get("account_login"))
+    if key not in real_accounts:
+        return None
+    return {
+        "is_real": True,
+        "magic": bot.get("magic"),
+        "primary_symbol": _primary_symbol(bot),
+        "real_trades": bot.get("trades"),
+        "real_net_profit": bot.get("net_profit"),
+        "real_wr": bot.get("win_rate_pct"),
+        "real_pf": bot.get("profit_factor"),
+        "note": "Bot operando con dinero real. Para detectar divergencia se requiere magic gemelo en demo (mismo periodo).",
+    }
+
+
+# --- 9. Underwater analysis (top drawdowns + recovery) ------------------
+
+def underwater_analysis(daily_series, account_balance):
+    """Episodes of underwater equity (peak → recover). Top 10 by depth.
+
+    Returns dict with top_drawdowns[], pain_index_pct, longest_underwater_days,
+    recovery_factor_proper, n_episodes.
+    """
+    if not daily_series or len(daily_series) < 10:
+        return None
+
+    episodes = []
+    in_dd = False
+    ep = None
+    for i, pt in enumerate(daily_series):
+        dd_abs = pt.get("dd_abs") or 0
+        dd_pct = pt.get("dd_pct") or 0
+        if dd_abs > 0 and not in_dd:
+            in_dd = True
+            ep = {
+                "start_date": pt.get("date"), "start_idx": i,
+                "max_dd_abs": dd_abs, "max_dd_pct": dd_pct,
+                "max_dd_date": pt.get("date"), "max_dd_idx": i,
+            }
+        elif in_dd:
+            if dd_abs > ep["max_dd_abs"]:
+                ep["max_dd_abs"] = dd_abs
+                ep["max_dd_pct"] = dd_pct
+                ep["max_dd_date"] = pt.get("date")
+                ep["max_dd_idx"] = i
+            if dd_abs == 0:
+                in_dd = False
+                ep["end_date"] = pt.get("date")
+                ep["end_idx"] = i
+                ep["underwater_days"] = i - ep["start_idx"]
+                ep["recovery_days"] = i - ep["max_dd_idx"]
+                ep["ongoing"] = False
+                episodes.append(ep)
+                ep = None
+
+    if in_dd and ep is not None:
+        last = daily_series[-1]
+        ep["end_date"] = last.get("date")
+        ep["end_idx"] = len(daily_series) - 1
+        ep["underwater_days"] = ep["end_idx"] - ep["start_idx"]
+        ep["recovery_days"] = None
+        ep["ongoing"] = True
+        episodes.append(ep)
+
+    episodes_sorted = sorted(episodes, key=lambda e: e["max_dd_abs"], reverse=True)
+    top = []
+    for e in episodes_sorted[:10]:
+        top.append({
+            "start_date": e["start_date"], "end_date": e["end_date"],
+            "max_dd_date": e["max_dd_date"],
+            "max_dd_abs": round(e["max_dd_abs"], 2),
+            "max_dd_pct": round(e["max_dd_pct"], 3),
+            "underwater_days": e["underwater_days"],
+            "recovery_days": e["recovery_days"],
+            "ongoing": e.get("ongoing", False),
+        })
+
+    dd_pcts = [pt.get("dd_pct") or 0 for pt in daily_series]
+    pain = sum(dd_pcts) / len(dd_pcts) if dd_pcts else 0
+    longest = max((e["underwater_days"] for e in episodes), default=0)
+
+    final_cum = (daily_series[-1].get("cum_net") or 0) if daily_series else 0
+    max_dd_abs_overall = max((e["max_dd_abs"] for e in episodes), default=0)
+    rec_factor = (final_cum / max_dd_abs_overall) if max_dd_abs_overall > 0 else None
+
+    return {
+        "top_drawdowns": top,
+        "pain_index_pct": round(pain, 4),
+        "longest_underwater_days": int(longest),
+        "recovery_factor_proper": round(rec_factor, 3) if rec_factor is not None else None,
+        "n_episodes": len(episodes),
+    }
+
+
+# --- 10. Bootstrap Confidence Intervals ---------------------------------
+
+def _bootstrap_quantiles(samples, runs, fn, seed):
+    rng = random.Random(seed)
+    n = len(samples)
+    if n < 5:
+        return None
+    out = []
+    for _ in range(runs):
+        idx = [rng.randint(0, n - 1) for _ in range(n)]
+        rs = [samples[i] for i in idx]
+        try:
+            v = fn(rs)
+        except Exception:
+            v = None
+        if v is None:
+            continue
+        if isinstance(v, float) and (math.isnan(v) or math.isinf(v)):
+            continue
+        out.append(v)
+    if not out:
+        return None
+    out.sort()
+    lo_p = (1 - CI_LEVEL) / 2
+    hi_p = 1 - lo_p
+    lo = out[max(0, int(lo_p * len(out)))]
+    hi = out[min(len(out) - 1, int(hi_p * len(out)))]
+    return lo, hi
+
+
+def _pack_ci(point, ci, decimals=3):
+    if point is None or ci is None:
+        return None
+    lo, hi = ci
+    width = hi - lo
+    rel_w = (width / abs(point)) if point and abs(point) > 1e-9 else None
+    stable = rel_w is not None and rel_w < 0.5
+    return {
+        "point": round(point, decimals),
+        "lo": round(lo, decimals),
+        "hi": round(hi, decimals),
+        "width": round(width, decimals),
+        "stable": stable,
+    }
+
+
+def confidence_intervals(daily_series, trades):
+    """Bootstrap 95% CI for Sharpe, Sortino, Calmar, ProfitFactor, WinRate."""
+    if not daily_series or len(daily_series) < CI_MIN_DAYS:
+        return None
+    if not trades or len(trades) < CI_MIN_TRADES:
+        return None
+
+    daily_returns = [pt.get("daily_net") or 0.0 for pt in daily_series]
+    nets = [t.get("net") or 0.0 for t in trades]
+
+    def sharpe_fn(rs):
+        m = sum(rs) / len(rs)
+        sd = stdev(rs)
+        return (m / sd) * math.sqrt(252) if sd and sd > 0 else None
+
+    def sortino_fn(rs):
+        m = sum(rs) / len(rs)
+        downs = [r for r in rs if r < 0]
+        if not downs:
+            return None
+        sd = stdev(downs)
+        return (m / sd) * math.sqrt(252) if sd and sd > 0 else None
+
+    def calmar_fn(rs):
+        cum = 0.0
+        peak = 0.0
+        mdd = 0.0
+        for r in rs:
+            cum += r
+            if cum > peak:
+                peak = cum
+            d = peak - cum
+            if d > mdd:
+                mdd = d
+        if mdd <= 0:
+            return None
+        years = len(rs) / 252.0
+        if years <= 0:
+            return None
+        annret = cum / years
+        return annret / mdd
+
+    def pf_fn(ns):
+        wins = sum(n for n in ns if n > 0)
+        losses = -sum(n for n in ns if n < 0)
+        return (wins / losses) if losses > 0 else None
+
+    def wr_fn(ns):
+        if not ns:
+            return None
+        return sum(1 for n in ns if n > 0) / len(ns) * 100.0
+
+    sh_pt = sharpe_fn(daily_returns)
+    so_pt = sortino_fn(daily_returns)
+    cl_pt = calmar_fn(daily_returns)
+    pf_pt = pf_fn(nets)
+    wr_pt = wr_fn(nets)
+
+    sh_ci = _bootstrap_quantiles(daily_returns, CI_RUNS, sharpe_fn, CI_SEED)
+    so_ci = _bootstrap_quantiles(daily_returns, CI_RUNS, sortino_fn, CI_SEED + 1)
+    cl_ci = _bootstrap_quantiles(daily_returns, CI_RUNS, calmar_fn, CI_SEED + 2)
+    pf_ci = _bootstrap_quantiles(nets, CI_RUNS, pf_fn, CI_SEED + 3)
+    wr_ci = _bootstrap_quantiles(nets, CI_RUNS, wr_fn, CI_SEED + 4)
+
+    months = len(daily_series) / 30.0
+    low_conf = len(trades) < 50 or months < 4
+
+    return {
+        "sharpe": _pack_ci(sh_pt, sh_ci),
+        "sortino": _pack_ci(so_pt, so_ci),
+        "calmar": _pack_ci(cl_pt, cl_ci),
+        "profit_factor": _pack_ci(pf_pt, pf_ci),
+        "win_rate_pct": _pack_ci(wr_pt, wr_ci, decimals=2),
+        "n_runs": CI_RUNS,
+        "ci_level": CI_LEVEL,
+        "low_confidence": low_conf,
+        "n_days": len(daily_series),
+        "n_trades": len(trades),
+    }
+
+
+# --- 11. Historical Event Stress (replay during real macro events) -------
+
+def event_stress(daily_series, trades):
+    """Replay bot during pre-defined historical macro windows."""
+    if not daily_series:
+        return None
+
+    daily_by_date = {pt.get("date"): pt for pt in daily_series if pt.get("date")}
+    series_dates = sorted(daily_by_date.keys()) if daily_by_date else []
+    earliest = series_dates[0] if series_dates else None
+
+    results = []
+    for ev in EVENT_WINDOWS:
+        in_window = [daily_by_date[d] for d in series_dates
+                     if ev["start"] <= d <= ev["end"]]
+        ev_trades = []
+        for t in trades or []:
+            ct = t.get("close_time") or 0
+            if not ct:
+                continue
+            try:
+                d = datetime.fromtimestamp(ct, tz=timezone.utc).strftime("%Y-%m-%d")
+            except (OSError, ValueError):
+                continue
+            if ev["start"] <= d <= ev["end"]:
+                ev_trades.append(t)
+
+        if earliest and earliest > ev["end"]:
+            results.append({**ev, "active": False, "reason": "not_yet_running"})
+            continue
+        if not in_window and not ev_trades:
+            results.append({**ev, "active": False, "reason": "no_activity"})
+            continue
+
+        net = sum((t.get("net") or 0) for t in ev_trades)
+        n = len(ev_trades)
+        wins = sum(1 for t in ev_trades if (t.get("net") or 0) > 0)
+        wr = (wins / n * 100) if n else None
+
+        cum = 0.0
+        peak = 0.0
+        mdd = 0.0
+        for pt in in_window:
+            cum += (pt.get("daily_net") or 0)
+            if cum > peak:
+                peak = cum
+            d = peak - cum
+            if d > mdd:
+                mdd = d
+
+        verdict = "positive" if net > 0 else ("negative" if net < 0 else "flat")
+        results.append({
+            **ev, "active": True, "trades": n,
+            "net": round(net, 2),
+            "win_rate_pct": round(wr, 2) if wr is not None else None,
+            "max_dd_intra": round(mdd, 2),
+            "days_in_window": len(in_window),
+            "verdict": verdict,
+        })
+
+    n_active = sum(1 for r in results if r.get("active"))
+    n_positive = sum(1 for r in results if r.get("verdict") == "positive")
+    return {
+        "events": results,
+        "n_active": n_active,
+        "n_positive": n_positive,
+        "battle_tested": n_active >= 3,
+        "n_total_events": len(EVENT_WINDOWS),
+    }
+
+
+# --- Main ----------------------------------------------------------------
+
+def main():
+    if len(sys.argv) < 2:
+        print("usage: post_merge.py <data_dir>", file=sys.stderr)
+        sys.exit(2)
+    data_dir = sys.argv[1]
+    snap_path = os.path.join(data_dir, "snapshot.json")
+    with open(snap_path) as f:
+        snap = json.load(f)
+
+    accounts_by_login = {a["login"]: a for a in snap.get("accounts", [])}
+
+    enriched = 0
+    for b in snap.get("bots", []):
+        acc = accounts_by_login.get(b.get("account_login"))
+        bal = (acc or {}).get("balance", 0)
+        result = compute_score(b, bal)
+        b["promotion_score"] = result["score"]
+        b["promotion_status"] = result["status"]
+        b["promotion_components"] = result["components"]
+        b["promotion_gating"] = result["gating"]
+        b["promotion_fails"] = result["fails"]
+        b["dd_pct_of_balance"] = result["dd_pct_of_balance"]
+        enriched += 1
+
+    # Stress, OOS, Regime, Drift, Capacity — pulled from per-bot JSON (have full trade list + daily series)
+    stress_count = 0
+    oos_count = 0
+    regime_count = 0
+    drift_count = 0
+    drift_flagged = 0
+    capacity_count = 0
+    institutional_count = 0
+    tail_ratio_warn = 0
+    autocorr_warn = 0
+    underwater_count = 0
+    ci_count = 0
+    event_count = 0
+    battle_tested_count = 0
+    real_accounts = detect_real_accounts(snap)
+    real_bot_count = 0
+    # Pass 1: real_vs_demo runs for EVERY bot in a real account, regardless of
+    # whether per-bot file exists (some VPS may not yet emit per-bot history
+    # for newly-funded real accounts — we still need to flag them as real).
+    for b in snap.get("bots", []):
+        if not b.get("magic"):
+            continue
+        div = compute_real_vs_demo_divergence(b, real_accounts)
+        if div is not None:
+            b["real_vs_demo"] = div
+            real_bot_count += 1
+
+    # Pass 2: enrichments that REQUIRE the per-bot trade list / daily series.
+    for b in snap.get("bots", []):
+        per = load_per_bot(data_dir, b.get("vps"), b.get("account_login"), b.get("magic"))
+        if not per:
+            continue
+        trades = per.get("trades") or []
+        daily_series = per.get("daily_equity_series") or []
+        acc = accounts_by_login.get(b.get("account_login"))
+        bal = (acc or {}).get("balance", 0)
+
+        mc = monte_carlo_stress(trades, bal, b.get("max_drawdown"))
+        if mc is not None:
+            b["stress"] = mc
+            stress_count += 1
+
+        oos = walk_forward(trades)
+        if oos is not None:
+            b["oos"] = oos
+            oos_count += 1
+
+        reg = regime_analysis(trades)
+        if reg is not None:
+            b["regime"] = reg
+            regime_count += 1
+
+        drift = page_hinkley_drift(daily_series)
+        if drift is not None:
+            b["drift"] = drift
+            drift_count += 1
+            if drift.get("flag"):
+                drift_flagged += 1
+
+        cap = compute_capacity(b, trades)
+        if cap is not None:
+            b["capacity"] = cap
+            capacity_count += 1
+
+        inst = institutional_metrics(daily_series, trades, bal)
+        # Solo guardar si al menos una métrica se calculó
+        if any(inst.get(k) is not None for k in
+               ("cvar_95_pct", "ulcer_index_pct", "k_ratio", "sqn", "tail_ratio", "return_autocorr_lag1")):
+            b["institutional"] = inst
+            institutional_count += 1
+            if inst.get("tail_ratio") is not None and inst["tail_ratio"] < 0.7:
+                tail_ratio_warn += 1
+            if inst.get("return_autocorr_lag1") is not None and inst["return_autocorr_lag1"] > 0.3:
+                autocorr_warn += 1
+
+        uw = underwater_analysis(daily_series, bal)
+        if uw is not None:
+            b["underwater"] = uw
+            underwater_count += 1
+
+        ci = confidence_intervals(daily_series, trades)
+        if ci is not None:
+            b["confidence_intervals"] = ci
+            ci_count += 1
+
+        ev = event_stress(daily_series, trades)
+        if ev is not None:
+            b["event_stress"] = ev
+            event_count += 1
+            if ev.get("battle_tested"):
+                battle_tested_count += 1
+
+    # 6) Bayesian shrinkage of promotion_score (must run AFTER initial scoring,
+    # BEFORE forward tracker / portfolio so they consume the shrunk values).
+    shrinkage_meta = compute_shrunk_scores(snap)
+
+    # 6b) Rank-based status assignment: SIEMPRE top5 READY · top5 NEAR · top10 WATCH
+    # Reemplaza la asignación por umbrales fijos (que dejaba ventanas vacías cuando
+    # nadie pasaba el corte). Solo bots que pasan gating duro entran al ranking.
+    eligible = [b for b in snap.get("bots", [])
+                if all((b.get("promotion_gating") or {}).values())
+                and b.get("promotion_score") is not None
+                and b.get("magic")]
+    eligible.sort(key=lambda b: (b.get("promotion_score") or 0, b.get("net_profit") or 0), reverse=True)
+    cap_ready = STATUS_RANK_CAPS["READY"]
+    cap_near = STATUS_RANK_CAPS["NEAR"]
+    cap_watch = STATUS_RANK_CAPS["WATCH"]
+    for idx, b in enumerate(eligible):
+        if idx < cap_ready:
+            b["promotion_status"] = "READY"
+        elif idx < cap_ready + cap_near:
+            b["promotion_status"] = "NEAR"
+        elif idx < cap_ready + cap_near + cap_watch:
+            b["promotion_status"] = "WATCH"
+        else:
+            b["promotion_status"] = "NO"
+    # Bots que fallan gating ya quedaron como "NO" en compute_score.
+
+    # Forward Tracker — append today's status of READY/NEAR bots, decorate with verdict
+    today_iso = datetime.now(timezone.utc).isoformat()
+    tracker_stats = update_forward_tracker(snap, data_dir, today_iso)
+
+    snap["promotion_meta"] = {
+        "weights": WEIGHTS,
+        "caps": CAPS,
+        "gating": GATING,
+        "thresholds": dict(STATUS),
+        "shrinkage": shrinkage_meta,
+        "computed_at": today_iso,
+    }
+    snap["enrichment_meta"] = {
+        "stress_runs": MC_RUNS,
+        "oos_folds_max": OOS_FOLDS_MAX,
+        "oos_perm_trials": OOS_PERM_TRIALS,
+        "portfolio_max_bots": PORTFOLIO_MAX_BOTS,
+        "portfolio_capitals": PORTFOLIO_CAPITALS,
+        "drift_evaluated": drift_count,
+        "drift_flagged": drift_flagged,
+        "capacity_computed": capacity_count,
+        "real_bots_tagged": real_bot_count,
+        "institutional_computed": institutional_count,
+        "tail_ratio_warn": tail_ratio_warn,
+        "autocorr_warn": autocorr_warn,
+        "underwater_computed": underwater_count,
+        "confidence_intervals_computed": ci_count,
+        "event_stress_computed": event_count,
+        "battle_tested_count": battle_tested_count,
+        "event_windows": EVENT_WINDOWS,
+        "computed_at": today_iso,
+    }
+
+    # Save snapshot first (atomic), then build correlations + portfolio using stored scores.
+    tmp = snap_path + ".pm.tmp"
+    with open(tmp, "w") as f:
+        json.dump(snap, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, snap_path)
+
+    corr = build_correlation_matrix(snap, data_dir)
+    corr_path = os.path.join(data_dir, "correlations.json")
+    tmp2 = corr_path + ".tmp"
+    with open(tmp2, "w") as f:
+        json.dump(corr, f, ensure_ascii=False, separators=(",", ":"))
+    os.replace(tmp2, corr_path)
+
+    portfolio = build_portfolio(snap, data_dir)
+    if portfolio:
+        port_path = os.path.join(data_dir, "portfolio.json")
+        tmp3 = port_path + ".tmp"
+        with open(tmp3, "w") as f:
+            json.dump(portfolio, f, ensure_ascii=False, indent=2)
+        os.replace(tmp3, port_path)
+
+    counts = {}
+    for b in snap.get("bots", []):
+        s = b.get("promotion_status") or "?"
+        counts[s] = counts.get(s, 0) + 1
+    print(
+        f"post_merge OK enriched={enriched} status={counts} "
+        f"stress={stress_count} oos={oos_count} regime={regime_count} "
+        f"drift={drift_count} drift_flagged={drift_flagged} "
+        f"capacity={capacity_count} real_bots={real_bot_count} "
+        f"underwater={underwater_count} ci={ci_count} events={event_count} battle_tested={battle_tested_count} "
+        f"shrinkage_cohorts={(shrinkage_meta or {}).get('cohorts_with_prior', 0)}/"
+        f"{(shrinkage_meta or {}).get('cohorts_total', 0)} "
+        f"corr_bots={corr['bot_count']} "
+        f"tracker_appended={tracker_stats['appended']} tracker_decorated={tracker_stats['tracked']} "
+        f"portfolio_bots={portfolio['n_bots'] if portfolio else 0}"
+    )
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,798 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<meta http-equiv="Pragma" content="no-cache">
+<meta http-equiv="Expires" content="0">
+<title>Battle of Bots — MT5 Portfolio</title>
+<link rel="stylesheet" href="styles.css?v=20260507b">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500;700&display=swap" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3.0.0/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.46.1/dist/umd/supabase.min.js"></script>
+<script src="/config.js"></script>
+<script src="/supabase-client.js?v=20260513a"></script>
+<script src="/auth-guard.js?v=20260513a"></script>
+<script src="/data-source.js?v=20260513a"></script>
+</head>
+<body>
+<div class="bg-orb orb-1"></div>
+<div class="bg-orb orb-2"></div>
+<div class="bg-orb orb-3"></div>
+
+<main class="container">
+
+  <header class="hero-header">
+    <div class="title-block">
+      <div class="brand-label">Kiz Capital LLC</div>
+      <h1>⚔️ Battle of Bots</h1>
+      <p class="subtitle"><span id="vps-count">—</span> VPS · <span id="account-count">—</span> cuentas demo · <span id="real-account-count">—</span> cuentas reales · <span id="total-bots-count">—</span> bots activos · ranking cross-VPS por Net Profit en <span id="window-days">365</span> días</p>
+    </div>
+    <div class="controls">
+      <div id="freshness" class="freshness">
+        <span class="dot"></span>
+        <span class="label">Cargando…</span>
+      </div>
+      <button id="corr-btn" class="btn-primary" title="Matriz de correlación entre top bots">
+        <span>📊 Correlación</span>
+      </button>
+      <button id="portfolio-btn" class="btn-primary" title="Asignación óptima de capital sobre top candidatos">
+        <span>💼 Portfolio</span>
+      </button>
+      <button id="builder-btn" class="btn-primary" title="Construye un mini-portafolio con 2–8 bots READY+NEAR a tu gusto">
+        <span>🎛️ Construir</span>
+      </button>
+      <button id="compare-btn" class="btn-primary" title="Head-to-head: 2–4 bots lado a lado">
+        <span>⚔️ Comparar <span class="compare-badge" id="compare-badge" hidden>0</span></span>
+      </button>
+      <button id="query-btn" class="btn-primary btn-query" title="Filtro avanzado tipo SQL sobre toda la flota">
+        <span>🔎 Query</span>
+      </button>
+      <button id="refresh-btn" class="btn-primary" title="Forzar recarga del JSON">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M21 12a9 9 0 11-3-6.7L21 8"/><path d="M21 3v5h-5"/></svg>
+        <span>Refrescar</span>
+      </button>
+    </div>
+  </header>
+
+  <section class="query-bar-section" id="query-bar-section" hidden>
+    <div class="query-bar-wrap">
+      <div class="query-bar-icon">🔎</div>
+      <input type="text" id="query-input" class="query-input" spellcheck="false"
+        placeholder='Ej: status = "READY" AND drift_flag = false AND capacity_usd >= 10000 AND symbol IN ("EURUSD","GBPUSD") SORT BY score DESC LIMIT 50' />
+      <button class="query-clear" id="query-clear" title="Limpiar filtro">×</button>
+      <div class="query-status" id="query-status">
+        <span class="query-count" id="query-count">— bots</span>
+        <span class="query-error" id="query-error" hidden></span>
+      </div>
+      <button class="query-save" id="query-save" title="Guardar vista">💾 Guardar</button>
+      <select class="query-views" id="query-views" title="Vistas guardadas"></select>
+      <button class="query-share" id="query-share" title="Copiar URL para compartir">🔗</button>
+      <button class="query-help" id="query-help" title="Ayuda del query DSL">?</button>
+    </div>
+    <div class="query-helper" id="query-helper" hidden></div>
+    <div class="query-results" id="query-results" hidden>
+      <div class="query-results-header">
+        <strong id="query-results-title">Resultados</strong>
+        <button class="pill query-results-close" id="query-results-close">× Cerrar</button>
+      </div>
+      <div class="table-wrapper compact">
+        <table id="query-table">
+          <thead>
+            <tr>
+              <th>#</th>
+              <th class="num">Score</th>
+              <th>Estado</th>
+              <th>Magic</th>
+              <th>VPS</th>
+              <th>Cuenta</th>
+              <th>Símbolo</th>
+              <th class="num">Trades</th>
+              <th class="num">PF</th>
+              <th class="num">Calmar</th>
+              <th class="num">Drift</th>
+              <th class="num">Cap. USD</th>
+              <th class="num">Net</th>
+            </tr>
+          </thead>
+          <tbody id="query-tbody"></tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <section class="real-accounts" id="real-accounts" hidden>
+    <div class="real-header">
+      <div>
+        <h2 class="section-title real-title">💰 Cuentas Reales</h2>
+        <p class="real-subtitle"><span id="real-count">0</span> cuentas con dinero real</p>
+      </div>
+      <div class="real-totals">
+        <div class="real-total-item">
+          <span class="label">Balance</span>
+          <strong id="real-balance">$0</strong>
+        </div>
+        <div class="real-total-item">
+          <span class="label">Equity</span>
+          <strong id="real-equity">$0</strong>
+        </div>
+        <div class="real-total-item">
+          <span class="label">Flotante</span>
+          <strong id="real-floating" class="pnl">$0</strong>
+        </div>
+      </div>
+    </div>
+
+    <div class="real-cards" id="real-cards"></div>
+
+    <div class="real-panel">
+      <h3 class="panel-title">📍 Posiciones abiertas en cuentas reales</h3>
+      <div class="table-wrapper compact">
+        <table id="real-positions-table">
+          <thead>
+            <tr>
+              <th>Cuenta</th>
+              <th>Magic</th>
+              <th>Símbolo</th>
+              <th>Tipo</th>
+              <th class="num">Volumen</th>
+              <th class="num">Apertura</th>
+              <th class="num">Actual</th>
+              <th class="num">SL (dist %)</th>
+              <th class="num">TP (dist %)</th>
+              <th class="num">P/L</th>
+              <th>Abierto desde</th>
+            </tr>
+          </thead>
+          <tbody id="real-positions-tbody"></tbody>
+        </table>
+        <div id="real-positions-empty" class="empty-state" hidden>Sin posiciones abiertas en cuentas reales.</div>
+      </div>
+    </div>
+
+    <div class="real-panel">
+      <h3 class="panel-title">🤖 Bots activos en cuentas reales (últimos 365 días)</h3>
+      <div class="table-wrapper compact">
+        <table id="real-bots-table">
+          <thead>
+            <tr>
+              <th>Cuenta</th>
+              <th>Magic</th>
+              <th>Símbolo</th>
+              <th class="num">Trades</th>
+              <th class="num">Win %</th>
+              <th class="num">PF</th>
+              <th class="num" title="Expectancy por trade">Expect.</th>
+              <th class="num" title="Max drawdown histórico">Max DD</th>
+              <th class="num" title="Net Profit / Max DD">Recovery</th>
+              <th class="num" title="Racha máxima de pérdidas consecutivas">Max LR</th>
+              <th class="num">Net</th>
+              <th>Último</th>
+            </tr>
+          </thead>
+          <tbody id="real-bots-tbody"></tbody>
+        </table>
+        <div id="real-bots-empty" class="empty-state" hidden>Sin bots detectados en cuentas reales.</div>
+      </div>
+    </div>
+  </section>
+
+  <section class="portfolio-stats" id="portfolio-stats">
+    <div class="stat-card">
+      <div class="stat-label">Balance total</div>
+      <div class="stat-value" data-counter data-target="0" data-prefix="$">$0</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Equity total</div>
+      <div class="stat-value" data-counter data-target="0" data-prefix="$">$0</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">PnL abierto</div>
+      <div class="stat-value pnl" data-counter data-target="0" data-prefix="$" data-signed>$0</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Cuentas activas</div>
+      <div class="stat-value" data-counter data-target="0">0</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Bots detectados</div>
+      <div class="stat-value" data-counter data-target="0">0</div>
+    </div>
+  </section>
+
+  <section class="balanced-section" id="balanced-section">
+    <div class="balanced-header">
+      <div>
+        <h2 class="section-title balanced-title">⚖️ Bots Equilibrados</h2>
+        <p class="balanced-subtitle">Solo bots con <strong>&gt;25 trades</strong> · ordenados de mejor a peor por equilibrio (volumen + win rate, vía Wilson LB 95%) — <span id="balanced-count">0</span> bots</p>
+      </div>
+      <div class="balanced-legend" title="Wilson Lower Bound: cota inferior estadística del WR real al 95% de confianza. Penaliza muestras pequeñas para evitar falsos positivos.">
+        ℹ️ Wilson LB 95% = WR ajustado por tamaño de muestra
+      </div>
+    </div>
+    <div class="table-wrapper compact">
+      <table id="balanced-table">
+        <thead>
+          <tr>
+            <th>#</th>
+            <th>Magic</th>
+            <th>VPS</th>
+            <th>Cuenta</th>
+            <th>Símbolo</th>
+            <th class="num">Trades</th>
+            <th class="num">Win %</th>
+            <th class="num" title="Wilson Lower Bound 95% — WR real ajustado por tamaño de muestra">Wilson LB</th>
+            <th class="num">PF</th>
+            <th class="num">Net Profit</th>
+            <th>Último trade</th>
+          </tr>
+        </thead>
+        <tbody id="balanced-tbody"></tbody>
+      </table>
+      <div id="balanced-empty" class="empty-state" hidden>Ningún bot demo cumple el mínimo de 25 trades.</div>
+    </div>
+  </section>
+
+  <section class="balanced-section" id="new-bots-section">
+    <div class="balanced-header">
+      <div>
+        <h2 class="section-title balanced-title">🆕 Bots Nuevos (últimos 30 días)</h2>
+        <p class="balanced-subtitle">Bots cuyo primer trade fue dentro de los últimos 30 días — desaparecen automáticamente al cumplir 31 días · <span id="new-bots-count">0</span> bots</p>
+      </div>
+      <div class="balanced-legend" title="Solo bots con first_trade ≥ hoy − 30 días">
+        🗓️ Ventana móvil de 30 días
+      </div>
+    </div>
+    <div class="table-controls" style="margin-bottom:12px">
+      <input type="search" id="new-bots-search" placeholder="Buscar por magic, símbolo, cuenta, vps…" />
+      <div class="filter-pills" id="new-bots-filter-pills">
+        <button class="pill active" data-filter="all">Todos</button>
+        <button class="pill" data-filter="winners">Ganadores</button>
+        <button class="pill" data-filter="losers">Perdedores</button>
+        <button class="pill" data-filter="by-winrate">🏆 Win Rate</button>
+        <button class="pill" data-filter="by-trades">📊 Más Trades</button>
+      </div>
+      <div class="filter-pills" id="new-bots-vps-pills">
+        <button class="pill vps-pill active" data-vps="all">Todos VPS</button>
+      </div>
+    </div>
+    <div class="table-wrapper compact">
+      <table id="new-bots-table">
+        <thead>
+          <tr>
+            <th>#</th>
+            <th>Magic</th>
+            <th>VPS</th>
+            <th>Cuenta</th>
+            <th>Símbolo</th>
+            <th class="num">Trades</th>
+            <th class="num">Gan.</th>
+            <th class="num">Perd.</th>
+            <th class="num">Win %</th>
+            <th class="num">PF</th>
+            <th class="num">Net Profit</th>
+            <th>Primer trade</th>
+            <th class="num">Días activo</th>
+          </tr>
+        </thead>
+        <tbody id="new-bots-tbody"></tbody>
+      </table>
+      <div id="new-bots-empty" class="empty-state" hidden>No hay bots nuevos en los últimos 30 días.</div>
+    </div>
+  </section>
+
+  <section class="balanced-section" id="candidates-section">
+    <div class="balanced-header">
+      <div>
+        <h2 class="section-title balanced-title">🎯 Candidatos a Cuenta Real</h2>
+        <p class="balanced-subtitle">Top bots por <strong>Promotion Score</strong> (riesgo + consistencia + decay + edad). Los <strong>READY</strong> son candidatos serios para promoción a real · <span id="candidates-count">0</span> bots evaluados</p>
+      </div>
+      <div class="balanced-legend" title="Score 0-100 con gating duro: trades≥30, meses≥3, DD≤15%, net>0, sin decay, magic≠0">
+        🚦 Gating: trades≥30 · meses≥3 · DD≤15% · sin decay
+      </div>
+    </div>
+    <div class="table-controls" style="margin-bottom:12px">
+      <div class="filter-pills" id="candidates-status-pills">
+        <button class="pill active" data-status="READY">✅ READY · top 5</button>
+        <button class="pill" data-status="NEAR">🟡 NEAR · top 5</button>
+        <button class="pill" data-status="WATCH">👀 WATCH · top 10</button>
+      </div>
+    </div>
+    <div class="table-wrapper compact">
+      <table id="candidates-table">
+        <thead>
+          <tr>
+            <th>#</th>
+            <th class="num">Score</th>
+            <th>Estado</th>
+            <th>Magic</th>
+            <th>VPS</th>
+            <th>Cuenta</th>
+            <th class="num" title="Calmar = Net Profit / Max DD">Calmar</th>
+            <th class="num" title="Sortino anualizado">Sortino</th>
+            <th class="num" title="Profit Factor">PF</th>
+            <th class="num" title="% meses con net positivo">% Meses+</th>
+            <th class="num" title="Decay ratio (recent slope / lifetime slope)">Decay</th>
+            <th class="num">Trades</th>
+            <th class="num">Net 365d</th>
+          </tr>
+        </thead>
+        <tbody id="candidates-tbody"></tbody>
+      </table>
+      <div id="candidates-empty" class="empty-state" hidden>Sin bots evaluados.</div>
+    </div>
+  </section>
+
+  <section class="balanced-section" id="tracker-section">
+    <div class="balanced-header">
+      <div>
+        <h2 class="section-title balanced-title">🚀 Forward Tracker — Calibración del Promotion Score</h2>
+        <p class="balanced-subtitle">Desde el día que cada bot entró a <strong>READY/NEAR</strong>, comparamos su net real vs la banda P25–P75 que el modelo proyectó (Monte Carlo). Sirve para validar si nuestro propio scoring funciona · <span id="tracker-count">0</span> bots tracked</p>
+      </div>
+      <div class="balanced-legend" title="Verde = sobre P75 · Amarillo = entre P25-P75 · Rojo = bajo P25">
+        🚦 ABOVE / ON_TRACK / BELOW vs banda esperada
+      </div>
+    </div>
+    <div class="table-wrapper compact">
+      <table id="tracker-table">
+        <thead>
+          <tr>
+            <th>#</th>
+            <th>Veredicto</th>
+            <th>Magic</th>
+            <th>VPS</th>
+            <th>Cuenta</th>
+            <th class="num">Score</th>
+            <th>Estado</th>
+            <th>Primera vez</th>
+            <th class="num">Días</th>
+            <th class="num">Net real</th>
+            <th class="num">Esperado P25</th>
+            <th class="num">Esperado P75</th>
+          </tr>
+        </thead>
+        <tbody id="tracker-tbody"></tbody>
+      </table>
+      <div id="tracker-empty" class="empty-state" hidden>Aún no se han registrado candidatos. Tracker se acumula con cada ejecución de post_merge.</div>
+    </div>
+  </section>
+
+  <section class="balanced-section" id="drift-section" hidden>
+    <div class="balanced-header">
+      <div>
+        <h2 class="section-title balanced-title">🚨 Drift Watch — Page-Hinkley Alerts</h2>
+        <p class="balanced-subtitle">Bots con quiebre estructural detectado en su rentabilidad diaria. Cada fila marca el día exacto del cambio + severidad · <span id="drift-count">0</span> bots flagged</p>
+      </div>
+      <div class="balanced-legend" title="Page-Hinkley = CUSUM secuencial sobre daily_net. Lambda = factor × stdev. Severidad = excursión / lambda.">
+        🧪 Page-Hinkley · λ = 4σ · δ = 0.005
+      </div>
+    </div>
+    <div class="table-controls" style="margin-bottom:12px">
+      <div class="filter-pills" id="drift-severity-pills">
+        <button class="pill active" data-sev="all">Todos</button>
+        <button class="pill" data-sev="severe">🔴 Severo (≥2.0)</button>
+        <button class="pill" data-sev="moderate">🟠 Moderado (≥1.3)</button>
+        <button class="pill" data-sev="incipient">🟡 Incipiente</button>
+      </div>
+    </div>
+    <div class="table-wrapper compact">
+      <table id="drift-table">
+        <thead>
+          <tr>
+            <th>#</th>
+            <th>Severidad</th>
+            <th>Magic</th>
+            <th>VPS</th>
+            <th>Cuenta</th>
+            <th>Símbolo</th>
+            <th>Día del quiebre</th>
+            <th class="num">Días desde</th>
+            <th class="num">Net/día antes</th>
+            <th class="num">Net/día después</th>
+            <th class="num">Δ Net/día</th>
+            <th class="num">Score</th>
+            <th>Estado</th>
+          </tr>
+        </thead>
+        <tbody id="drift-tbody"></tbody>
+      </table>
+      <div id="drift-empty" class="empty-state" hidden>Ningún bot con drift detectado. ✅ Flota saludable.</div>
+    </div>
+  </section>
+
+  <details class="demo-wrapper" id="demo-wrapper">
+    <summary><span class="demo-chevron">▸</span> 📊 Cuentas Demo (laboratorio) — <span id="demo-accounts-count">0</span> cuentas · <span id="demo-bots-count">0</span> bots · click para expandir</summary>
+
+  <section class="podium-section">
+    <h2 class="section-title">🏆 Podio — Top 3 Bots</h2>
+    <div class="podium" id="podium">
+      <!-- podium positions rendered by app.js -->
+    </div>
+  </section>
+
+  <section class="chart-section">
+    <div class="chart-card">
+      <div class="chart-header">
+        <h2 class="section-title">📊 Ranking — Top 15 por Net Profit</h2>
+      </div>
+      <div class="chart-wrapper">
+        <canvas id="bots-chart"></canvas>
+      </div>
+    </div>
+  </section>
+
+  <section class="table-section">
+    <div class="table-header">
+      <h2 class="section-title">📋 Ranking completo</h2>
+      <div class="table-controls">
+        <input type="search" id="search-input" placeholder="Buscar por magic, símbolo, cuenta, vps…" />
+        <div class="filter-pills" id="filter-pills">
+          <button class="pill active" data-filter="all">Todos</button>
+          <button class="pill" data-filter="winners">Ganadores</button>
+          <button class="pill" data-filter="losers">Perdedores</button>
+          <button class="pill" data-filter="by-winrate">🏆 Win Rate</button>
+          <button class="pill" data-filter="by-trades">📊 Más Trades</button>
+        </div>
+        <div class="filter-pills" id="vps-pills">
+          <button class="pill vps-pill active" data-vps="all">Todos VPS</button>
+        </div>
+      </div>
+    </div>
+    <div class="table-wrapper">
+      <table id="bots-table">
+        <thead>
+          <tr>
+            <th data-sort="rank">#</th>
+            <th data-sort="magic">Magic</th>
+            <th data-sort="vps">VPS</th>
+            <th data-sort="account_login">Cuenta</th>
+            <th data-sort="symbols">Símbolo</th>
+            <th data-sort="trades" class="num">Trades</th>
+            <th data-sort="wins" class="num" title="Operaciones ganadoras">Gan.</th>
+            <th class="num" title="Operaciones perdedoras">Perd.</th>
+            <th data-sort="win_rate_pct" class="num">Win %</th>
+            <th data-sort="profit_factor" class="num">PF</th>
+            <th data-sort="expectancy" class="num" title="Expectancy por trade (avg_win*WR + avg_loss*(1-WR))">Expect.</th>
+            <th data-sort="max_drawdown" class="num" title="Max drawdown histórico (equity curve)">Max DD</th>
+            <th data-sort="recovery_factor" class="num" title="Net profit / Max DD">Recov.</th>
+            <th data-sort="max_consecutive_losses" class="num" title="Racha máxima de pérdidas consecutivas">Max LR</th>
+            <th data-sort="net_profit" class="num active-sort">Net Profit ↓</th>
+            <th data-sort="last_trade">Último trade</th>
+          </tr>
+        </thead>
+        <tbody id="bots-tbody"></tbody>
+      </table>
+      <div id="empty-state" class="empty-state" hidden>Sin bots que coincidan con el filtro.</div>
+    </div>
+  </section>
+
+  </details>
+
+  <div id="account-modal-overlay" class="bot-modal-overlay" hidden>
+    <div class="bot-modal" role="dialog" aria-labelledby="account-modal-title">
+      <button class="bot-modal-close" id="account-modal-close" aria-label="Cerrar">×</button>
+      <header class="bot-modal-header">
+        <h2 id="account-modal-title">Cuenta Real</h2>
+        <div class="bot-modal-meta" id="account-modal-meta">Cargando…</div>
+        <div class="bot-modal-chips" id="account-modal-chips"></div>
+      </header>
+      <section class="account-bots-section">
+        <h3 class="panel-title">🤖 Bots de esta cuenta · click para auditar cada uno</h3>
+        <div class="account-bots-grid" id="account-bots-grid"></div>
+        <div id="account-bots-empty" class="empty-state" hidden>Sin bots con histórico disponible.</div>
+      </section>
+    </div>
+  </div>
+
+  <div id="bot-modal-overlay" class="bot-modal-overlay" hidden>
+    <div class="bot-modal" role="dialog" aria-labelledby="bot-modal-title">
+      <button class="bot-modal-close" id="bot-modal-close" aria-label="Cerrar">×</button>
+      <header class="bot-modal-header">
+        <div class="bot-modal-header-actions">
+          <button id="bot-dna-btn" class="btn-primary btn-dna" title="DNA Card · resumen ejecutivo del bot">🧬 DNA Card</button>
+          <button id="bot-compare-add-btn" class="btn-primary btn-compare-add" title="Añadir este bot al comparador head-to-head">⚔️ Añadir a comparar</button>
+        </div>
+        <h2 id="bot-modal-title">Auditoría de Bot</h2>
+        <div class="bot-modal-meta" id="bot-modal-meta">Cargando…</div>
+        <div class="bot-modal-chips" id="bot-modal-chips"></div>
+      </header>
+
+      <section class="bot-modal-charts">
+        <div class="bot-tabs" role="tablist">
+          <button class="bot-tab active" data-tab="growth" role="tab">📈 Growth %</button>
+          <button class="bot-tab" data-tab="profit" role="tab">💵 Net P&L</button>
+          <button class="bot-tab" data-tab="drawdown" role="tab">📉 Drawdown</button>
+          <button class="bot-tab" data-tab="underwater" role="tab" title="Underwater chart + top 10 drawdowns con duración + recovery">🌊 Underwater</button>
+          <button class="bot-tab" data-tab="risk" role="tab">⚖️ Riesgo</button>
+          <button class="bot-tab" data-tab="consistency" role="tab">🎯 Consistencia</button>
+          <button class="bot-tab" data-tab="decay" role="tab">📉 Decay</button>
+          <button class="bot-tab" data-tab="score" role="tab">🚦 Score</button>
+          <button class="bot-tab" data-tab="stress" role="tab" title="Monte Carlo bootstrap de trades">🎲 Stress</button>
+          <button class="bot-tab" data-tab="events" role="tab" title="Replay del bot durante eventos macro reales (COVID, Russia-Ukraine, Banking crisis…)">⚡ Eventos</button>
+          <button class="bot-tab" data-tab="oos" role="tab" title="Walk-Forward Out-of-Sample">🔬 OOS</button>
+          <button class="bot-tab" data-tab="regime" role="tab" title="Robustez temporal">🌊 Régimen</button>
+          <button class="bot-tab" data-tab="tracker" role="tab" title="Forward tracking">🚀 Tracker</button>
+          <button class="bot-tab" data-tab="drift" role="tab" title="Page-Hinkley change-point detection">🚨 Drift</button>
+          <button class="bot-tab" data-tab="capacity" role="tab" title="Capacidad de capital antes de slippage">⚙️ Capacity</button>
+        </div>
+        <div class="bot-chart-wrap">
+          <canvas id="bot-main-chart"></canvas>
+          <div id="bot-analysis-panel" class="bot-analysis-panel" hidden></div>
+        </div>
+      </section>
+
+      <section class="bot-monthly">
+        <h3 class="panel-title">📅 P&L mensual (% sobre balance al inicio del mes)</h3>
+        <div class="bot-monthly-chart-wrap">
+          <canvas id="bot-monthly-chart"></canvas>
+        </div>
+        <div class="table-wrapper compact">
+          <table id="bot-monthly-table">
+            <thead>
+              <tr>
+                <th>Mes</th>
+                <th class="num">Trades</th>
+                <th class="num">Net P&amp;L</th>
+                <th class="num">% sobre balance inicio mes</th>
+              </tr>
+            </thead>
+            <tbody id="bot-monthly-tbody"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="bot-trades">
+        <div class="bot-trades-header">
+          <h3 class="panel-title">📋 Historial completo · <span id="bot-trades-count">0</span> operaciones</h3>
+          <div class="bot-trades-pager">
+            <button id="bot-page-prev" class="pill">←</button>
+            <span class="bot-page-info" id="bot-page-info">1 / 1</span>
+            <button id="bot-page-next" class="pill">→</button>
+          </div>
+        </div>
+        <div class="table-wrapper compact">
+          <table id="bot-trades-table">
+            <thead>
+              <tr>
+                <th>Open Date</th>
+                <th>Close Date</th>
+                <th>Symbol</th>
+                <th>Action</th>
+                <th class="num">Lots</th>
+                <th class="num">Open Price</th>
+                <th class="num">Close Price</th>
+                <th class="num">Pips</th>
+                <th class="num">Net</th>
+                <th class="num">Swap</th>
+                <th>Duration</th>
+              </tr>
+            </thead>
+            <tbody id="bot-trades-tbody"></tbody>
+          </table>
+        </div>
+      </section>
+    </div>
+  </div>
+
+  <div id="corr-modal-overlay" class="corr-overlay" hidden>
+    <div class="corr-aurora"></div>
+    <div class="corr-aurora corr-aurora-2"></div>
+    <div class="corr-aurora corr-aurora-3"></div>
+    <div class="corr-fullscreen" role="dialog" aria-labelledby="corr-modal-title">
+      <button class="corr-close-btn" id="corr-modal-close" aria-label="Cerrar">×</button>
+      <header class="corr-header">
+        <div class="corr-title-block">
+          <div class="corr-eyebrow">Kiz Capital LLC · Portfolio Intelligence</div>
+          <h2 id="corr-modal-title">Matriz de Correlación · Top Bots</h2>
+          <p class="corr-sub">Cómo se mueven juntos tus bots día a día. Identifica clusters redundantes y oportunidades de diversificación para promover a real.</p>
+        </div>
+        <div class="corr-stats" id="corr-stats">
+          <div class="corr-stat"><span class="corr-stat-label">Bots</span><strong id="corr-stat-bots">0</strong></div>
+          <div class="corr-stat"><span class="corr-stat-label">Pares analizados</span><strong id="corr-stat-pairs">0</strong></div>
+          <div class="corr-stat"><span class="corr-stat-label">Pares redundantes (&gt;0.7)</span><strong id="corr-stat-red" class="negative">0</strong></div>
+          <div class="corr-stat"><span class="corr-stat-label">Pares diversificados</span><strong id="corr-stat-green" class="positive">0</strong></div>
+        </div>
+      </header>
+      <div class="corr-legend-bar">
+        <div class="corr-legend-grad"></div>
+        <div class="corr-legend-marks">
+          <span data-pos="0">−1.0 anti-correlación</span>
+          <span data-pos="25">−0.5</span>
+          <span data-pos="50">0 independiente</span>
+          <span data-pos="75">0.5</span>
+          <span data-pos="100">+1.0 redundante</span>
+        </div>
+      </div>
+      <main class="corr-main">
+        <section class="corr-canvas-wrap">
+          <div id="corr-heatmap" class="corr-heatmap-canvas"></div>
+          <div id="corr-floating" class="corr-floating" hidden>
+            <button class="corr-floating-close" id="corr-floating-close" aria-label="Cerrar detalle">×</button>
+            <div id="corr-side-content"></div>
+          </div>
+          <div class="corr-scan-line"></div>
+          <div class="corr-grid-glow"></div>
+        </section>
+      </main>
+    </div>
+  </div>
+
+  <div id="portfolio-modal-overlay" class="corr-overlay" hidden>
+    <div class="corr-aurora"></div>
+    <div class="corr-aurora corr-aurora-2"></div>
+    <div class="corr-aurora corr-aurora-3"></div>
+    <div class="corr-fullscreen portfolio-fullscreen" role="dialog" aria-labelledby="portfolio-modal-title">
+      <button class="corr-close-btn" id="portfolio-modal-close" aria-label="Cerrar">×</button>
+      <header class="corr-header">
+        <div class="corr-title-block">
+          <div class="corr-eyebrow">Kiz Capital LLC · Capital Allocator</div>
+          <h2 id="portfolio-modal-title">💼 Portfolio Optimizer</h2>
+          <p class="corr-sub">Asignación óptima de capital sobre top candidatos (READY+NEAR). Tres métodos: Inverse Volatility (risk-parity proxy), Equal Weight (baseline), Score Weighted (sesgo a Promotion Score). Calculado de <code>portfolio.json</code>.</p>
+        </div>
+        <div class="corr-stats" id="portfolio-stats-bar">
+          <div class="corr-stat"><span class="corr-stat-label">Bots</span><strong id="port-stat-bots">0</strong></div>
+          <div class="corr-stat"><span class="corr-stat-label">Capital</span><strong id="port-stat-capital">$50,000</strong></div>
+          <div class="corr-stat"><span class="corr-stat-label">Método</span><strong id="port-stat-method">Inv. Vol.</strong></div>
+          <div class="corr-stat"><span class="corr-stat-label">Total asignado</span><strong id="port-stat-total" class="positive">$0</strong></div>
+        </div>
+      </header>
+      <div class="portfolio-controls">
+        <div class="port-control-group">
+          <label class="port-control-label">Capital total</label>
+          <div class="port-pills" id="port-capital-pills">
+            <button class="pill" data-capital="25000">$25K</button>
+            <button class="pill active" data-capital="50000">$50K</button>
+            <button class="pill" data-capital="100000">$100K</button>
+          </div>
+        </div>
+        <div class="port-control-group">
+          <label class="port-control-label">Método</label>
+          <div class="port-pills" id="port-method-pills">
+            <button class="pill active" data-method="inverse_volatility" title="Cada bot pesa 1/σ — risk parity si correlación≈0">⚖️ Inv. Volatility</button>
+            <button class="pill" data-method="equal_weight" title="Baseline: todos pesan igual">⚪ Equal Weight</button>
+            <button class="pill" data-method="score_weighted" title="Pesa proporcional a Promotion Score">🎯 Score Weighted</button>
+          </div>
+        </div>
+      </div>
+      <main class="corr-main">
+        <section class="corr-canvas-wrap portfolio-canvas-wrap">
+          <div id="portfolio-canvas" class="portfolio-canvas"></div>
+          <div class="corr-scan-line"></div>
+          <div class="corr-grid-glow"></div>
+        </section>
+      </main>
+    </div>
+  </div>
+
+  <div id="builder-modal-overlay" class="corr-overlay" hidden>
+    <div class="corr-aurora"></div>
+    <div class="corr-aurora corr-aurora-2"></div>
+    <div class="corr-aurora corr-aurora-3"></div>
+    <div class="corr-fullscreen builder-fullscreen" role="dialog" aria-labelledby="builder-modal-title">
+      <button class="corr-close-btn" id="builder-modal-close" aria-label="Cerrar">×</button>
+      <header class="corr-header">
+        <div class="corr-title-block">
+          <div class="corr-eyebrow">Kiz Capital LLC · Mini-Portfolio Builder</div>
+          <h2 id="builder-modal-title">🎛️ Construye tu portafolio (2–8 bots)</h2>
+          <p class="corr-sub">Elige entre 2 y 8 bots <strong>READY o NEAR</strong>, asigna capital y ve al instante cómo se comportan combinados — equity curva, drawdown agregado, correlación promedio y concentración por símbolo. Click en cualquier bot del portafolio para auditarlo.</p>
+        </div>
+        <div class="corr-stats" id="builder-stats-bar">
+          <div class="corr-stat"><span class="corr-stat-label">Seleccionados</span><strong id="bld-stat-count">0 / 8</strong></div>
+          <div class="corr-stat"><span class="corr-stat-label">Capital</span><strong id="bld-stat-capital">$50,000</strong></div>
+          <div class="corr-stat"><span class="corr-stat-label">Net 365d</span><strong id="bld-stat-net" class="positive">$0</strong></div>
+          <div class="corr-stat"><span class="corr-stat-label">Max DD</span><strong id="bld-stat-dd" class="negative">$0</strong></div>
+          <div class="corr-stat"><span class="corr-stat-label">Calmar</span><strong id="bld-stat-calmar">—</strong></div>
+          <div class="corr-stat"><span class="corr-stat-label">ρ promedio</span><strong id="bld-stat-corr">—</strong></div>
+        </div>
+      </header>
+
+      <div class="builder-controls">
+        <div class="port-control-group">
+          <label class="port-control-label">Capital total</label>
+          <div class="port-pills" id="bld-capital-pills">
+            <button class="pill" data-capital="12521" title="Equivale al capital real activo hoy">$12.5K real</button>
+            <button class="pill" data-capital="25000">$25K</button>
+            <button class="pill active" data-capital="50000">$50K</button>
+            <button class="pill" data-capital="100000">$100K</button>
+            <input type="number" id="bld-capital-input" class="port-capital-input" min="1000" max="500000" step="500" placeholder="Custom $" />
+          </div>
+        </div>
+        <div class="port-control-group">
+          <label class="port-control-label">Método de balance</label>
+          <div class="port-pills" id="bld-method-pills">
+            <button class="pill active" data-method="risk_parity" title="Cada bot contribuye igual al riesgo total — usa la matriz de correlación. Recomendado.">⚖️ Risk Parity</button>
+            <button class="pill" data-method="inverse_volatility" title="Pesa 1/σ — risk parity si correlación≈0">📉 Inv. Volatility</button>
+            <button class="pill" data-method="equal_weight" title="Baseline: todos pesan igual">⚪ Equal Weight</button>
+            <button class="pill" data-method="score_weighted" title="Pesa proporcional a Promotion Score">🎯 Score Weighted</button>
+          </div>
+        </div>
+      </div>
+
+      <main class="builder-body">
+        <section class="builder-catalog">
+          <div class="builder-section-head">
+            <h3>📚 Catálogo · solo READY + NEAR</h3>
+            <span class="builder-section-hint" id="bld-catalog-count">0 disponibles</span>
+          </div>
+          <div class="builder-catalog-list" id="bld-catalog-list"></div>
+        </section>
+
+        <section class="builder-portfolio">
+          <div class="builder-section-head">
+            <h3>🎛️ Tu portafolio</h3>
+            <button class="pill builder-clear-btn" id="bld-clear-btn" title="Quitar todos">🗑️ Limpiar</button>
+          </div>
+          <div id="bld-empty" class="builder-empty">Elige al menos 2 bots del catálogo para empezar.</div>
+          <div class="builder-equity-wrap" id="bld-equity-wrap" hidden>
+            <canvas id="bld-equity-chart"></canvas>
+          </div>
+          <div class="builder-health" id="bld-health" hidden></div>
+          <div class="builder-selected-list" id="bld-selected-list"></div>
+        </section>
+      </main>
+    </div>
+  </div>
+
+  <!-- 🧬 DNA Card · drawer lateral (slide-in derecho) -->
+  <div id="dna-modal-overlay" class="dna-drawer-wrap" hidden aria-hidden="true">
+    <div class="dna-drawer-scrim" id="dna-drawer-scrim"></div>
+    <aside class="dna-drawer" role="dialog" aria-labelledby="dna-modal-title" aria-modal="true">
+      <button class="dna-drawer-close" id="dna-modal-close" aria-label="Cerrar y volver al bot">×</button>
+      <header class="dna-drawer-head">
+        <div class="dna-drawer-eyebrow">Kiz Capital LLC · Investment Committee Factsheet</div>
+        <h2 id="dna-modal-title">🧬 Bot DNA Card</h2>
+        <p class="dna-drawer-sub">Resumen ejecutivo — semáforo OK/CAUTION/STOP + veredicto final. Imprimible con <kbd>Cmd+P</kbd>.</p>
+        <div class="dna-actions">
+          <button class="btn-primary" id="dna-print-btn" title="Imprimir / guardar como PDF">🖨️ Imprimir DNA</button>
+        </div>
+      </header>
+      <main class="dna-drawer-body" id="dna-main">
+        <div class="empty-state">Cargando DNA…</div>
+      </main>
+    </aside>
+  </div>
+
+  <!-- ⚔️ Bot Comparator modal -->
+  <div id="compare-modal-overlay" class="corr-overlay" hidden>
+    <div class="corr-aurora"></div>
+    <div class="corr-aurora corr-aurora-2"></div>
+    <div class="corr-aurora corr-aurora-3"></div>
+    <div class="corr-fullscreen compare-fullscreen" role="dialog" aria-labelledby="compare-modal-title">
+      <button class="corr-close-btn" id="compare-modal-close" aria-label="Cerrar">×</button>
+      <header class="corr-header">
+        <div class="corr-title-block">
+          <div class="corr-eyebrow">Kiz Capital LLC · Head-to-Head Showdown</div>
+          <h2 id="compare-modal-title">⚔️ Bot Comparator</h2>
+          <p class="corr-sub">Equity normalizada a 100, métricas lado a lado, correlación pairwise y veredicto comparativo automático. Selecciona 2–4 bots desde "⚔️ Añadir a comparar" en cada modal de auditoría.</p>
+        </div>
+        <div class="corr-stats">
+          <div class="corr-stat"><span class="corr-stat-label">Bots</span><strong id="compare-stat-bots">0 / 4</strong></div>
+          <div class="corr-stat"><span class="corr-stat-label">Pares</span><strong id="compare-stat-pairs">0</strong></div>
+          <div class="corr-stat"><span class="corr-stat-label">ρ máx</span><strong id="compare-stat-corrmax">—</strong></div>
+        </div>
+      </header>
+      <main class="compare-main" id="compare-main">
+        <div class="empty-state">Aún no has añadido bots. Abre cualquier bot → click "⚔️ Añadir a comparar".</div>
+      </main>
+    </div>
+  </div>
+
+  <footer class="footer">
+    <span class="footer-brand">Kiz Capital LLC</span>
+    <span>·</span>
+    <span>Merge: <span id="generated-at">—</span></span>
+    <span>·</span>
+    <span id="vps-sources-footer"></span>
+    <span>·</span>
+    <span>Datos cross-VPS vía SSH + Tailscale · solo lectura</span>
+  </footer>
+
+</main>
+
+<script src="app.js?v=20260507b"></script>
+</body>
+</html>
