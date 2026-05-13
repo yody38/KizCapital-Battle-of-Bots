@@ -28,7 +28,6 @@
         persistSession: true,
         autoRefreshToken: true,
         detectSessionInUrl: true,
-        flowType: "implicit",
         storageKey: "kiz-capital-auth",
       },
     },

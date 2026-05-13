@@ -26,10 +26,13 @@
 
   let session = await fetchSession();
 
-  // If URL has a magic-link token, supabase-js may still be processing it.
-  // Wait up to 3s for SIGNED_IN before deciding.
+  // If URL has a magic-link token (PKCE ?code= or implicit #access_token=),
+  // supabase-js may still be processing it. Wait up to 3s for SIGNED_IN.
   const hash = window.location.hash || "";
-  const hasToken = /access_token|error_description/.test(hash);
+  const query = window.location.search || "";
+  const hasToken =
+    /access_token|error_description/.test(hash) ||
+    /[?&](code|token_hash|error)=/.test(query);
   if (!session && hasToken) {
     session = await new Promise((resolve) => {
       let resolved = false;

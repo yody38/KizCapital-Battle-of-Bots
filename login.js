@@ -146,9 +146,13 @@
     let { data } = await window.kizSupabase.auth.getSession();
     if (data?.session) { window.location.replace(nextUrl()); return; }
 
-    // If URL has a magic-link token, supabase-js is parsing it. Wait up to 5s.
+    // If URL has a magic-link token (PKCE or implicit), wait up to 5s.
     const hash = window.location.hash || "";
-    if (/access_token|error_description/.test(hash)) {
+    const query = window.location.search || "";
+    const hasToken =
+      /access_token|error_description/.test(hash) ||
+      /[?&](code|token_hash|error)=/.test(query);
+    if (hasToken) {
       const session = await new Promise((resolve) => {
         let done = false;
         const finish = (s) => {
