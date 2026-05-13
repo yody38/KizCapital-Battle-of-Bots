@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <title>Acceso · Kiz Capital LLC</title>
-<link rel="stylesheet" href="/login.css?v=20260513a">
+<link rel="stylesheet" href="/login.css?v=20260513b">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500;700&display=swap" rel="stylesheet">
@@ -21,7 +21,7 @@
     <header class="login-header">
       <div class="brand-chip">Kiz Capital LLC</div>
       <h1 class="login-title" id="login-title">Acceso al portfolio</h1>
-      <p class="login-sub" id="login-sub">Ingresa tu correo para recibir un código de un solo uso.</p>
+      <p class="login-sub" id="login-sub">Ingresa tu correo para recibir un enlace de acceso.</p>
     </header>
 
     <!-- STEP 1 — Email -->
@@ -39,31 +39,34 @@
         />
       </label>
       <button type="submit" class="primary-btn" id="email-submit">
-        <span class="btn-label">Enviar código</span>
+        <span class="btn-label">Enviar enlace</span>
         <span class="btn-spinner" aria-hidden="true"></span>
       </button>
       <p class="login-error" id="email-error" hidden></p>
     </form>
 
-    <!-- STEP 2 — Code -->
+    <!-- STEP 2 — Sent (instruct user to click link in email) -->
     <form id="step-code" class="login-form" hidden autocomplete="off">
       <p class="code-sent" id="code-sent">
-        Enviamos un código a <strong id="code-target">tu@ejemplo.com</strong>.
+        Enviamos un enlace de acceso a <strong id="code-target">tu@ejemplo.com</strong>.
       </p>
-      <div class="otp-row" role="group" aria-label="Código de 6 dígitos">
-        <input class="otp-cell" type="text" inputmode="numeric" maxlength="1" data-i="0" autocomplete="one-time-code">
-        <input class="otp-cell" type="text" inputmode="numeric" maxlength="1" data-i="1">
-        <input class="otp-cell" type="text" inputmode="numeric" maxlength="1" data-i="2">
-        <input class="otp-cell" type="text" inputmode="numeric" maxlength="1" data-i="3">
-        <input class="otp-cell" type="text" inputmode="numeric" maxlength="1" data-i="4">
-        <input class="otp-cell" type="text" inputmode="numeric" maxlength="1" data-i="5">
+      <div class="link-instructions">
+        <div class="link-step">
+          <span class="step-num">1</span>
+          <span>Abre el email de <strong>Supabase Auth</strong> en tu correo.</span>
+        </div>
+        <div class="link-step">
+          <span class="step-num">2</span>
+          <span>Haz click en el botón <strong>"Sign in"</strong> dentro del email.</span>
+        </div>
+        <div class="link-step">
+          <span class="step-num">3</span>
+          <span>El enlace te traerá de vuelta y entrarás automáticamente.</span>
+        </div>
       </div>
-      <button type="submit" class="primary-btn" id="code-submit">
-        <span class="btn-label">Verificar</span>
-        <span class="btn-spinner" aria-hidden="true"></span>
-      </button>
+      <p class="code-tip">El email puede tardar 1-2 minutos. Revisa también <strong>Spam</strong>.</p>
       <div class="meta-row">
-        <button type="button" class="link-btn" id="resend-btn">Reenviar código</button>
+        <button type="button" class="link-btn" id="resend-btn">Reenviar enlace</button>
         <span class="dot-sep">·</span>
         <button type="button" class="link-btn" id="change-email-btn">Cambiar email</button>
       </div>
@@ -78,7 +81,7 @@
 
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.46.1/dist/umd/supabase.min.js"></script>
 <script src="/config.js"></script>
-<script src="/supabase-client.js?v=20260513a"></script>
-<script src="/login.js?v=20260513a"></script>
+<script src="/supabase-client.js?v=20260513b"></script>
+<script src="/login.js?v=20260513b"></script>
 </body>
 </html>
