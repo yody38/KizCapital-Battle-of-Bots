@@ -120,6 +120,16 @@ class Uploader:
             detail = exc.read().decode("utf-8", errors="replace")[:200]
             raise RuntimeError(f"http {exc.code}: {detail}") from None
 
+    def list_prefix(self, prefix: str) -> set[str]:
+        """Return the set of object names under a folder prefix (one folder at a time)."""
+        endpoint = f"{self.base}/storage/v1/object/list/{BUCKET}"
+        body = json.dumps({"prefix": prefix, "limit": 1000}).encode()
+        headers = self._headers("application/json")
+        req = urlrequest.Request(endpoint, data=body, headers=headers, method="POST")
+        with urlrequest.urlopen(req, timeout=30) as resp:
+            data = json.loads(resp.read())
+        return {o["name"] for o in data if o.get("name")}
+
 
 # ----------------------- main -----------------------
 
@@ -177,10 +187,48 @@ def main() -> int:
             failed.append(f"{obj_path}: {exc}")
             new_manifest.pop(obj_path, None)  # don't mark as uploaded
 
+    # ------------------------------------------------------------------
+    # Audit: list every folder used + verify nothing is silently missing.
+    # Silent failures DID happen once (HTTP 200 but object never landed),
+    # so we always close the loop and re-upload any drift.
+    # ------------------------------------------------------------------
+    folders: set[str] = {""}
+    for _, obj_path in files:
+        if "/" in obj_path:
+            folders.add(obj_path.rsplit("/", 1)[0])
+
+    storage_paths: set[str] = set()
+    for folder in folders:
+        try:
+            names = uploader.list_prefix(folder)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[upload]   audit list FAILED for '{folder}': {exc}", file=sys.stderr)
+            names = set()
+        if folder:
+            storage_paths.update(f"{folder}/{n}" for n in names)
+        else:
+            storage_paths.update(names)
+
+    local_paths = {obj for _, obj in files}
+    missing_in_storage = local_paths - storage_paths
+    audit_resubmit = 0
+    for obj_path in sorted(missing_in_storage):
+        abs_path = next((p for p, op in files if op == obj_path), None)
+        if not abs_path:
+            continue
+        try:
+            uploader.upload(obj_path, abs_path)
+            new_manifest[obj_path] = file_sha256(abs_path)
+            audit_resubmit += 1
+        except Exception as exc:  # noqa: BLE001
+            failed.append(f"audit:{obj_path}: {exc}")
+            new_manifest.pop(obj_path, None)
+
     save_manifest(new_manifest)
     dur = time.time() - started
     print(
-        f"[upload] done in {dur:.1f}s  uploaded={uploaded}  unchanged={skipped}  failed={len(failed)}"
+        f"[upload] done in {dur:.1f}s  uploaded={uploaded}  unchanged={skipped}  "
+        f"audit_resubmit={audit_resubmit}  failed={len(failed)}"
     )
     if failed:
         for line in failed[:10]:
