@@ -2842,6 +2842,33 @@ tr.bot-row:hover { background: rgba(124, 156, 255, 0.06); }
 }
 .audit-banner-close:hover { color: #ff6b8b; }
 
+/* Data Integrity DNA badge — shows verify_integrity.py result inline */
+.integrity-badge {
+  display: flex; gap: 14px; align-items: flex-start;
+  border-radius: 12px;
+  padding: 12px 16px;
+  margin: 14px 0 18px;
+  font-size: 13px; line-height: 1.5;
+  position: relative;
+}
+.integrity-badge.ok {
+  background: linear-gradient(135deg, rgba(60,220,140,0.08), rgba(60,220,140,0.02));
+  border: 1px solid rgba(60, 220, 140, 0.40);
+  box-shadow: 0 6px 24px rgba(60, 220, 140, 0.08);
+}
+.integrity-badge.fail {
+  background: linear-gradient(135deg, rgba(255,107,139,0.10), rgba(255,184,107,0.06));
+  border: 1px solid rgba(255, 107, 139, 0.40);
+  box-shadow: 0 6px 24px rgba(255, 107, 139, 0.10);
+}
+.integrity-badge-icon { font-size: 22px; line-height: 1; }
+.integrity-badge-body { flex: 1; color: #e7ebf5; }
+.integrity-badge.ok .integrity-badge-body strong { color: #3cdc8c; }
+.integrity-badge.fail .integrity-badge-body strong { color: #ff6b8b; }
+.integrity-badge-meta { color: #9aa3bb; font-size: 12px; margin-top: 4px; display: block; }
+.integrity-badge-hint { color: #9aa3bb; font-size: 12px; margin-top: 6px; }
+.integrity-badge-hint code { background: rgba(255,255,255,0.06); padding: 1px 5px; border-radius: 4px; font-family: 'JetBrains Mono', monospace; }
+
 /* =====================================================================
    Header action buttons inside bot modal (DNA + Comparar)
    ===================================================================== */
