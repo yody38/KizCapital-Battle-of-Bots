@@ -1,0 +1,69 @@
+name: refresh-dashboard
+
+on:
+  schedule:
+    - cron: "10,40 * * * *"   # UTC; 10 min after snapshot_builder runs on each VPS
+  workflow_dispatch: {}        # manual trigger button
+
+concurrency:
+  group: refresh-dashboard
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup SSH key
+        run: |
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_ed25519_ci
+          chmod 600 ~/.ssh/id_ed25519_ci
+
+      - name: Tailscale up
+        uses: tailscale/github-action@v3
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret:    ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:ci
+          version: latest
+
+      - name: Build .env.local
+        run: |
+          umask 077
+          cat > .env.local <<EOF
+          SUPABASE_URL=${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY=${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          EOF
+
+      - name: Restore upload manifest cache
+        uses: actions/cache/restore@v4
+        with:
+          path: data/.upload-manifest.json
+          key: upload-manifest-${{ github.run_id }}
+          restore-keys: |
+            upload-manifest-
+
+      - name: Run mirror + post_merge + upload
+        env:
+          SSH_KEY: /home/runner/.ssh/id_ed25519_ci
+        run: bash scripts/mirror.sh
+
+      - name: Save upload manifest cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: data/.upload-manifest.json
+          key: upload-manifest-${{ github.run_id }}
+
+      - name: Upload run logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mirror-logs-${{ github.run_id }}
+          path: data/*.log
+          if-no-files-found: ignore
+          retention-days: 7
