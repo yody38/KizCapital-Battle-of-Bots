@@ -240,21 +240,22 @@ python3 "$SCRIPT_DIR/reconcile_snapshot.py" >> "$LOG" 2>&1 || \
 python3 "$SCRIPT_DIR/post_merge.py" "$DATA_DIR" >> "$LOG" 2>&1 || \
   echo "[$(ts)] post_merge FAIL — promotion scores and correlations may be stale" >> "$LOG"
 
-# Push fresh data/ to Supabase Storage (so the public Vercel dashboard sees it).
-# Uses .env.local credentials. Pending-retry on transient failures.
+# Data Integrity DNA — verify EVERY bot has its per-bot file and stats match
+# BEFORE uploading. If integrity fails, abort so we never ship bad data to
+# the dashboard. Generates data/integrity_report.json (uploaded next).
+VERIFY_RC=0
+python3 "$SCRIPT_DIR/verify_integrity.py" --strict >> "$LOG" 2>&1 || VERIFY_RC=$?
+if [ $VERIFY_RC -ne 0 ]; then
+  echo "[$(ts)] verify_integrity FAIL rc=$VERIFY_RC — see data/integrity_report.json (NOT uploading)" >> "$LOG"
+  exit $VERIFY_RC
+fi
+
+# Push fresh data/ (including the just-generated integrity_report.json) to
+# Supabase Storage. Pending-retry on transient failures.
 UPLOAD_RC=0
 python3 "$SCRIPT_DIR/upload_to_supabase.py" >> "$LOG" 2>&1 || UPLOAD_RC=$?
 if [ $UPLOAD_RC -ne 0 ]; then
   echo "[$(ts)] supabase upload FAIL rc=$UPLOAD_RC — public dashboard data may be stale" >> "$LOG"
+  exit $UPLOAD_RC
 fi
-
-# Data Integrity DNA — verify EVERY bot has its per-bot file and stats match.
-# --strict aborts here (exit 2) if any check fails, so CI surfaces the problem
-# instead of silently shipping bad data to the dashboard.
-VERIFY_RC=0
-python3 "$SCRIPT_DIR/verify_integrity.py" --strict >> "$LOG" 2>&1 || VERIFY_RC=$?
-if [ $VERIFY_RC -ne 0 ]; then
-  echo "[$(ts)] verify_integrity FAIL rc=$VERIFY_RC — see data/integrity_report.json" >> "$LOG"
-  exit $VERIFY_RC
-fi
-echo "[$(ts)] mirror cycle OK — data integrity verified" >> "$LOG"
+echo "[$(ts)] mirror cycle OK — verified + uploaded" >> "$LOG"
