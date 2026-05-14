@@ -171,11 +171,25 @@ def main() -> int:
     skipped = 0
     failed: list[str] = []
 
+    def manifest_get(p: str) -> str | None:
+        """Manifest values can be a raw sha (old format) or a dict (new format)."""
+        v = manifest.get(p)
+        if isinstance(v, dict):
+            return v.get("hash")
+        return v
+
+    def mark_pending(obj_path: str) -> None:
+        """Mark as pending-retry so the next run treats it as changed and re-uploads.
+        Tracks retry count to surface persistent failures."""
+        prev = manifest.get(obj_path)
+        tries = (prev.get("tries", 0) + 1) if isinstance(prev, dict) else 1
+        new_manifest[obj_path] = {"hash": "pending-retry", "tries": tries}
+
     print(f"[upload] {len(files)} files in data/")
     for abs_path, obj_path in files:
         digest = file_sha256(abs_path)
         new_manifest[obj_path] = digest
-        if manifest.get(obj_path) == digest:
+        if manifest_get(obj_path) == digest:
             skipped += 1
             continue
         try:
@@ -185,7 +199,7 @@ def main() -> int:
                 print(f"[upload]   {uploaded} uploaded...")
         except Exception as exc:  # noqa: BLE001
             failed.append(f"{obj_path}: {exc}")
-            new_manifest.pop(obj_path, None)  # don't mark as uploaded
+            mark_pending(obj_path)  # force retry next run; do NOT drop silently
 
     # ------------------------------------------------------------------
     # Audit: list every folder used + verify nothing is silently missing.
@@ -222,7 +236,7 @@ def main() -> int:
             audit_resubmit += 1
         except Exception as exc:  # noqa: BLE001
             failed.append(f"audit:{obj_path}: {exc}")
-            new_manifest.pop(obj_path, None)
+            mark_pending(obj_path)  # force retry next run
 
     save_manifest(new_manifest)
     dur = time.time() - started

@@ -229,12 +229,32 @@ with open(os.path.join(root, '_manifest.json'), 'w') as f:
 print(f"manifest OK bots={len(manifest['bots'])}")
 PY
 
-# Post-merge enrichment: Promotion Score + correlation matrix
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+# Reconcile snapshot.bots[] with per-bot files (truth source). Fixes drift
+# when a VPS builder wrote snapshot.json while still updating per-bot files.
+python3 "$SCRIPT_DIR/reconcile_snapshot.py" >> "$LOG" 2>&1 || \
+  echo "[$(ts)] reconcile FAIL — snapshot.bots may lag per-bot files" >> "$LOG"
+
+# Post-merge enrichment: Promotion Score + correlation matrix
 python3 "$SCRIPT_DIR/post_merge.py" "$DATA_DIR" >> "$LOG" 2>&1 || \
   echo "[$(ts)] post_merge FAIL — promotion scores and correlations may be stale" >> "$LOG"
 
 # Push fresh data/ to Supabase Storage (so the public Vercel dashboard sees it).
-# Uses .env.local credentials. Only re-uploads files whose sha256 changed.
-python3 "$SCRIPT_DIR/upload_to_supabase.py" >> "$LOG" 2>&1 || \
-  echo "[$(ts)] supabase upload FAIL — public dashboard data may be stale" >> "$LOG"
+# Uses .env.local credentials. Pending-retry on transient failures.
+UPLOAD_RC=0
+python3 "$SCRIPT_DIR/upload_to_supabase.py" >> "$LOG" 2>&1 || UPLOAD_RC=$?
+if [ $UPLOAD_RC -ne 0 ]; then
+  echo "[$(ts)] supabase upload FAIL rc=$UPLOAD_RC — public dashboard data may be stale" >> "$LOG"
+fi
+
+# Data Integrity DNA — verify EVERY bot has its per-bot file and stats match.
+# --strict aborts here (exit 2) if any check fails, so CI surfaces the problem
+# instead of silently shipping bad data to the dashboard.
+VERIFY_RC=0
+python3 "$SCRIPT_DIR/verify_integrity.py" --strict >> "$LOG" 2>&1 || VERIFY_RC=$?
+if [ $VERIFY_RC -ne 0 ]; then
+  echo "[$(ts)] verify_integrity FAIL rc=$VERIFY_RC — see data/integrity_report.json" >> "$LOG"
+  exit $VERIFY_RC
+fi
+echo "[$(ts)] mirror cycle OK — data integrity verified" >> "$LOG"
