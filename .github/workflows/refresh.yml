@@ -2,8 +2,10 @@ name: refresh-dashboard
 
 on:
   schedule:
-    - cron: "10,40 * * * *"   # UTC; 10 min after snapshot_builder runs on each VPS
+    - cron: "10,40 * * * *"   # UTC; backup if external trigger misses
   workflow_dispatch: {}        # manual trigger button
+  repository_dispatch:
+    types: [refresh-dashboard] # external trigger (VPS1 cron via PAT)
 
 concurrency:
   group: refresh-dashboard
@@ -34,10 +36,10 @@ jobs:
       - name: Build .env.local
         run: |
           umask 077
-          cat > .env.local <<EOF
+          cat > .env.local <<EOF2
           SUPABASE_URL=${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY=${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-          EOF
+          EOF2
 
       - name: Restore upload manifest cache
         uses: actions/cache/restore@v4
