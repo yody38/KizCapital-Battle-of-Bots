@@ -2,14 +2,15 @@ name: integrity-watchdog
 
 on:
   schedule:
-    # 10 min after each refresh-dashboard run (which fires at XX:10 and XX:40 UTC)
     - cron: "20,50 * * * *"
   workflow_dispatch: {}
+  repository_dispatch:
+    types: [integrity-watchdog]
 
 permissions:
   contents: read
-  issues: write          # for auto-creating drift Issues
-  actions: read          # for `gh run list` + `gh run download`
+  issues: write
+  actions: read
 
 concurrency:
   group: integrity-watchdog
