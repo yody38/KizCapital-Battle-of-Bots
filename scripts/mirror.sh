@@ -14,13 +14,20 @@ TMP="$DATA_DIR/snapshot.json.mirror.tmp"
 SSH_KEY="${SSH_KEY:-$HOME/.ssh/id_ed25519}"
 REMOTE_FILE='C:/mt5-mcp/snapshot.json'
 REMOTE_BOTS_DIR='C:/mt5-mcp/bots'
+REMOTE_READY_FILE='C:/mt5-mcp/bots/.ready'
 BOTS_OUT_DIR="$DATA_DIR/bots"
 
 # Hard freshness gate: a VPS snapshot older than this is treated as a failure.
 SNAPSHOT_MAX_AGE_SEC=${SNAPSHOT_MAX_AGE_SEC:-1800}
-# Per-bot scp retries when the builder is mid-write upstream (race condition).
+# Per-bot scp retries (kept as a defence-in-depth in case the .ready flag is
+# absent on a VPS that hasn't been upgraded to builder v3 yet).
 BOTS_SCP_MAX_ATTEMPTS=${BOTS_SCP_MAX_ATTEMPTS:-3}
 BOTS_SCP_RETRY_DELAY_SEC=${BOTS_SCP_RETRY_DELAY_SEC:-15}
+# Set to 1 to abort the cycle when a VPS lacks a valid .ready flag (strict).
+# Default 0 during rollout: the .ready check is performed and logged, but
+# absence falls back to the legacy bots-scp-with-retry path. Flip to 1 once
+# every VPS reliably emits .ready (builder v3+).
+READY_FLAG_REQUIRED=${READY_FLAG_REQUIRED:-0}
 
 # Shared scp options: ServerAlive keeps the transfer from hanging when the link stalls.
 SCP_OPTS=(-i "$SSH_KEY" -o StrictHostKeyChecking=accept-new \
@@ -113,6 +120,35 @@ PY
     if [ "$expected_bots" -lt 0 ]; then
       echo "[$(ts)] $id could not parse expected bot count — aborting"
       FATAL_VPS="$id:bots_count_parse"
+      break
+    fi
+
+    # --- .ready flag (builder v3+) ---
+    # The builder writes this file atomically as the LAST step of its cycle.
+    # If we can read it AND its ts matches snapshot.generated_at, we're safe
+    # to scp the per-bot dir — the builder is fully done with this cycle.
+    ready_local="$DATA_DIR/.ready_${id}.json"
+    rm -f "$ready_local"
+    snap_ts=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('generated_at',''))" "$local_file")
+    ready_valid=0
+    if scp "${SCP_OPTS[@]}" "$host:$REMOTE_READY_FILE" "$ready_local" 2>/dev/null; then
+      if [ -s "$ready_local" ]; then
+        ready_ts=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('ts',''))" "$ready_local" 2>/dev/null)
+        ready_bots=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('bot_files_count',-1))" "$ready_local" 2>/dev/null)
+        if [ -n "$ready_ts" ] && [ "$ready_ts" = "$snap_ts" ]; then
+          ready_valid=1
+          echo "[$(ts)] $id .ready OK ts=$ready_ts bot_files_count=$ready_bots"
+        else
+          echo "[$(ts)] $id .ready MISMATCH ready_ts=$ready_ts snap_ts=$snap_ts — builder cycle inconsistent"
+        fi
+      else
+        echo "[$(ts)] $id .ready empty"
+      fi
+    else
+      echo "[$(ts)] $id .ready not present on remote"
+    fi
+    if [ "$ready_valid" -ne 1 ] && [ "$READY_FLAG_REQUIRED" -eq 1 ]; then
+      FATAL_VPS="$id:ready_missing_or_mismatch"
       break
     fi
 
