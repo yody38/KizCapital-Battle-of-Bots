@@ -1,0 +1,40 @@
+name: integrity-watchdog
+
+on:
+  schedule:
+    # 10 min after each refresh-dashboard run (which fires at XX:10 and XX:40 UTC)
+    - cron: "20,50 * * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  issues: write          # for auto-creating drift Issues
+  actions: read          # for `gh run list` + `gh run download`
+
+concurrency:
+  group: integrity-watchdog
+  cancel-in-progress: false
+
+jobs:
+  watchdog:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run integrity watchdog
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python3 scripts/integrity_watchdog.py
+
+      - name: Upload health log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: integrity-health-log-${{ github.run_id }}
+          path: data/integrity_health_log.jsonl
+          if-no-files-found: warn
+          retention-days: 7
