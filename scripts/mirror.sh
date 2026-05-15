@@ -16,6 +16,16 @@ REMOTE_FILE='C:/mt5-mcp/snapshot.json'
 REMOTE_BOTS_DIR='C:/mt5-mcp/bots'
 BOTS_OUT_DIR="$DATA_DIR/bots"
 
+# Hard freshness gate: a VPS snapshot older than this is treated as a failure.
+SNAPSHOT_MAX_AGE_SEC=${SNAPSHOT_MAX_AGE_SEC:-1800}
+# Per-bot scp retries when the builder is mid-write upstream (race condition).
+BOTS_SCP_MAX_ATTEMPTS=${BOTS_SCP_MAX_ATTEMPTS:-3}
+BOTS_SCP_RETRY_DELAY_SEC=${BOTS_SCP_RETRY_DELAY_SEC:-15}
+
+# Shared scp options: ServerAlive keeps the transfer from hanging when the link stalls.
+SCP_OPTS=(-i "$SSH_KEY" -o StrictHostKeyChecking=accept-new \
+          -o ConnectTimeout=30 -o ServerAliveInterval=15 -o ServerAliveCountMax=4)
+
 # VPS roster (format "id=host"). Add entries here to scale.
 VPS_ENTRIES=(
   "vps1=trader@100.81.54.93"
@@ -29,7 +39,44 @@ mkdir -p "$DATA_DIR" "$BOTS_OUT_DIR"
 ts() { date -u +"%Y-%m-%dT%H:%M:%SZ"; }
 
 declare -a FRESH_FILES=()
-declare -a STALE_VPS=()
+
+FATAL_VPS=""
+
+# Compute the expected bot count for a VPS from its just-fetched snapshot.json
+# (only bots with magic != 0, matching the merge step further down).
+expected_bots_in_snapshot() {
+  python3 - "$1" <<'PY'
+import json, sys
+try:
+    with open(sys.argv[1]) as f:
+        data = json.load(f)
+    print(sum(1 for b in data.get('bots', []) if (b.get('magic') or 0) != 0))
+except Exception:
+    print(-1)
+PY
+}
+
+# Snapshot age in seconds (now - generated_at). Returns -1 on parse error.
+snapshot_age_sec() {
+  python3 - "$1" <<'PY'
+import json, sys
+from datetime import datetime, timezone
+try:
+    with open(sys.argv[1]) as f:
+        data = json.load(f)
+    g = data.get('generated_at')
+    if not g:
+        print(-1); raise SystemExit
+    if g.endswith('Z'):
+        g = g[:-1] + '+00:00'
+    dt = datetime.fromisoformat(g)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    print(int((datetime.now(timezone.utc) - dt).total_seconds()))
+except Exception:
+    print(-1)
+PY
+}
 
 {
   echo "[$(ts)] mirror starting"
@@ -38,51 +85,94 @@ declare -a STALE_VPS=()
     host="${entry#*=}"
     local_file="$DATA_DIR/snapshot_${id}.json"
     local_tmp="${local_file}.tmp"
-    if scp -i "$SSH_KEY" -o StrictHostKeyChecking=accept-new -o ConnectTimeout=30 \
-        "$host:$REMOTE_FILE" "$local_tmp" 2>&1; then
-      if [ -s "$local_tmp" ] && head -c 1 "$local_tmp" | grep -q '{'; then
-        mv "$local_tmp" "$local_file"
-        echo "[$(ts)] $id OK $(wc -c < "$local_file") bytes"
-        FRESH_FILES+=("$id:$local_file")
-      else
-        echo "[$(ts)] $id INVALID JSON — keeping previous cache"
-        rm -f "$local_tmp"
-        if [ -f "$local_file" ]; then FRESH_FILES+=("$id:$local_file"); STALE_VPS+=("$id"); else STALE_VPS+=("$id"); fi
-      fi
-    else
-      echo "[$(ts)] $id SCP FAIL — keeping previous cache"
+
+    # --- snapshot.json fetch (mandatory, fail-closed) ---
+    if ! scp "${SCP_OPTS[@]}" "$host:$REMOTE_FILE" "$local_tmp" 2>&1; then
+      echo "[$(ts)] $id SCP FAIL on snapshot.json — aborting cycle (fail-closed)"
       rm -f "$local_tmp"
-      if [ -f "$local_file" ]; then FRESH_FILES+=("$id:$local_file"); STALE_VPS+=("$id"); else STALE_VPS+=("$id"); fi
+      FATAL_VPS="$id:snapshot_scp"
+      break
     fi
-    # Per-bot full-history files: replace whole vps subfolder atomically
+    if [ ! -s "$local_tmp" ] || ! head -c 1 "$local_tmp" | grep -q '{'; then
+      echo "[$(ts)] $id INVALID JSON in snapshot.json — aborting cycle"
+      rm -f "$local_tmp"
+      FATAL_VPS="$id:snapshot_invalid"
+      break
+    fi
+    mv "$local_tmp" "$local_file"
+
+    age=$(snapshot_age_sec "$local_file")
+    if [ "$age" -lt 0 ] || [ "$age" -gt "$SNAPSHOT_MAX_AGE_SEC" ]; then
+      echo "[$(ts)] $id snapshot.json STALE age=${age}s threshold=${SNAPSHOT_MAX_AGE_SEC}s — aborting cycle"
+      FATAL_VPS="$id:snapshot_stale_${age}s"
+      break
+    fi
+    echo "[$(ts)] $id OK $(wc -c < "$local_file") bytes age=${age}s"
+
+    expected_bots=$(expected_bots_in_snapshot "$local_file")
+    if [ "$expected_bots" -lt 0 ]; then
+      echo "[$(ts)] $id could not parse expected bot count — aborting"
+      FATAL_VPS="$id:bots_count_parse"
+      break
+    fi
+
+    # --- per-bot files fetch (with retry to absorb upstream-builder race) ---
     bots_target="$BOTS_OUT_DIR/$id"
     bots_staging="$BOTS_OUT_DIR/.${id}.staging"
-    rm -rf "$bots_staging"
-    mkdir -p "$bots_staging"
-    if scp -i "$SSH_KEY" -o StrictHostKeyChecking=accept-new -o ConnectTimeout=60 \
-        -r "$host:$REMOTE_BOTS_DIR/." "$bots_staging/" 2>&1; then
-      # Atomic swap: ensures dashboard NEVER hits a 404 window during refresh.
-      bots_backup="${bots_target}.swap.$$"
-      rm -rf "$bots_backup"
-      if [ -d "$bots_target" ]; then mv "$bots_target" "$bots_backup"; fi
-      mv "$bots_staging" "$bots_target"
-      rm -rf "$bots_backup"
-      bot_count=$(find "$bots_target" -name '*.json' 2>/dev/null | wc -l | tr -d ' ')
-      echo "[$(ts)] $id bots OK $bot_count files (atomic swap)"
-    else
-      echo "[$(ts)] $id bots SCP FAIL — keeping previous bot cache"
+    bots_attempt_ok=0
+    for attempt in $(seq 1 "$BOTS_SCP_MAX_ATTEMPTS"); do
       rm -rf "$bots_staging"
+      mkdir -p "$bots_staging"
+      if scp "${SCP_OPTS[@]}" -r "$host:$REMOTE_BOTS_DIR/." "$bots_staging/" 2>&1; then
+        staged=$(find "$bots_staging" -maxdepth 1 -name '*.json' 2>/dev/null | wc -l | tr -d ' ')
+        if [ "$expected_bots" -eq 0 ] || [ "$staged" -ge "$expected_bots" ]; then
+          bots_attempt_ok=1
+          echo "[$(ts)] $id bots scp OK on attempt $attempt — staged=$staged expected=$expected_bots"
+          break
+        else
+          echo "[$(ts)] $id bots staged=$staged < expected=$expected_bots on attempt $attempt — retrying"
+        fi
+      else
+        echo "[$(ts)] $id bots SCP error on attempt $attempt — retrying"
+      fi
+      if [ "$attempt" -lt "$BOTS_SCP_MAX_ATTEMPTS" ]; then
+        sleep "$BOTS_SCP_RETRY_DELAY_SEC"
+      fi
+    done
+
+    if [ "$bots_attempt_ok" -ne 1 ]; then
+      echo "[$(ts)] $id bots scp FAILED after $BOTS_SCP_MAX_ATTEMPTS attempts — aborting cycle"
+      rm -rf "$bots_staging"
+      FATAL_VPS="$id:bots_scp_exhausted"
+      break
     fi
+
+    # Atomic swap: ensures dashboard NEVER hits a 404 window during refresh.
+    bots_backup="${bots_target}.swap.$$"
+    rm -rf "$bots_backup"
+    if [ -d "$bots_target" ]; then mv "$bots_target" "$bots_backup"; fi
+    mv "$bots_staging" "$bots_target"
+    rm -rf "$bots_backup"
+    bot_count=$(find "$bots_target" -maxdepth 1 -name '*.json' 2>/dev/null | wc -l | tr -d ' ')
+    echo "[$(ts)] $id bots OK $bot_count files (atomic swap, expected=$expected_bots)"
+    FRESH_FILES+=("$id:$local_file")
   done
 } >> "$LOG" 2>&1
 
-if [ ${#FRESH_FILES[@]} -eq 0 ]; then
-  echo "[$(ts)] mirror FAIL — no usable snapshots" >> "$LOG"
+if [ -n "$FATAL_VPS" ]; then
+  echo "[$(ts)] mirror FAIL — fail-closed on $FATAL_VPS (no upload)" >> "$LOG"
+  exit 1
+fi
+
+if [ ${#FRESH_FILES[@]} -ne ${#VPS_ENTRIES[@]} ]; then
+  echo "[$(ts)] mirror FAIL — got ${#FRESH_FILES[@]} VPS, expected ${#VPS_ENTRIES[@]}" >> "$LOG"
   exit 1
 fi
 
 # Merge via python (vanilla, no deps).
-STALE_ARG=$(IFS=,; echo "${STALE_VPS[*]:-}")
+# Fail-closed mode: no VPS is ever marked stale by the mirror; if a VPS was
+# stale we'd have already aborted above. STALE_ARG stays empty for API compat.
+STALE_ARG=""
 
 HISTORY_FILE="$DATA_DIR/history.jsonl"
 
@@ -233,12 +323,20 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 # Reconcile snapshot.bots[] with per-bot files (truth source). Fixes drift
 # when a VPS builder wrote snapshot.json while still updating per-bot files.
-python3 "$SCRIPT_DIR/reconcile_snapshot.py" >> "$LOG" 2>&1 || \
-  echo "[$(ts)] reconcile FAIL — snapshot.bots may lag per-bot files" >> "$LOG"
+# Fail-closed: if reconcile breaks, snapshot.bots[] would lag per-bot files
+# and the dashboard would serve mismatched aggregates — abort the cycle.
+if ! python3 "$SCRIPT_DIR/reconcile_snapshot.py" >> "$LOG" 2>&1; then
+  echo "[$(ts)] reconcile FAIL — aborting cycle (snapshot.bots[] may lag per-bot files)" >> "$LOG"
+  exit 3
+fi
 
-# Post-merge enrichment: Promotion Score + correlation matrix
-python3 "$SCRIPT_DIR/post_merge.py" "$DATA_DIR" >> "$LOG" 2>&1 || \
-  echo "[$(ts)] post_merge FAIL — promotion scores and correlations may be stale" >> "$LOG"
+# Post-merge enrichment: Promotion Score + correlation matrix + portfolio.
+# Fail-closed: if this breaks, scores/correlations/portfolio.json go stale and
+# the dashboard would mix fresh raw data with old derived data — abort.
+if ! python3 "$SCRIPT_DIR/post_merge.py" "$DATA_DIR" >> "$LOG" 2>&1; then
+  echo "[$(ts)] post_merge FAIL — aborting cycle (promotion scores and correlations stale)" >> "$LOG"
+  exit 3
+fi
 
 # Data Integrity DNA — verify EVERY bot has its per-bot file and stats match
 # BEFORE uploading. If integrity fails, abort so we never ship bad data to
