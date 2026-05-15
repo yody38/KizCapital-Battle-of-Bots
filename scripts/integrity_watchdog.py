@@ -201,12 +201,13 @@ def file_issue_dedupe(title_root: str, body: str) -> str:
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     title = f"[integrity-watchdog] {title_root} — {today}"
 
-    # Search existing
+    # Search existing — filter by label for structured dedupe, not title substring.
     try:
         out = subprocess.run(
             [
                 "gh", "issue", "list", "--repo", GH_REPO,
-                "--state", "open", "--search", title, "--json", "number,title",
+                "--state", "open", "--label", "integrity-watchdog",
+                "--json", "number,title",
             ],
             check=True, capture_output=True, text=True, timeout=30,
         )
@@ -234,6 +235,7 @@ def file_issue_dedupe(title_root: str, body: str) -> str:
             [
                 "gh", "issue", "create", "--repo", GH_REPO,
                 "--title", title, "--body", body,
+                "--label", "integrity-watchdog",
             ],
             check=True, capture_output=True, text=True, timeout=30,
         )
