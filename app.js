@@ -52,6 +52,14 @@ const state = {
   compareList: [], // {vps, login, magic, bot, trades, daily}
 };
 
+// Live equity stream (real accounts) — populated by initLiveStream().
+const liveState = {
+  channel: null,
+  initialized: false,
+  byLogin: new Map(),     // login -> latest row from public.live_real_state
+  pollTimer: null,
+};
+
 // --- Math helpers --------------------------------------------------------
 
 function wilsonLB(wins, n, z = 1.96) {
@@ -161,6 +169,13 @@ function render() {
   if (totalBotsEl) {
     const totalBots = (s.bots || []).filter(b => (b.magic || 0) !== 0).length;
     totalBotsEl.textContent = totalBots;
+  }
+  // Total closed trades across 100% of bots (lifetime since 2020, magic ≠ 0).
+  // Excludes open positions by design — only closed deals are counted in b.trades.
+  const totalTradesEl = document.getElementById('total-trades-count');
+  if (totalTradesEl) {
+    const total = (s.bots || []).reduce((acc, b) => acc + (Number(b.trades) || 0), 0);
+    animateCounter(totalTradesEl, total);
   }
 
   // Determine freshness against oldest source
@@ -299,6 +314,180 @@ function drawSpark(canvas, points, color) {
   } catch (err) { console.warn('sparkline failed', err); }
 }
 
+function ensureLivePill() {
+  let pill = document.getElementById('live-pill');
+  if (pill) return pill;
+  const header = document.querySelector('.real-header');
+  if (!header) return null;
+  pill = document.createElement('div');
+  pill.id = 'live-pill';
+  pill.className = 'live-pill live-off';
+  pill.title = 'Stream en tiempo real desde la VPS · click para forzar fetch';
+  pill.innerHTML = '<span class="live-dot"></span><span class="live-pill-label">offline</span><span class="live-pill-age"></span>';
+  pill.addEventListener('click', async () => {
+    if (!window.kizLiveReal) return;
+    const rows = await window.kizLiveReal.fetchOnce();
+    rows.forEach(applyLivePatch);
+  });
+  header.appendChild(pill);
+  return pill;
+}
+
+function setLivePillStatus(state, label, ageSecs) {
+  const pill = document.getElementById('live-pill');
+  if (!pill) return;
+  pill.classList.remove('live-on', 'live-warn', 'live-off');
+  pill.classList.add(`live-${state}`);
+  pill.querySelector('.live-pill-label').textContent = label;
+  const ageEl = pill.querySelector('.live-pill-age');
+  ageEl.textContent = ageSecs == null ? '' : `· ${ageSecs.toFixed(1)}s`;
+}
+
+function liveLatestAgeSecs() {
+  let oldest = null;
+  for (const row of liveState.byLogin.values()) {
+    const t = new Date(row.ts).getTime();
+    if (Number.isFinite(t)) {
+      if (oldest == null || t < oldest) oldest = t;
+    }
+  }
+  if (oldest == null) return null;
+  return Math.max(0, (Date.now() - oldest) / 1000);
+}
+
+function refreshLivePillFromState() {
+  const age = liveLatestAgeSecs();
+  if (age == null) {
+    setLivePillStatus('off', 'sin push', null);
+    return;
+  }
+  if (age < 8) setLivePillStatus('on', 'live', age);
+  else if (age < 20) setLivePillStatus('warn', 'lag', age);
+  else setLivePillStatus('off', 'stale', age);
+}
+
+function flashLive(el) {
+  if (!el) return;
+  el.classList.remove('live-flash');
+  void el.offsetWidth;
+  el.classList.add('live-flash');
+}
+
+function _setTextWithFlash(el, text) {
+  if (!el) return;
+  if (el.textContent !== text) {
+    el.textContent = text;
+    flashLive(el);
+  }
+}
+
+function _setSignedTextWithFlash(el, value) {
+  if (!el) return;
+  const text = fmt.usd(value, true);
+  el.classList.remove('positive', 'negative');
+  const sc = signedClass(value);
+  if (sc) el.classList.add(sc);
+  if (el.textContent !== text) {
+    el.textContent = text;
+    flashLive(el);
+  }
+}
+
+function buildPositionRowHtml(p) {
+  const fmtDist = (price, target) => {
+    if (!price || !target) return '—';
+    const d = distancePct(price, target);
+    if (d == null || !isFinite(d)) return target;
+    return `${target} (${d > 0 ? '+' : ''}${d.toFixed(2)}%)`;
+  };
+  const typeStr = (p.type || '').toString();
+  return `
+    <tr data-position-login="${p.login}" data-position-ticket="${p.ticket}">
+      <td>#${p.login}</td>
+      <td><code>${p.magic}</code></td>
+      <td><span class="symbol-tag">${p.symbol}</span></td>
+      <td class="pos-${typeStr.toLowerCase()}">${typeStr}</td>
+      <td class="num">${p.volume}</td>
+      <td class="num">${p.price_open}</td>
+      <td class="num">${p.price_current}</td>
+      <td class="num">${fmtDist(p.price_current, p.sl)}</td>
+      <td class="num">${fmtDist(p.price_current, p.tp)}</td>
+      <td class="num ${signedClass(p.profit)}">${fmt.usd(p.profit, true)}</td>
+      <td>${fmt.shortTime(p.time_open ? new Date(p.time_open * 1000).toISOString() : null)}</td>
+    </tr>
+  `;
+}
+
+function applyLivePatch(row) {
+  if (!row || row.login == null) return;
+  liveState.byLogin.set(Number(row.login), row);
+
+  // Update card.
+  const card = document.querySelector(`.real-card[data-real-login="${row.login}"]`);
+  if (card) {
+    const balanceEl = card.querySelector('[data-live-field="balance"]');
+    const equityEl = card.querySelector('[data-live-field="equity"]');
+    const profitEl = card.querySelector('[data-live-field="profit"]');
+    const marginEl = card.querySelector('[data-live-field="margin"]');
+    _setTextWithFlash(balanceEl, fmt.usd(row.balance));
+    _setTextWithFlash(equityEl, fmt.usd(row.equity));
+    _setSignedTextWithFlash(profitEl, row.profit);
+    _setTextWithFlash(marginEl, fmt.usd(row.margin));
+  }
+
+  // Update header totals — aggregate across all known logins.
+  let totBal = 0, totEq = 0, totFloat = 0;
+  for (const r of liveState.byLogin.values()) {
+    totBal += Number(r.balance) || 0;
+    totEq += Number(r.equity) || 0;
+    totFloat += Number(r.profit) || 0;
+  }
+  _setTextWithFlash(document.getElementById('real-balance'), fmt.usd(totBal));
+  _setTextWithFlash(document.getElementById('real-equity'), fmt.usd(totEq));
+  _setSignedTextWithFlash(document.getElementById('real-floating'), totFloat);
+
+  // Update positions table — replace the rows for this login, leave others.
+  const tbody = document.getElementById('real-positions-tbody');
+  const empty = document.getElementById('real-positions-empty');
+  if (tbody) {
+    tbody
+      .querySelectorAll(`tr[data-position-login="${row.login}"]`)
+      .forEach((tr) => tr.remove());
+    const positions = Array.isArray(row.positions) ? row.positions : [];
+    positions.forEach((p) => {
+      const html = buildPositionRowHtml({ ...p, login: row.login });
+      tbody.insertAdjacentHTML('beforeend', html);
+    });
+    const anyPositions = !!tbody.querySelector('tr');
+    if (empty) empty.hidden = anyPositions;
+  }
+
+  refreshLivePillFromState();
+}
+
+function initLiveStream() {
+  if (liveState.initialized || !window.kizLiveReal) return;
+  liveState.initialized = true;
+  ensureLivePill();
+  refreshLivePillFromState();
+
+  // Initial fetch so the UI doesn't wait up to LIVE_INTERVAL_SECS for the first push.
+  window.kizLiveReal.fetchOnce().then((rows) => {
+    rows.forEach(applyLivePatch);
+  }).catch((err) => console.warn('[kiz] live initial fetch failed', err));
+
+  liveState.channel = window.kizLiveReal.subscribe(applyLivePatch);
+
+  // 1-second pill refresh so age stays current even between pushes.
+  if (liveState.pollTimer) clearInterval(liveState.pollTimer);
+  liveState.pollTimer = setInterval(refreshLivePillFromState, 1000);
+
+  window.addEventListener('beforeunload', () => {
+    if (liveState.channel) window.kizLiveReal.unsubscribe(liveState.channel);
+    if (liveState.pollTimer) clearInterval(liveState.pollTimer);
+  });
+}
+
 function renderRealAccounts() {
   const s = state.snapshot;
   const section = document.getElementById('real-accounts');
@@ -323,16 +512,16 @@ function renderRealAccounts() {
   cards.innerHTML = rp.accounts.map(a => {
     const pnlCls = signedClass(a.profit);
     return `
-      <div class="real-card account-card" data-vps="${a.vps}" data-login="${a.login}" title="Click para ver los bots de esta cuenta">
+      <div class="real-card account-card" data-vps="${a.vps}" data-login="${a.login}" data-real-login="${a.login}" title="Click para ver los bots de esta cuenta">
         <div class="real-card-header">
           <span class="real-card-login">#${a.login}</span>
           <span class="vps-badge vps-${(a.vps || '').toLowerCase()}">${vpsPrettyName(a.vps)}</span>
         </div>
         <div class="real-card-metrics">
-          <div><span class="metric-label">Balance</span><strong>${fmt.usd(a.balance)}</strong></div>
-          <div><span class="metric-label">Equity</span><strong>${fmt.usd(a.equity)}</strong></div>
-          <div><span class="metric-label">Flotante</span><strong class="${pnlCls}">${fmt.usd(a.profit, true)}</strong></div>
-          <div><span class="metric-label">Margin</span><strong>${fmt.usd(a.margin)}</strong></div>
+          <div><span class="metric-label">Balance</span><strong data-live-field="balance">${fmt.usd(a.balance)}</strong></div>
+          <div><span class="metric-label">Equity</span><strong data-live-field="equity">${fmt.usd(a.equity)}</strong></div>
+          <div><span class="metric-label">Flotante</span><strong class="${pnlCls}" data-live-field="profit">${fmt.usd(a.profit, true)}</strong></div>
+          <div><span class="metric-label">Margin</span><strong data-live-field="margin">${fmt.usd(a.margin)}</strong></div>
         </div>
         <div class="spark-wrapper"><canvas id="spark-${a.login}"></canvas></div>
         <div class="real-card-footer">Broker: ${a.server} · Leverage 1:${a.leverage}</div>
@@ -394,6 +583,7 @@ function renderRealAccounts() {
     botsEmpty.hidden = true;
     botsBody.innerHTML = realBots.map(b => `
       <tr class="bot-row" data-vps="${b.vps}" data-login="${b.account_login}" data-magic="${b.magic}">
+        ${buildCompareCheckboxCell(b.vps, b.account_login, b.magic)}
         <td>#${b.account_login}</td>
         <td><code>${b.magic}</code></td>
         <td>${(b.symbols || []).map(sy => `<span class="symbol-tag">${sy}</span>`).join('')}</td>
@@ -409,6 +599,9 @@ function renderRealAccounts() {
       </tr>
     `).join('');
   }
+
+  // Activate Realtime stream (idempotent — only attaches once).
+  initLiveStream();
 }
 
 function renderDemoWrapper() {
@@ -535,6 +728,7 @@ function renderBalanced() {
     const netCls = b.net_profit >= 0 ? 'profit-positive' : 'profit-negative';
     return `
       <tr class="bot-row" data-vps="${b.vps}" data-login="${b.account_login}" data-magic="${b.magic}">
+        ${buildCompareCheckboxCell(b.vps, b.account_login, b.magic)}
         <td><span class="rank-badge">${i + 1}</span></td>
         <td class="mono">${b.magic}</td>
         <td>${vpsBadge(b.vps)}</td>
@@ -616,6 +810,7 @@ function renderNewBots() {
     const ftLabel = new Date(b._ftMs).toISOString().slice(0, 10);
     return `
       <tr class="bot-row" data-vps="${b.vps}" data-login="${b.account_login}" data-magic="${b.magic}">
+        ${buildCompareCheckboxCell(b.vps, b.account_login, b.magic)}
         <td><span class="rank-badge">${i + 1}</span></td>
         <td class="mono">${b.magic}</td>
         <td>${vpsBadge(b.vps)}</td>
@@ -1417,6 +1612,7 @@ function renderCandidates() {
       : '';
     return `
       <tr class="bot-row" data-vps="${b.vps}" data-login="${b.account_login}" data-magic="${b.magic}">
+        ${buildCompareCheckboxCell(b.vps, b.account_login, b.magic)}
         <td><span class="rank-badge">${i + 1}</span></td>
         <td class="num"><strong style="color:var(--accent)">${b.promotion_score.toFixed(1)}</strong> ${confChip}</td>
         <td>${statusBadge(b.promotion_status)}</td>
@@ -4146,24 +4342,40 @@ let compareCharts = { equity: null, dd: null };
 
 function compareKey(vps, login, magic) { return `${vps}-${login}-${magic}`; }
 
-async function addBotToCompare() {
-  if (!modalState.bot) return;
-  const btn = document.getElementById('bot-compare-add-btn');
-  const { vps, login, magic } = modalState.bot;
+function isInCompareList(vps, login, magic) {
   const key = compareKey(vps, login, magic);
+  return !!state.compareList.find(x => x.key === key);
+}
 
-  // Toggle: si ya está añadido, lo quitamos
-  if (state.compareList.find(x => x.key === key)) {
-    state.compareList = state.compareList.filter(x => x.key !== key);
-    refreshCompareBadge();
-    updateCompareAddBtnState();
+function removeFromCompare(vps, login, magic, { silent = false } = {}) {
+  const key = compareKey(vps, login, magic);
+  const exists = !!state.compareList.find(x => x.key === key);
+  if (!exists) return false;
+  state.compareList = state.compareList.filter(x => x.key !== key);
+  refreshCompareBadge();
+  updateCompareAddBtnState();
+  refreshCompareCheckboxes();
+  refreshCompareFab();
+  if (!silent) {
     showToast({
       type: 'info',
       icon: '⚔️',
       title: 'Bot quitado del comparador',
       msg: `magic <strong>${magic}</strong> ya no está en la cola. Quedan <strong>${state.compareList.length}</strong>.`,
     });
-    return;
+  }
+  // Re-render comparator if open.
+  const overlay = document.getElementById('compare-modal-overlay');
+  if (overlay && !overlay.hidden) renderCompare();
+  return true;
+}
+
+async function addBotToCompareByIds(vps, login, magic, { source = 'modal' } = {}) {
+  if (!vps || login == null || magic == null) return false;
+  const key = compareKey(vps, login, magic);
+
+  if (state.compareList.find(x => x.key === key)) {
+    return removeFromCompare(vps, login, magic);
   }
 
   if (state.compareList.length >= COMPARE_MAX) {
@@ -4175,7 +4387,7 @@ async function addBotToCompare() {
       action: { label: '⚔️ Abrir comparador', fn: () => { openCompareModal(); } },
       duration: 6000,
     });
-    return;
+    return false;
   }
 
   const snapBot = findBotInSnapshot(login, magic);
@@ -4187,21 +4399,68 @@ async function addBotToCompare() {
   state.compareList.push({ key, vps, login, magic, bot: snapBot, daily });
   refreshCompareBadge();
   updateCompareAddBtnState();
+  refreshCompareCheckboxes();
+  refreshCompareFab();
   flashCompareBtn();
-  if (btn) {
-    btn.classList.remove('is-pop');
-    void btn.offsetWidth;
-    btn.classList.add('is-pop');
-  }
+
   const total = state.compareList.length;
   showToast({
     type: 'success',
     icon: '✓',
     title: '¡Añadido al comparador!',
-    msg: `magic <strong>${magic}</strong> en cola. Hay <strong>${total}</strong> ${total === 1 ? 'bot' : 'bots'} listos para comparar.`,
+    msg: `magic <strong>${magic}</strong> en cola${source === 'checkbox' ? ' (selección rápida)' : ''}. Hay <strong>${total}</strong> ${total === 1 ? 'bot' : 'bots'} listos para comparar.`,
     action: total >= 2 ? { label: '⚔️ Abrir comparador', fn: () => { openCompareModal(); } } : null,
     duration: 4500,
   });
+
+  // Re-render comparator if it's open.
+  const overlay = document.getElementById('compare-modal-overlay');
+  if (overlay && !overlay.hidden) renderCompare();
+  return true;
+}
+
+async function addBotToCompare() {
+  if (!modalState.bot) return;
+  const btn = document.getElementById('bot-compare-add-btn');
+  const { vps, login, magic } = modalState.bot;
+  const ok = await addBotToCompareByIds(vps, login, magic, { source: 'modal' });
+  if (ok && btn && state.compareList.find(x => x.key === compareKey(vps, login, magic))) {
+    btn.classList.remove('is-pop');
+    void btn.offsetWidth;
+    btn.classList.add('is-pop');
+  }
+}
+
+function refreshCompareCheckboxes() {
+  document.querySelectorAll('input.cmp-check[type="checkbox"]').forEach((cb) => {
+    const { vps, login, magic } = cb.dataset;
+    if (!vps || !login || !magic) return;
+    const want = isInCompareList(vps, login, magic);
+    if (cb.checked !== want) cb.checked = want;
+  });
+}
+
+function refreshCompareFab() {
+  const fab = document.getElementById('cmp-fab');
+  const fabN = document.getElementById('cmp-fab-n');
+  if (!fab || !fabN) return;
+  const n = state.compareList.length;
+  fabN.textContent = String(n);
+  if (n >= 2) {
+    if (fab.hidden) {
+      fab.hidden = false;
+      fab.classList.remove('cmp-fab-pop');
+      void fab.offsetWidth;
+      fab.classList.add('cmp-fab-pop');
+    }
+  } else {
+    fab.hidden = true;
+  }
+}
+
+function buildCompareCheckboxCell(vps, login, magic) {
+  const checked = isInCompareList(vps, login, magic) ? 'checked' : '';
+  return `<td class="cmp-cell"><label class="cmp-check-wrap" title="Añadir/quitar del comparador"><input type="checkbox" class="cmp-check" data-vps="${vps}" data-login="${login}" data-magic="${magic}" ${checked}/><span class="cmp-tick">⚔️</span></label></td>`;
 }
 
 function updateCompareAddBtnState() {
@@ -4502,11 +4761,37 @@ function wireCompareModal() {
   document.body.addEventListener('click', (e) => {
     const rm = e.target.closest('.compare-slot-remove');
     if (!rm) return;
-    state.compareList = state.compareList.filter(x => x.key !== rm.dataset.key);
-    refreshCompareBadge();
-    updateCompareAddBtnState();
-    renderCompare();
+    const item = state.compareList.find(x => x.key === rm.dataset.key);
+    if (!item) return;
+    removeFromCompare(item.vps, item.login, item.magic, { silent: true });
   });
+
+  // Sticky FAB → open comparator.
+  const fab = document.getElementById('cmp-fab');
+  if (fab) fab.addEventListener('click', () => openCompareModal());
+
+  // Delegated checkbox handler — works on every table render (Real bots,
+  // Candidates, Balanced, New, Ranking, Account modal). Stops propagation to
+  // avoid triggering the row's openBotModal click.
+  document.body.addEventListener('change', (e) => {
+    const cb = e.target;
+    if (!cb || !cb.classList || !cb.classList.contains('cmp-check')) return;
+    const { vps, login, magic } = cb.dataset;
+    if (!vps || !login || !magic) return;
+    const wantAdd = cb.checked;
+    const isAdded = isInCompareList(vps, login, magic);
+    if (wantAdd && !isAdded) {
+      addBotToCompareByIds(vps, login, magic, { source: 'checkbox' }).then((ok) => {
+        if (!ok) cb.checked = false;
+      });
+    } else if (!wantAdd && isAdded) {
+      removeFromCompare(vps, login, magic, { silent: true });
+    }
+  });
+  // Suppress row-open click when a checkbox cell is clicked.
+  document.body.addEventListener('click', (e) => {
+    if (e.target.closest('.cmp-cell')) e.stopPropagation();
+  }, true);
 }
 
 // =====================================================================
