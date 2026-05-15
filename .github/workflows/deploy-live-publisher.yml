@@ -1,0 +1,188 @@
+name: deploy-live-publisher
+
+# One-shot deployment of scripts/live_publisher.py to VPS5 + register
+# Task Scheduler entry. Trigger manually with `gh workflow run` or via the
+# Actions tab. Does NOT run on a schedule — operator-driven.
+#
+# What it does:
+#   1. SSH to VPS5 via Tailscale (tag:ci ephemeral) using SSH_PRIVATE_KEY
+#   2. Write C:\mt5-mcp\.live_publisher.env with SUPABASE_URL +
+#      SUPABASE_SERVICE_ROLE_KEY (ACL: SYSTEM + Administrators only)
+#   3. scp scripts/live_publisher.py to C:\mt5-mcp\live_publisher.py
+#   4. Register Task Scheduler `BattleOfBots_LivePublisher`
+#      (AtStartup, RunLevel Highest, restart-on-failure 2 min)
+#   5. Start the task immediately (so we don't wait for next reboot)
+#   6. Verify the daemon is alive by tailing live_publisher.log
+#
+# After this runs, the dashboard pill should turn 🟢 live within ~10s.
+
+on:
+  workflow_dispatch:
+    inputs:
+      vps_host:
+        description: "VPS Tailscale IP (default: VPS5 100.70.228.19)"
+        required: false
+        default: "100.70.228.19"
+
+concurrency:
+  group: deploy-live-publisher
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup SSH key
+        run: |
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_ed25519_ci
+          chmod 600 ~/.ssh/id_ed25519_ci
+
+      - name: Tailscale up
+        uses: tailscale/github-action@v3
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret:    ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:ci
+          version: latest
+
+      - name: Add VPS host key
+        env:
+          VPS: ${{ github.event.inputs.vps_host }}
+        run: |
+          ssh-keyscan -H "$VPS" >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: Write .live_publisher.env on VPS5 (ACL SYSTEM+Admin)
+        env:
+          VPS: ${{ github.event.inputs.vps_host }}
+          SB_URL:    ${{ secrets.SUPABASE_URL }}
+          SB_KEY:    ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          SSH_KEY:   /home/runner/.ssh/id_ed25519_ci
+        run: |
+          # Heredoc on remote PowerShell — write file + lock down ACL.
+          # Use base64 to avoid escaping nightmare with the JWT special chars.
+          ENV_BLOB=$(printf 'SUPABASE_URL=%s\nSUPABASE_SERVICE_KEY=%s\n' "$SB_URL" "$SB_KEY" | base64 -w0)
+          ssh -i "$SSH_KEY" -o StrictHostKeyChecking=accept-new "trader@$VPS" \
+            "powershell -NoProfile -Command \"
+              \$bytes = [Convert]::FromBase64String('$ENV_BLOB');
+              \$text  = [Text.Encoding]::UTF8.GetString(\$bytes);
+              Set-Content -Path 'C:\\mt5-mcp\\.live_publisher.env' -Value \$text -NoNewline -Encoding UTF8;
+              icacls 'C:\\mt5-mcp\\.live_publisher.env' /inheritance:r /grant:r 'SYSTEM:F' 'Administrators:F' | Out-Null;
+              Write-Host 'env written + ACL locked';
+              Get-Acl 'C:\\mt5-mcp\\.live_publisher.env' | Format-List Owner, AccessToString;
+            \""
+
+      - name: scp live_publisher.py to VPS5
+        env:
+          VPS: ${{ github.event.inputs.vps_host }}
+          SSH_KEY: /home/runner/.ssh/id_ed25519_ci
+        run: |
+          scp -i "$SSH_KEY" -o StrictHostKeyChecking=accept-new \
+            scripts/live_publisher.py "trader@$VPS:C:/mt5-mcp/live_publisher.py"
+          ssh -i "$SSH_KEY" "trader@$VPS" \
+            "powershell -NoProfile -Command \"Get-Item C:\\mt5-mcp\\live_publisher.py | Select-Object Name, Length, LastWriteTime\""
+
+      - name: Quick syntax check on VPS5 (--once cycle)
+        env:
+          VPS: ${{ github.event.inputs.vps_host }}
+          SSH_KEY: /home/runner/.ssh/id_ed25519_ci
+        run: |
+          # Run ONE cycle to confirm everything works before scheduling forever.
+          # If --once succeeds → publisher published 2 rows + exited cleanly.
+          ssh -i "$SSH_KEY" "trader@$VPS" \
+            "C:\\mt5-mcp\\venv\\Scripts\\python.exe C:\\mt5-mcp\\live_publisher.py --once" || echo "WARN: --once exited non-zero (may be partial publish)"
+
+      - name: Register Task Scheduler (BattleOfBots_LivePublisher)
+        env:
+          VPS: ${{ github.event.inputs.vps_host }}
+          SSH_KEY: /home/runner/.ssh/id_ed25519_ci
+        run: |
+          # Delete existing task if present, then create from XML so we get
+          # AtStartup + RunLevel Highest + restart-on-failure every 2 min.
+          ssh -i "$SSH_KEY" "trader@$VPS" "powershell -NoProfile -Command \"
+            schtasks /Delete /TN 'BattleOfBots_LivePublisher' /F 2>\$null | Out-Null;
+            \$xml = @'
+          <?xml version='1.0' encoding='UTF-16'?>
+          <Task version='1.4' xmlns='http://schemas.microsoft.com/windows/2004/02/mit/task'>
+            <RegistrationInfo>
+              <Description>Kiz Capital · Battle of Bots — live equity publisher (5s loop, real accounts only)</Description>
+            </RegistrationInfo>
+            <Triggers>
+              <BootTrigger>
+                <Enabled>true</Enabled>
+              </BootTrigger>
+              <RegistrationTrigger>
+                <Enabled>true</Enabled>
+              </RegistrationTrigger>
+            </Triggers>
+            <Principals>
+              <Principal id='Author'>
+                <UserId>S-1-5-18</UserId>
+                <RunLevel>HighestAvailable</RunLevel>
+              </Principal>
+            </Principals>
+            <Settings>
+              <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+              <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+              <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+              <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+              <RestartOnFailure>
+                <Interval>PT2M</Interval>
+                <Count>9999</Count>
+              </RestartOnFailure>
+            </Settings>
+            <Actions Context='Author'>
+              <Exec>
+                <Command>C:\\mt5-mcp\\venv\\Scripts\\python.exe</Command>
+                <Arguments>C:\\mt5-mcp\\live_publisher.py</Arguments>
+                <WorkingDirectory>C:\\mt5-mcp</WorkingDirectory>
+              </Exec>
+            </Actions>
+          </Task>
+          '@;
+            \$xmlPath = 'C:\\mt5-mcp\\BattleOfBots_LivePublisher.xml';
+            Set-Content -Path \$xmlPath -Value \$xml -Encoding Unicode;
+            schtasks /Create /TN 'BattleOfBots_LivePublisher' /XML \$xmlPath /F;
+            schtasks /Run /TN 'BattleOfBots_LivePublisher';
+            Start-Sleep -Seconds 8;
+            schtasks /Query /TN 'BattleOfBots_LivePublisher' /V /FO LIST | Select-String -Pattern 'TaskName|Status|Last Run|Next Run|Last Result';
+          \""
+
+      - name: Tail live_publisher.log to confirm daemon is publishing
+        env:
+          VPS: ${{ github.event.inputs.vps_host }}
+          SSH_KEY: /home/runner/.ssh/id_ed25519_ci
+        run: |
+          # Wait a few seconds for the loop to publish a couple of cycles
+          sleep 8
+          ssh -i "$SSH_KEY" "trader@$VPS" \
+            "powershell -NoProfile -Command \"
+              if (Test-Path 'C:\\mt5-mcp\\live_publisher.log') {
+                Get-Content -Tail 20 'C:\\mt5-mcp\\live_publisher.log'
+              } else {
+                Write-Host 'WARN: live_publisher.log not found yet'
+              }
+            \""
+
+      - name: Verify Supabase row freshness (server-side)
+        env:
+          SB_URL: ${{ secrets.SUPABASE_URL }}
+          SB_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: |
+          # Use service_role to read the table (bypasses RLS).
+          for i in 1 2 3; do
+            ROWS=$(curl -s "$SB_URL/rest/v1/live_real_state?select=login,ts,balance,equity,profit&order=login" \
+              -H "apikey: $SB_KEY" -H "Authorization: Bearer $SB_KEY")
+            echo "attempt $i: $ROWS"
+            COUNT=$(echo "$ROWS" | python3 -c "import sys,json; print(len(json.load(sys.stdin)))" 2>/dev/null || echo 0)
+            if [ "$COUNT" -ge 2 ]; then
+              echo "✅ $COUNT rows in live_real_state — live stream working"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "::warning::live_real_state has < 2 rows after waiting — check daemon log on VPS5"

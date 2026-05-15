@@ -6,18 +6,13 @@ Loops every LIVE_INTERVAL_SECS, queries MetaTrader5 for the 2 real accounts
 public.live_real_state. The dashboard subscribes to that table via Supabase
 Realtime for sub-5s updates.
 
-Deploy to VPS5 only:
-    scp "Battle of Bots/scripts/live_publisher.py" trader@100.70.228.19:C:/mt5-mcp/live_publisher.py
+Auth pattern matches real_accounts.py / snapshot_builder.py — iterates
+installed MT5 terminals (`C:\\Program Files\\MetaTrader 5 *\\terminal64.exe`)
+and uses the live GUI session. Zero stored passwords.
 
-Required env vars (read from C:\\mt5-mcp\\.live_publisher.env):
+Required env (read from C:\\mt5-mcp\\.live_publisher.env, chmod 600):
     SUPABASE_URL          https://sudnilwqhbfcjqnzzmhi.supabase.co
     SUPABASE_SERVICE_KEY  service_role key (write-capable, NEVER commit)
-
-Per-account credentials are read from C:\\mt5-mcp\\accounts.json (same file
-snapshot_builder.py uses; structure: { "vps": "vps5", "accounts": [
-    { "login": 25425, "password": "...", "server": "...", "terminal": "C:\\..." },
-    { "login": 32081, "password": "...", "server": "...", "terminal": "C:\\..." }
-] }).
 
 Run as a daemon under Task Scheduler (BattleOfBots_LivePublisher,
 AtStartup + restart-on-failure 2 min).
@@ -27,6 +22,7 @@ Manual one-shot test:
 """
 from __future__ import annotations
 
+import glob
 import json
 import logging
 import os
@@ -34,6 +30,7 @@ import socket
 import sys
 import time
 from datetime import datetime, timezone
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any
 
@@ -45,23 +42,21 @@ import MetaTrader5 as mt5
 ROOT = Path(r"C:\mt5-mcp")
 LOG_PATH = ROOT / "live_publisher.log"
 ENV_PATH = ROOT / ".live_publisher.env"
-ACCOUNTS_PATH = ROOT / "accounts.json"
 
 LIVE_INTERVAL_SECS = int(os.environ.get("LIVE_INTERVAL_SECS", "5"))
 LIVE_VPS_TAG = os.environ.get("LIVE_VPS_TAG", "vps5")
 PUBLISHER_ID = f"{LIVE_VPS_TAG}-{socket.gethostname()}"
 HTTP_TIMEOUT = 5
 
+REAL_LOGINS: set[int] = {25425, 32081}
+TERMINAL_GLOB = r"C:\Program Files\MetaTrader 5 *\terminal64.exe"
+
 # --- Logging -------------------------------------------------------------
 
-logging.basicConfig(
-    filename=str(LOG_PATH),
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-)
+_handler = RotatingFileHandler(str(LOG_PATH), maxBytes=2_000_000, backupCount=5, encoding="utf-8")
+_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s", "%Y-%m-%d %H:%M:%S"))
+logging.basicConfig(level=logging.INFO, handlers=[_handler, logging.StreamHandler(sys.stdout)])
 log = logging.getLogger("live_publisher")
-log.addHandler(logging.StreamHandler(sys.stdout))
 
 
 # --- Env loading ---------------------------------------------------------
@@ -83,83 +78,77 @@ def load_env() -> dict[str, str]:
     return env
 
 
-def load_accounts() -> list[dict[str, Any]]:
-    if not ACCOUNTS_PATH.exists():
-        raise SystemExit(f"accounts file not found: {ACCOUNTS_PATH}")
-    data = json.loads(ACCOUNTS_PATH.read_text(encoding="utf-8"))
-    accounts = data.get("accounts", data) if isinstance(data, dict) else data
-    real = [a for a in accounts if int(a.get("login", 0)) in (25425, 32081)]
-    if not real:
-        raise SystemExit("no real accounts (25425 / 32081) found in accounts.json")
-    return real
-
-
 # --- MT5 helpers ---------------------------------------------------------
 
-def mt5_login(account: dict[str, Any]) -> bool:
-    terminal = account.get("terminal") or account.get("path")
-    ok = mt5.initialize(path=terminal) if terminal else mt5.initialize()
-    if not ok:
-        log.error("mt5.initialize failed for login=%s err=%s", account.get("login"), mt5.last_error())
-        return False
-    ok = mt5.login(
-        login=int(account["login"]),
-        password=str(account["password"]),
-        server=str(account["server"]),
-    )
-    if not ok:
-        log.error("mt5.login failed for login=%s err=%s", account.get("login"), mt5.last_error())
-        mt5.shutdown()
-        return False
-    return True
+def collect_real_snapshots() -> list[dict[str, Any]]:
+    """Iterate installed MT5 terminals and snapshot any whose live session
+    is logged into one of REAL_LOGINS. No credentials needed — the GUI
+    already holds the session."""
+    rows: list[dict[str, Any]] = []
+    seen: set[int] = set()
+    terminals = sorted(glob.glob(TERMINAL_GLOB))
+    if not terminals:
+        log.warning("no MT5 terminals found at %s", TERMINAL_GLOB)
+        return rows
 
+    for path in terminals:
+        t0 = time.monotonic()
+        if not mt5.initialize(path=path):
+            log.debug("mt5.initialize failed for %s err=%s", path, mt5.last_error())
+            continue
+        try:
+            info = mt5.account_info()
+            if info is None:
+                continue
+            login = int(info.login)
+            if login not in REAL_LOGINS or login in seen:
+                continue
+            seen.add(login)
 
-def mt5_close() -> None:
-    try:
-        mt5.shutdown()
-    except Exception:  # pragma: no cover
-        pass
+            positions_raw = mt5.positions_get() or []
+            positions = []
+            for p in positions_raw:
+                pd = p._asdict()
+                positions.append({
+                    "ticket": pd.get("ticket"),
+                    "magic": pd.get("magic"),
+                    "symbol": pd.get("symbol"),
+                    "type": "BUY" if pd.get("type") == 0 else "SELL" if pd.get("type") == 1 else str(pd.get("type")),
+                    "volume": pd.get("volume"),
+                    "price_open": pd.get("price_open"),
+                    "price_current": pd.get("price_current"),
+                    "sl": pd.get("sl") or None,
+                    "tp": pd.get("tp") or None,
+                    "swap": pd.get("swap"),
+                    "profit": pd.get("profit"),
+                    "time_open": pd.get("time"),
+                    "comment": pd.get("comment"),
+                })
 
+            rows.append({
+                "login": login,
+                "vps": LIVE_VPS_TAG,
+                "ts": datetime.now(timezone.utc).isoformat(),
+                "balance": float(info.balance or 0),
+                "equity": float(info.equity or 0),
+                "margin": float(info.margin or 0),
+                "free_margin": float(info.margin_free or 0),
+                "profit": float(info.profit or 0),
+                "positions": positions,
+                "publisher_id": PUBLISHER_ID,
+                "source_age_ms": int((time.monotonic() - t0) * 1000),
+            })
+        finally:
+            try:
+                mt5.shutdown()
+            except Exception:
+                pass
+            time.sleep(0.1)
 
-def snapshot_account(login: int) -> dict[str, Any] | None:
-    info = mt5.account_info()
-    if info is None:
-        log.error("account_info() returned None for login=%s err=%s", login, mt5.last_error())
-        return None
-    info_d = info._asdict()
-    if int(info_d.get("login", 0)) != int(login):
-        log.warning("account mismatch: expected %s got %s", login, info_d.get("login"))
-    positions_raw = mt5.positions_get() or []
-    positions = []
-    for p in positions_raw:
-        pd = p._asdict()
-        positions.append({
-            "ticket": pd.get("ticket"),
-            "magic": pd.get("magic"),
-            "symbol": pd.get("symbol"),
-            "type": "BUY" if pd.get("type") == 0 else "SELL" if pd.get("type") == 1 else str(pd.get("type")),
-            "volume": pd.get("volume"),
-            "price_open": pd.get("price_open"),
-            "price_current": pd.get("price_current"),
-            "sl": pd.get("sl"),
-            "tp": pd.get("tp"),
-            "swap": pd.get("swap"),
-            "profit": pd.get("profit"),
-            "time_open": pd.get("time"),
-            "comment": pd.get("comment"),
-        })
-    return {
-        "login": int(login),
-        "vps": LIVE_VPS_TAG,
-        "ts": datetime.now(timezone.utc).isoformat(),
-        "balance": float(info_d.get("balance") or 0),
-        "equity": float(info_d.get("equity") or 0),
-        "margin": float(info_d.get("margin") or 0),
-        "free_margin": float(info_d.get("margin_free") or 0),
-        "profit": float(info_d.get("profit") or 0),
-        "positions": positions,
-        "publisher_id": PUBLISHER_ID,
-    }
+    missing = REAL_LOGINS - seen
+    if missing:
+        log.warning("missed real logins this cycle: %s", sorted(missing))
+    return rows
 
 
 # --- Supabase upsert -----------------------------------------------------
@@ -187,37 +176,27 @@ def upsert_state(env: dict[str, str], rows: list[dict[str, Any]]) -> bool:
 
 # --- Main loop -----------------------------------------------------------
 
-def publish_once(env: dict[str, str], accounts: list[dict[str, Any]]) -> int:
-    rows: list[dict[str, Any]] = []
-    for account in accounts:
-        t0 = time.monotonic()
-        if not mt5_login(account):
-            continue
-        try:
-            row = snapshot_account(int(account["login"]))
-        finally:
-            mt5_close()
-        if row is None:
-            continue
-        row["source_age_ms"] = int((time.monotonic() - t0) * 1000)
-        rows.append(row)
+def publish_once(env: dict[str, str]) -> int:
+    rows = collect_real_snapshots()
+    if not rows:
+        return 0
     ok = upsert_state(env, rows)
     if ok:
         log.info(
-            "published %d rows ages_ms=%s",
+            "published %d rows (logins=%s ages_ms=%s)",
             len(rows),
-            ",".join(str(r.get("source_age_ms")) for r in rows),
+            ",".join(str(r["login"]) for r in rows),
+            ",".join(str(r["source_age_ms"]) for r in rows),
         )
     return len(rows) if ok else 0
 
 
 def main() -> None:
     env = load_env()
-    accounts = load_accounts()
     log.info(
-        "live_publisher starting · interval=%ss · accounts=%s · publisher=%s",
+        "live_publisher starting · interval=%ss · target_logins=%s · publisher=%s",
         LIVE_INTERVAL_SECS,
-        [int(a["login"]) for a in accounts],
+        sorted(REAL_LOGINS),
         PUBLISHER_ID,
     )
 
@@ -227,12 +206,12 @@ def main() -> None:
     while True:
         loop_start = time.monotonic()
         try:
-            count = publish_once(env, accounts)
-            if count == len(accounts):
+            count = publish_once(env)
+            if count == len(REAL_LOGINS):
                 backoff = LIVE_INTERVAL_SECS
             else:
                 backoff = min(60, max(LIVE_INTERVAL_SECS * 2, backoff * 2))
-                log.warning("partial publish %d/%d · next sleep=%ss", count, len(accounts), backoff)
+                log.warning("partial publish %d/%d · next sleep=%ss", count, len(REAL_LOGINS), backoff)
         except Exception as exc:  # noqa: BLE001
             log.exception("publish_once crashed: %s", exc)
             backoff = min(60, max(LIVE_INTERVAL_SECS * 2, backoff * 2))
