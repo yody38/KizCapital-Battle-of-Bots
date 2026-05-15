@@ -93,17 +93,32 @@ PY
     local_file="$DATA_DIR/snapshot_${id}.json"
     local_tmp="${local_file}.tmp"
 
-    # --- snapshot.json fetch (mandatory, fail-closed) ---
-    if ! scp "${SCP_OPTS[@]}" "$host:$REMOTE_FILE" "$local_tmp" 2>&1; then
-      echo "[$(ts)] $id SCP FAIL on snapshot.json — aborting cycle (fail-closed)"
+    # --- snapshot.json fetch (mandatory, fail-closed with retry) ---
+    # Retry absorbs transient Tailscale flakes on CI runner cold-start: the
+    # first scp can hit a connection-timeout while the route is rehashing,
+    # but a second attempt 15 s later normally succeeds.
+    snap_scp_ok=0
+    for attempt in $(seq 1 "$BOTS_SCP_MAX_ATTEMPTS"); do
       rm -f "$local_tmp"
-      FATAL_VPS="$id:snapshot_scp"
-      break
-    fi
-    if [ ! -s "$local_tmp" ] || ! head -c 1 "$local_tmp" | grep -q '{'; then
-      echo "[$(ts)] $id INVALID JSON in snapshot.json — aborting cycle"
+      if scp "${SCP_OPTS[@]}" "$host:$REMOTE_FILE" "$local_tmp" 2>&1; then
+        if [ -s "$local_tmp" ] && head -c 1 "$local_tmp" | grep -q '{'; then
+          snap_scp_ok=1
+          echo "[$(ts)] $id snapshot scp OK on attempt $attempt"
+          break
+        else
+          echo "[$(ts)] $id snapshot INVALID JSON on attempt $attempt — retrying"
+        fi
+      else
+        echo "[$(ts)] $id snapshot SCP error on attempt $attempt — retrying"
+      fi
+      if [ "$attempt" -lt "$BOTS_SCP_MAX_ATTEMPTS" ]; then
+        sleep "$BOTS_SCP_RETRY_DELAY_SEC"
+      fi
+    done
+    if [ "$snap_scp_ok" -ne 1 ]; then
+      echo "[$(ts)] $id snapshot scp FAILED after $BOTS_SCP_MAX_ATTEMPTS attempts — aborting cycle (fail-closed)"
       rm -f "$local_tmp"
-      FATAL_VPS="$id:snapshot_invalid"
+      FATAL_VPS="$id:snapshot_scp_exhausted"
       break
     fi
     mv "$local_tmp" "$local_file"
