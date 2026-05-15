@@ -1,0 +1,87 @@
+name: live-publisher-tick
+
+# Runs the live equity publisher --once cycle from a GH Actions runner via SSH.
+# Each workflow loops internally for ~5 hours (300 cycles × 60s), then exits.
+# Scheduled every 4 hours so consecutive runs overlap by ~1h (resilient if a
+# run fails or hits the 6h GH Actions timeout).
+#
+# Why this approach: running the daemon as a Windows Task Scheduler entry
+# under InteractiveToken hangs because trader's RDP session is disconnected.
+# Running --once via SSH (NetworkCleartext logon) works perfectly. So we let
+# GH Actions runners do the SSH polling.
+
+on:
+  schedule:
+    - cron: "0 */4 * * *"   # every 4h UTC (00:00, 04:00, 08:00, 12:00, 16:00, 20:00)
+  workflow_dispatch:
+    inputs:
+      cycles:
+        description: "How many --once cycles to run (default 300 ≈ 5h at 60s/cycle)"
+        required: false
+        default: "300"
+
+concurrency:
+  group: live-publisher-tick
+  cancel-in-progress: false
+
+jobs:
+  tick:
+    runs-on: ubuntu-latest
+    timeout-minutes: 330  # 5h30m max — leaves ~30 min buffer before GH 6h limit
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup SSH key
+        run: |
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_ed25519_ci
+          chmod 600 ~/.ssh/id_ed25519_ci
+
+      - name: Tailscale up
+        uses: tailscale/github-action@v3
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret:    ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:ci
+          version: latest
+
+      - name: Add VPS5 host key
+        run: ssh-keyscan -H 100.70.228.19 >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: Loop --once cycles
+        env:
+          SSH_KEY: /home/runner/.ssh/id_ed25519_ci
+          CYCLES: ${{ github.event.inputs.cycles || '300' }}
+          CYCLE_INTERVAL: 30   # seconds between cycle starts (each cycle takes ~25s)
+        run: |
+          set +e   # don't abort on individual cycle failures
+          ok=0
+          fail=0
+          start=$(date +%s)
+          for i in $(seq 1 "$CYCLES"); do
+            cycle_start=$(date +%s)
+            ts=$(date -u +%H:%M:%S)
+            output=$(ssh -i "$SSH_KEY" -o ConnectTimeout=10 -o ServerAliveInterval=15 \
+              trader@100.70.228.19 \
+              "C:\\mt5-mcp\\venv\\Scripts\\python.exe C:\\mt5-mcp\\live_publisher.py --once" 2>&1)
+            rc=$?
+            if [ $rc -eq 0 ] && echo "$output" | grep -q "published"; then
+              ok=$((ok + 1))
+              # Compact log: just elapsed + last "published" line
+              echo "[$ts] cycle $i/$CYCLES OK ($(echo "$output" | grep "published" | tail -1))"
+            else
+              fail=$((fail + 1))
+              echo "[$ts] cycle $i/$CYCLES FAIL rc=$rc :: $(echo "$output" | tail -1)"
+            fi
+            cycle_end=$(date +%s)
+            elapsed=$((cycle_end - cycle_start))
+            sleep_for=$((CYCLE_INTERVAL - elapsed))
+            if [ $sleep_for -gt 0 ]; then sleep $sleep_for; fi
+          done
+          total=$(( $(date +%s) - start ))
+          echo "==========================================="
+          echo "DONE · cycles=$CYCLES · ok=$ok · fail=$fail · elapsed_seconds=$total"
+          echo "==========================================="
+          # Exit non-zero if zero successes — some failures are expected and OK
+          if [ $ok -eq 0 ]; then exit 1; fi

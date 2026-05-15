@@ -361,8 +361,10 @@ function refreshLivePillFromState() {
     setLivePillStatus('off', 'sin push', null);
     return;
   }
-  if (age < 8) setLivePillStatus('on', 'live', age);
-  else if (age < 20) setLivePillStatus('warn', 'lag', age);
+  // Cycle takes ~25s on VPS5 (12 MT5 terminals to iterate), so realistic
+  // freshness is 30-90s per push. Thresholds tuned to that reality.
+  if (age < 90) setLivePillStatus('on', 'live', age);
+  else if (age < 240) setLivePillStatus('warn', 'lag', age);
   else setLivePillStatus('off', 'stale', age);
 }
 
