@@ -1,14 +1,27 @@
 """Post-merge enrichment for Battle of Bots.
 
 Reads merged snapshot.json + per-bot files (with daily_equity_series), and:
-  1. Builds correlation matrix (Pearson) of daily returns between bots that
-     have at least MIN_CORR_TRADES closed trades. Output: data/correlations.json
-  2. Computes Promotion Score (0-100) and promotion_status per bot using
-     transparent weights + hard gating filters. Writes back into snapshot.json.
-  3. Monte Carlo stress test per bot (bootstrap of trade returns) → stress block.
-  4. Walk-Forward / OOS validation per bot → oos block.
-  5. Forward Tracker: append-only history of READY/NEAR bots → candidates_history.jsonl.
-  6. Portfolio Optimizer: risk-parity allocation over top candidates → portfolio.json.
+  1. Promotion Score (0-100) + status (READY/NEAR/WATCH/NO) per bot,
+     transparent weights + hard gating + rank-based caps (top 5/5/10).
+  2. Monte Carlo stress test (bootstrap of trade returns) → stress block.
+  3. Walk-Forward / OOS validation → oos block.
+  4. Regime / temporal robustness (Herfindahl by DoW/Hour/Duration) → regime.
+  5. Page-Hinkley drift detection on daily_net → drift block.
+  6. Capacity forecaster (USD before slippage degrades) → capacity block.
+  7. Institutional metrics (CVaR, Ulcer, Martin, K-Ratio, SQN, Tail, Autocorr).
+  8. Underwater analysis (top-10 drawdowns + recovery) → underwater.
+  9. Bootstrap 95% CI (Sharpe/Sortino/Calmar/PF/WR) → confidence_intervals.
+ 10. Historical event stress (replay COVID/Ukraine/Banking/etc) → event_stress.
+ 11. Bayesian shrinkage of promotion_score toward cohort prior → shrinkage_meta.
+ 12. Forward Tracker (append-only history of READY/NEAR bots → candidates_history.jsonl).
+ 13. Promotion Radar (8-axis percentile-rank vs gating-eligible cohort).
+ 14. Trade-PnL Distribution stats (Fisher-Pearson moments + tail-contribution).
+ 15. Adversarial Pair Finder (top-3 portfolio partners per READY/NEAR).
+ 16. Correlation matrix (Pearson on daily returns) → data/correlations.json.
+ 17. Portfolio Optimizer (risk-parity / inverse-vol / equal / score-weighted)
+     → data/portfolio.json.
+ 18. Survival Curve / Kaplan-Meier (cohort mortality with Greenwood log-log CI)
+     → data/survival.json.
 
 Run with: python3 post_merge.py <data_dir>
 """

@@ -160,3 +160,31 @@ Configurados en `Settings → Secrets and variables → Actions` del repo:
 
 ## Criterio de ranking
 Net Profit USD en 365 días. Ordenado descendente. `top_bot = bots[0]`. Promotion Score (0-100) en `post_merge.py` con 7 componentes ponderados + gating duro para identificar bots promovibles a cuenta real.
+
+---
+
+## Modal del bot — 20 pestañas analíticas
+
+Al click en cualquier bot del dashboard se abre el bot modal con 20 tabs (15 originales + 5 nuevas de promoción agregadas 2026-05-15):
+
+**Originales:** Growth · Net P&L · Drawdown · Underwater · Riesgo · Consistencia · Decay · Score · Stress · Eventos · OOS · Régimen · Tracker · Drift · Capacity.
+
+**🆕 5 visuales para decidir promoción a cuenta real (v20260515c):**
+
+| Tab | Lente analítico | Backend |
+|---|---|---|
+| 🎯 **Radar** | 8 ejes percentil-rank vs cohorte gating-eligible. Expone bots "espiga" (un eje carga todo) vs "equilibrados". | `compute_promotion_radar` → `bot.promotion_radar` |
+| 🎻 **Violín** | Densidad KDE Gaussiana de $/trade. Etiqueta GRINDER/BALANCEADO/OUTLIER_DEPENDIENTE/LOTTERY usando Top-5% contribution + Fisher-Pearson skew/kurt. | `compute_trade_distribution_stats` → `bot.trade_distribution` |
+| ⚖️ **Pares** | Top-3 portfolio partners por bot READY/NEAR. 50/50 daily-net combo, ranking por Calmar uplift. ρ negativo = hedge real. | `compute_pair_recommendations` → `bot.pair_recommendations` |
+| 🕰️ **Time Machine** | Slider interactivo: "¿qué tendría hoy si lo prometía en X fecha con Y capital?". CAGR + max DD calculados al vuelo desde `daily_equity_series`. | Client-side · usa `daily_equity_series` ya existente |
+| 📈 **Supervivencia** | Kaplan-Meier con Greenwood log-log 95% CI sobre cohortes (overall · 4 buckets de score · top-6 símbolos). Base rate empírico de mortalidad. | `build_survival_table` → `data/survival.json` |
+
+**Definición de "muerte"** (para survival + drift): cualquiera de — `decay_flag`, `drift severity ≥ 1.3`, `net_profit ≤ 0` con ≥ 3 meses, o `DD > 20% del balance`.
+
+---
+
+## ⚠️ Anti-pattern crítico — NUNCA uploadear local snapshot.json sobre el de CI
+
+Si corres `post_merge.py` localmente y luego `upload_to_supabase.py`, **sobrescribes la data fresca que la CI generó** desde las VPS y rompes la integridad. La CI tiene SSH+Tailscale a las 5 VPS y datos fresquísimos; tu Mac local solo tiene el último mirror que descargó (potencialmente días viejo).
+
+**Regla:** después de cambios al pipeline o frontend, push al repo y deja que `gh workflow run refresh.yml` ejecute el ciclo completo. Solo uploadea local si es para test puntual y vas a re-trigger CI inmediatamente después.
