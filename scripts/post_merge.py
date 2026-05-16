@@ -21,6 +21,8 @@ import random
 import sys
 from datetime import datetime, timezone
 
+from _metrics import clamp01, pearson, percentile, stdev
+
 # --- Configuration -------------------------------------------------------
 
 WEIGHTS = {
@@ -128,9 +130,9 @@ CI_SEED = 4242
 
 
 # --- Helpers -------------------------------------------------------------
-
-def clamp01(x):
-    return max(0.0, min(1.0, x))
+# clamp01, pearson, percentile, stdev come from _metrics (shared with
+# verify_live_mt5.py). norm_* below stay here because they consume the
+# promotion-scoring CAPS dict above.
 
 
 def norm_calmar(c):
@@ -1595,6 +1597,540 @@ def event_stress(daily_series, trades):
     }
 
 
+# --- 12. Promotion Radar (8-axis percentile-rank normalization) ----------
+
+RADAR_AXES = ("returns", "risk_adjusted", "consistency", "decay_health",
+              "sample_size", "regime_robustness", "oos_generalization",
+              "capacity_headroom")
+RADAR_AXIS_LABELS = {
+    "returns": "Retornos anualizados",
+    "risk_adjusted": "Risk-Adj (Calmar)",
+    "consistency": "% Meses+",
+    "decay_health": "Salud (decay)",
+    "sample_size": "Sample size",
+    "regime_robustness": "Robustez temporal",
+    "oos_generalization": "OOS generalization",
+    "capacity_headroom": "Capacity",
+}
+
+
+def _radar_axis_value(b, accounts_by_login, axis):
+    if axis == "returns":
+        bal = (accounts_by_login.get(b.get("account_login")) or {}).get("balance", 0)
+        m = b.get("months_active") or 0
+        if not bal or not m or m < 1:
+            return None
+        return (b.get("net_profit") or 0) / bal * (12.0 / m) * 100.0
+    if axis == "risk_adjusted":
+        return b.get("calmar")
+    if axis == "consistency":
+        return b.get("months_positive_pct")
+    if axis == "decay_health":
+        if b.get("decay_flag"):
+            return 0.0
+        dr = b.get("decay_ratio")
+        return dr if dr is not None else None
+    if axis == "sample_size":
+        return b.get("trades")
+    if axis == "regime_robustness":
+        return ((b.get("regime") or {}).get("robustness_score"))
+    if axis == "oos_generalization":
+        return ((b.get("oos") or {}).get("oos_score"))
+    if axis == "capacity_headroom":
+        return ((b.get("capacity") or {}).get("capacity_usd"))
+    return None
+
+
+def _percentile_rank(value, sorted_pop):
+    """Empirical CDF rank with midrank for ties. Returns 0–100, or None if no pop."""
+    if value is None or not sorted_pop:
+        return None
+    n = len(sorted_pop)
+    below = 0
+    equal = 0
+    for v in sorted_pop:
+        if v < value:
+            below += 1
+        elif v == value:
+            equal += 1
+        else:
+            break
+    rank = below + equal / 2.0
+    return (rank / n) * 100.0
+
+
+def compute_promotion_radar(snap, accounts_by_login):
+    """Per-bot 8-axis radar with percentile-rank normalization on the
+    gating-eligible cohort. Median bot ≈ 50 on every axis. Returns
+    cohort meta {axes, axis_labels, cohort, n_eligible} and mutates
+    each bot adding `promotion_radar`.
+    """
+    bots = snap.get("bots", [])
+    if not bots:
+        return None
+    eligible = [b for b in bots
+                if all((b.get("promotion_gating") or {}).values())
+                and b.get("magic")]
+    if len(eligible) < 5:
+        return None
+
+    # Sorted population per axis (drop None) — used for percentile_rank.
+    pop = {}
+    for ax in RADAR_AXES:
+        vals = []
+        for b in eligible:
+            v = _radar_axis_value(b, accounts_by_login, ax)
+            if v is not None:
+                vals.append(v)
+        vals.sort()
+        pop[ax] = vals
+
+    cohort_meta = {}
+    for ax in RADAR_AXES:
+        sp = pop[ax]
+        if not sp:
+            cohort_meta[ax] = {"label": RADAR_AXIS_LABELS[ax], "n": 0}
+            continue
+        cohort_meta[ax] = {
+            "label": RADAR_AXIS_LABELS[ax],
+            "p25": round(percentile(sp, 0.25), 4),
+            "p50": round(percentile(sp, 0.50), 4),
+            "p75": round(percentile(sp, 0.75), 4),
+            "min": round(sp[0], 4),
+            "max": round(sp[-1], 4),
+            "n": len(sp),
+        }
+
+    # Per-bot enrichment.
+    radar_count = 0
+    for b in bots:
+        if not b.get("magic"):
+            continue
+        axes_out = {}
+        sum_p = 0.0
+        n_p = 0
+        for ax in RADAR_AXES:
+            raw = _radar_axis_value(b, accounts_by_login, ax)
+            pct = _percentile_rank(raw, pop[ax])
+            axes_out[ax] = {
+                "raw": (round(raw, 4) if raw is not None else None),
+                "pct": (round(pct, 1) if pct is not None else None),
+                "label": RADAR_AXIS_LABELS[ax],
+            }
+            if pct is not None:
+                sum_p += pct
+                n_p += 1
+        area_pct = round(sum_p / n_p, 1) if n_p else None
+        if area_pct is None:
+            shape = "INSUFICIENTE"
+        elif area_pct >= 70:
+            shape = "EQUILIBRADO ALTO"
+        elif area_pct >= 50:
+            shape = "PROMEDIO ALTO"
+        elif area_pct >= 30:
+            shape = "PROMEDIO BAJO"
+        else:
+            shape = "DEBIL"
+        only_pcts = [v["pct"] for v in axes_out.values() if v["pct"] is not None]
+        asym = round(stdev(only_pcts), 1) if len(only_pcts) >= 2 else None
+        if asym is None:
+            asym_label = "—"
+        elif asym > 25:
+            asym_label = "ESPIGA"           # one or two axes carry everything
+        elif asym > 18:
+            asym_label = "DESEQUILIBRADO"
+        else:
+            asym_label = "EQUILIBRADO"
+        b["promotion_radar"] = {
+            "axes": axes_out,
+            "area_pct": area_pct,
+            "shape_label": shape,
+            "asymmetry": asym,
+            "asymmetry_label": asym_label,
+            "n_axes_computed": n_p,
+        }
+        radar_count += 1
+
+    return {
+        "axes": list(RADAR_AXES),
+        "axis_labels": RADAR_AXIS_LABELS,
+        "cohort": cohort_meta,
+        "n_eligible": len(eligible),
+        "n_decorated": radar_count,
+        "method": "Empirical-CDF percentile rank (midrank for ties) over gating-eligible cohort.",
+    }
+
+
+# --- 13. Trade-PnL Distribution stats (for client-side violin) -----------
+
+def compute_trade_distribution_stats(trades):
+    """Distribution stats (Fisher–Pearson moments + tail-contribution) for trade nets.
+    Used by the client-side violin/density plot. Lightweight: just summary stats,
+    not the full sample (that lives in the per-bot file already)."""
+    nets = sorted([t.get("net", 0.0) or 0.0 for t in (trades or []) if t.get("net") is not None])
+    n = len(nets)
+    if n < 30:
+        return None
+    total = sum(nets)
+    mean = total / n
+    sd = stdev(nets)
+    if sd > 0:
+        m3 = sum((x - mean) ** 3 for x in nets) / n
+        m4 = sum((x - mean) ** 4 for x in nets) / n
+        skew = m3 / (sd ** 3)
+        kurt_excess = m4 / (sd ** 4) - 3.0
+    else:
+        skew = 0.0
+        kurt_excess = 0.0
+
+    p5 = percentile(nets, 0.05)
+    p25 = percentile(nets, 0.25)
+    med = percentile(nets, 0.50)
+    p75 = percentile(nets, 0.75)
+    p95 = percentile(nets, 0.95)
+
+    top5_count = max(1, int(round(n * 0.05)))
+    top5_sum = sum(nets[-top5_count:])
+    top5_contrib = (top5_sum / total * 100.0) if total > 0 else None
+
+    wins = [x for x in nets if x > 0]
+    losses = [x for x in nets if x < 0]
+
+    if total <= 0:
+        dtype = "PERDEDOR"
+    elif top5_contrib is None:
+        dtype = "INDETERMINADO"
+    elif top5_contrib >= 75:
+        dtype = "LOTTERY"
+    elif top5_contrib >= 50:
+        dtype = "OUTLIER_DEPENDIENTE"
+    elif top5_contrib >= 30:
+        dtype = "BALANCEADO"
+    else:
+        dtype = "GRINDER"
+
+    bw = 1.06 * sd * (n ** (-1.0 / 5.0)) if sd > 0 else 0.0
+
+    interp = {
+        "GRINDER": "🟢 Grinder consistente — cola benigna, ningún outlier carga el resultado.",
+        "BALANCEADO": "🟢 Balanceado — net distribuido sanamente entre muchos trades.",
+        "OUTLIER_DEPENDIENTE": "🟡 Dependiente de outliers — ~50% del net viene del top 5%.",
+        "LOTTERY": "🔴 Lottery tail — el net depende casi completamente de unos pocos trades enormes.",
+        "PERDEDOR": "⚫ Bot net negativo.",
+    }.get(dtype, "")
+
+    return {
+        "n": n,
+        "mean": round(mean, 4),
+        "median": round(med, 4),
+        "stdev": round(sd, 4),
+        "skewness": round(skew, 3),
+        "excess_kurtosis": round(kurt_excess, 3),
+        "min": round(nets[0], 4),
+        "max": round(nets[-1], 4),
+        "p5": round(p5, 4),
+        "p25": round(p25, 4),
+        "p75": round(p75, 4),
+        "p95": round(p95, 4),
+        "wins_count": len(wins),
+        "losses_count": len(losses),
+        "wins_sum": round(sum(wins), 4),
+        "losses_sum": round(sum(losses), 4),
+        "top5pct_count": top5_count,
+        "top5pct_sum": round(top5_sum, 4),
+        "top5pct_contribution_pct": round(top5_contrib, 2) if top5_contrib is not None else None,
+        "distribution_type": dtype,
+        "interpretation": interp,
+        "kde_bandwidth": round(bw, 6),
+    }
+
+
+# --- 14. Adversarial Pair Finder ----------------------------------------
+
+PAIR_PARTNER_STATUSES = ("READY", "NEAR", "WATCH")
+PAIR_TARGET_STATUSES = ("READY", "NEAR")
+PAIR_TOP_N = 3
+PAIR_MIN_OVERLAP_DAYS = 20
+
+
+def _combo_metrics(daily_a, daily_b, weight_a=0.5):
+    """Equal-weight (or weighted) combination of two daily-net series. Returns
+    {n_days, total_net, max_dd, calmar, sharpe, sortino} or None if too short."""
+    if not daily_a:
+        return None
+    all_dates = sorted(set(daily_a) | set(daily_b or {}))
+    if len(all_dates) < PAIR_MIN_OVERLAP_DAYS:
+        return None
+    nets = [
+        (daily_a.get(d, 0.0) * weight_a + (daily_b or {}).get(d, 0.0) * (1 - weight_a))
+        for d in all_dates
+    ]
+    cum = 0.0
+    peak = 0.0
+    mdd = 0.0
+    for v in nets:
+        cum += v
+        if cum > peak:
+            peak = cum
+        d = peak - cum
+        if d > mdd:
+            mdd = d
+    n = len(nets)
+    years = n / 252.0
+    calmar = None
+    if years > 0 and mdd > 0:
+        calmar = (cum / years) / mdd
+    m = sum(nets) / n
+    sd = stdev(nets)
+    sharpe = (m / sd) * math.sqrt(252) if sd and sd > 0 else None
+    downs = [r for r in nets if r < 0]
+    sd_d = stdev(downs) if len(downs) >= 2 else 0.0
+    sortino = (m / sd_d) * math.sqrt(252) if sd_d and sd_d > 0 else None
+    return {
+        "n_days": n,
+        "total_net": round(cum, 2),
+        "max_dd": round(mdd, 2),
+        "calmar": round(calmar, 3) if calmar is not None else None,
+        "sharpe": round(sharpe, 3) if sharpe is not None else None,
+        "sortino": round(sortino, 3) if sortino is not None else None,
+    }
+
+
+def compute_pair_recommendations(snap, data_dir):
+    """For each READY/NEAR bot, find the top-3 best portfolio partners using
+    50/50 daily-net combination. Ranks by diversification gain (combo Calmar
+    uplift vs best solo). Skips same-account partners (not real diversification).
+    Stores results into bot["pair_recommendations"]."""
+    bots = snap.get("bots", [])
+    candidates = [b for b in bots
+                  if b.get("promotion_status") in PAIR_PARTNER_STATUSES
+                  and b.get("magic")]
+    if len(candidates) < 3:
+        return 0
+
+    series_cache = {}
+    for b in candidates:
+        sr = load_per_bot_series(data_dir, b["vps"], b["account_login"], b["magic"])
+        if sr:
+            key = f"{b['vps']}-{b['account_login']}-{b['magic']}"
+            series_cache[key] = {row["date"]: (row.get("daily_net") or 0.0) for row in sr}
+
+    targets = [b for b in candidates if b.get("promotion_status") in PAIR_TARGET_STATUSES]
+    pair_count = 0
+    for a in targets:
+        ka = f"{a['vps']}-{a['account_login']}-{a['magic']}"
+        if ka not in series_cache:
+            continue
+        a_series = series_cache[ka]
+        a_solo = _combo_metrics(a_series, {}, weight_a=1.0)
+        if not a_solo or a_solo.get("calmar") is None:
+            continue
+        evals = []
+        for b in candidates:
+            if b is a:
+                continue
+            if b.get("account_login") == a.get("account_login"):
+                continue   # same account — not portfolio diversification
+            kb = f"{b['vps']}-{b['account_login']}-{b['magic']}"
+            if kb not in series_cache:
+                continue
+            b_series = series_cache[kb]
+            combo = _combo_metrics(a_series, b_series, weight_a=0.5)
+            if not combo or combo.get("calmar") is None:
+                continue
+            b_solo = _combo_metrics(b_series, {}, weight_a=1.0) or {}
+            best_solo = max(a_solo.get("calmar") or 0, b_solo.get("calmar") or 0)
+            div_gain = None
+            if best_solo and best_solo > 0:
+                div_gain = (combo["calmar"] - best_solo) / best_solo * 100.0
+            # Pearson on aligned daily nets (zero-fill missing days).
+            all_dates = sorted(set(a_series) | set(b_series))
+            xa = [a_series.get(d, 0.0) for d in all_dates]
+            xb = [b_series.get(d, 0.0) for d in all_dates]
+            rho = pearson(xa, xb)
+            evals.append({
+                "vps": b["vps"],
+                "login": b["account_login"],
+                "magic": b["magic"],
+                "symbol": (b.get("symbols") or [None])[0],
+                "status": b["promotion_status"],
+                "score": b.get("promotion_score"),
+                "rho": round(rho, 3) if rho is not None else None,
+                "combined": combo,
+                "partner_solo_calmar": b_solo.get("calmar"),
+                "partner_solo_max_dd": b_solo.get("max_dd"),
+                "diversification_gain_pct": round(div_gain, 1) if div_gain is not None else None,
+            })
+        # Rank by diversification gain desc; then by ρ ascending (more negative = better hedge).
+        evals.sort(key=lambda c: (
+            -(c["diversification_gain_pct"] if c["diversification_gain_pct"] is not None else -1e9),
+            (c["rho"] if c["rho"] is not None else 1.0),
+        ))
+        top = evals[:PAIR_TOP_N]
+        if top:
+            a["pair_recommendations"] = {
+                "solo": a_solo,
+                "partners": top,
+                "n_evaluated": len(evals),
+                "method": (
+                    "50/50 equal-weight combination of daily_net series. "
+                    "Diversification gain = (combo Calmar − best solo Calmar) / best solo Calmar × 100. "
+                    "Rank: gain desc, then ρ asc."
+                ),
+            }
+            pair_count += 1
+    return pair_count
+
+
+# --- 15. Survival Analysis (Kaplan-Meier on bot lifetimes) ---------------
+
+SURVIVAL_BUCKETS = (
+    {"id": "score_0_40",   "label": "Score 0–40",   "min": 0,  "max": 40},
+    {"id": "score_40_60",  "label": "Score 40–60",  "min": 40, "max": 60},
+    {"id": "score_60_75",  "label": "Score 60–75",  "min": 60, "max": 75},
+    {"id": "score_75_100", "label": "Score 75–100", "min": 75, "max": 101},
+)
+SURVIVAL_HORIZON_MONTHS = 24
+
+
+def _is_dead(bot):
+    """Death (event observed) = ANY of:
+      - decay_flag set
+      - drift detected with severity >= 1.3
+      - net_profit ≤ 0 with months_active ≥ 3
+      - DD > 20% of account balance
+    """
+    if bot.get("decay_flag"):
+        return True
+    drift = bot.get("drift") or {}
+    if drift.get("flag") and (drift.get("severity") or 0) >= 1.3:
+        return True
+    months = bot.get("months_active") or 0
+    if months >= 3 and (bot.get("net_profit") or 0) <= 0:
+        return True
+    dd_pct = bot.get("dd_pct_of_balance") or 0
+    if dd_pct >= 20:
+        return True
+    return False
+
+
+def _bucket_for_score(score):
+    if score is None:
+        return None
+    for b in SURVIVAL_BUCKETS:
+        if b["min"] <= score < b["max"]:
+            return b["id"]
+    return None
+
+
+def kaplan_meier(durations_events):
+    """KM estimator with Greenwood variance + log-log 95% CI."""
+    if not durations_events:
+        return []
+    event_times = sorted({d for d, ev in durations_events if ev})
+    out = [{"t": 0.0, "S": 1.0, "ci_lo": 1.0, "ci_hi": 1.0,
+            "n_at_risk": len(durations_events), "n_events": 0}]
+    S = 1.0
+    var_sum = 0.0
+    for t in event_times:
+        n_at_risk = sum(1 for d, _ in durations_events if d >= t)
+        n_events = sum(1 for d, ev in durations_events if d == t and ev)
+        if n_at_risk == 0:
+            continue
+        S = S * (1.0 - n_events / n_at_risk)
+        if (n_at_risk - n_events) > 0:
+            var_sum += n_events / (n_at_risk * (n_at_risk - n_events))
+        var_S = (S * S) * var_sum
+        if 0 < S < 1 and var_S > 0:
+            try:
+                se_log_log = math.sqrt(var_S) / (S * abs(math.log(S)))
+                z = 1.96
+                ci_lo = S ** math.exp(z * se_log_log)
+                ci_hi = S ** math.exp(-z * se_log_log)
+                ci_lo = max(0.0, min(1.0, ci_lo))
+                ci_hi = max(0.0, min(1.0, ci_hi))
+            except (ValueError, OverflowError):
+                ci_lo = ci_hi = S
+        else:
+            ci_lo = ci_hi = S
+        out.append({
+            "t": round(t, 2),
+            "S": round(S, 4),
+            "ci_lo": round(ci_lo, 4),
+            "ci_hi": round(ci_hi, 4),
+            "n_at_risk": n_at_risk,
+            "n_events": n_events,
+        })
+    return out
+
+
+def build_survival_table(snap):
+    """Compute KM curves for: overall, score buckets, top-6 symbols.
+    Returns dict ready to write to data/survival.json."""
+    bots = [b for b in snap.get("bots", [])
+            if b.get("magic") and b.get("months_active")]
+    if len(bots) < 10:
+        return None
+    all_de = [(float(b.get("months_active") or 0), _is_dead(b)) for b in bots]
+
+    curves = {"overall": {
+        "label": "Todos los bots",
+        "n": len(all_de),
+        "n_dead": sum(1 for _, e in all_de if e),
+        "curve": kaplan_meier(all_de),
+    }}
+
+    for bucket in SURVIVAL_BUCKETS:
+        sub = [(float(b["months_active"]), _is_dead(b)) for b in bots
+               if bucket["min"] <= (b.get("promotion_score") or 0) < bucket["max"]]
+        if len(sub) >= 5:
+            curves[bucket["id"]] = {
+                "label": bucket["label"],
+                "n": len(sub),
+                "n_dead": sum(1 for _, e in sub if e),
+                "curve": kaplan_meier(sub),
+                "score_min": bucket["min"],
+                "score_max": bucket["max"],
+            }
+
+    by_sym = {}
+    for b in bots:
+        sym = _primary_symbol(b)
+        if not sym:
+            continue
+        by_sym.setdefault(sym, []).append((float(b["months_active"]), _is_dead(b)))
+    top_syms = sorted(by_sym.items(), key=lambda kv: -len(kv[1]))[:6]
+    for sym, de in top_syms:
+        if len(de) >= 5:
+            curves[f"sym_{sym}"] = {
+                "label": f"Símbolo {sym}",
+                "n": len(de),
+                "n_dead": sum(1 for _, e in de if e),
+                "curve": kaplan_meier(de),
+                "symbol": sym,
+            }
+
+    bot_to_bucket = {}
+    for b in bots:
+        bk = _bucket_for_score(b.get("promotion_score"))
+        if bk:
+            bot_to_bucket[f"{b['vps']}-{b['account_login']}-{b['magic']}"] = bk
+
+    return {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "n_bots": len(bots),
+        "n_dead": sum(1 for _, e in all_de if e),
+        "horizon_months": SURVIVAL_HORIZON_MONTHS,
+        "death_definition": (
+            "Cualquiera de: decay_flag, drift severidad ≥ 1.3, "
+            "net_profit ≤ 0 con ≥ 3 meses, o DD > 20% del balance"
+        ),
+        "curves": curves,
+        "buckets": [b["id"] for b in SURVIVAL_BUCKETS],
+        "bot_to_bucket": bot_to_bucket,
+    }
+
+
 # --- Main ----------------------------------------------------------------
 
 def main():
@@ -1635,6 +2171,7 @@ def main():
     ci_count = 0
     event_count = 0
     battle_tested_count = 0
+    trade_dist_count = 0
     real_accounts = detect_real_accounts(snap)
     real_bot_count = 0
     # Pass 1: real_vs_demo runs for EVERY bot in a real account, regardless of
@@ -1713,6 +2250,11 @@ def main():
             if ev.get("battle_tested"):
                 battle_tested_count += 1
 
+        td = compute_trade_distribution_stats(trades)
+        if td is not None:
+            b["trade_distribution"] = td
+            trade_dist_count += 1
+
     # 6) Bayesian shrinkage of promotion_score (must run AFTER initial scoring,
     # BEFORE forward tracker / portfolio so they consume the shrunk values).
     shrinkage_meta = compute_shrunk_scores(snap)
@@ -1743,6 +2285,12 @@ def main():
     today_iso = datetime.now(timezone.utc).isoformat()
     tracker_stats = update_forward_tracker(snap, data_dir, today_iso)
 
+    # Promotion Radar — 8-axis percentile-rank normalized cohort view (mutates bots).
+    radar_meta = compute_promotion_radar(snap, accounts_by_login)
+
+    # Adversarial Pair Finder — top-3 portfolio partners per READY/NEAR.
+    pair_count = compute_pair_recommendations(snap, data_dir)
+
     snap["promotion_meta"] = {
         "weights": WEIGHTS,
         "caps": CAPS,
@@ -1768,6 +2316,9 @@ def main():
         "confidence_intervals_computed": ci_count,
         "event_stress_computed": event_count,
         "battle_tested_count": battle_tested_count,
+        "trade_distribution_computed": trade_dist_count,
+        "promotion_radar": radar_meta,
+        "pair_recommendations_computed": pair_count,
         "event_windows": EVENT_WINDOWS,
         "computed_at": today_iso,
     }
@@ -1793,6 +2344,17 @@ def main():
             json.dump(portfolio, f, ensure_ascii=False, indent=2)
         os.replace(tmp3, port_path)
 
+    # Survival Curve — Kaplan-Meier per cohort (overall + score buckets + symbols).
+    survival = build_survival_table(snap)
+    survival_n_curves = 0
+    if survival:
+        surv_path = os.path.join(data_dir, "survival.json")
+        tmp4 = surv_path + ".tmp"
+        with open(tmp4, "w") as f:
+            json.dump(survival, f, ensure_ascii=False, separators=(",", ":"))
+        os.replace(tmp4, surv_path)
+        survival_n_curves = len(survival.get("curves") or {})
+
     counts = {}
     for b in snap.get("bots", []):
         s = b.get("promotion_status") or "?"
@@ -1807,7 +2369,9 @@ def main():
         f"{(shrinkage_meta or {}).get('cohorts_total', 0)} "
         f"corr_bots={corr['bot_count']} "
         f"tracker_appended={tracker_stats['appended']} tracker_decorated={tracker_stats['tracked']} "
-        f"portfolio_bots={portfolio['n_bots'] if portfolio else 0}"
+        f"portfolio_bots={portfolio['n_bots'] if portfolio else 0} "
+        f"radar_decorated={(radar_meta or {}).get('n_decorated', 0)} "
+        f"trade_dist={trade_dist_count} pairs={pair_count} survival_curves={survival_n_curves}"
     )
 
 

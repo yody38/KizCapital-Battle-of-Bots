@@ -1282,7 +1282,7 @@ function renderMainChart(kind) {
   if (!ctx) return;
   if (modalState.charts.main) { modalState.charts.main.destroy(); modalState.charts.main = null; }
   // Analysis tabs use a side panel instead of chart canvas.
-  if (['risk', 'consistency', 'decay', 'score', 'stress', 'oos', 'regime', 'tracker', 'drift', 'capacity', 'underwater', 'events'].includes(kind)) {
+  if (['risk', 'consistency', 'decay', 'score', 'stress', 'oos', 'regime', 'tracker', 'drift', 'capacity', 'underwater', 'events', 'radar', 'violin', 'pairs', 'timemachine', 'survival'].includes(kind)) {
     const b = modalState.bot ? findBotInSnapshot(modalState.bot.login, modalState.bot.magic) : null;
     if (!b) { showAnalysisPanel(`<div class="empty-state">No hay métricas extendidas para este bot (probablemente no está en el snapshot 365d).</div>`); return; }
     if (kind === 'risk') showAnalysisPanel(renderRiskPanel(b));
@@ -1297,6 +1297,11 @@ function renderMainChart(kind) {
     else if (kind === 'capacity') showAnalysisPanel(renderCapacityPanel(b));
     else if (kind === 'underwater') { showAnalysisPanel(renderUnderwaterPanel(b)); setTimeout(() => drawUnderwaterChart(b), 50); }
     else if (kind === 'events') showAnalysisPanel(renderEventsPanel(b));
+    else if (kind === 'radar') { showAnalysisPanel(renderRadarPanel(b)); setTimeout(() => drawRadarChart(b), 50); }
+    else if (kind === 'violin') { showAnalysisPanel(renderViolinPanel(b)); setTimeout(() => drawViolinChart(b), 50); }
+    else if (kind === 'pairs') { showAnalysisPanel(renderPairsPanel(b)); setTimeout(() => drawPairsCharts(b), 50); }
+    else if (kind === 'timemachine') { showAnalysisPanel(renderTimeMachinePanel(b)); setTimeout(() => initTimeMachine(b), 50); }
+    else if (kind === 'survival') { showAnalysisPanel(renderSurvivalPanel(b)); setTimeout(() => drawSurvivalChart(b), 50); }
     return;
   }
   hideAnalysisPanel();
@@ -4019,6 +4024,752 @@ function renderEventsPanel(b) {
     </div>
     <div class="events-grid">${cards}</div>
   `;
+}
+
+// =====================================================================
+// 🎯 PROMOTION RADAR (8-axis percentile-rank spider)
+// =====================================================================
+function renderRadarPanel(b) {
+  const r = b.promotion_radar;
+  if (!r) return `<div class="empty-state">⚠️ Radar no disponible: el bot no está en la cohorte gating-eligible (necesita pasar trades≥30, meses≥3, DD≤15%, net>0).</div>`;
+  const meta = (state.snapshot.enrichment_meta || {}).promotion_radar || {};
+  const cohort = meta.cohort || {};
+  const shapeCls = r.area_pct >= 70 ? 'radar-shape-good' : r.area_pct >= 50 ? 'radar-shape-mid' : r.area_pct >= 30 ? 'radar-shape-low' : 'radar-shape-bad';
+  const asymCls = (r.asymmetry || 0) > 25 ? 'profit-negative' : (r.asymmetry || 0) > 18 ? 'warning' : 'positive';
+  const rows = Object.entries(r.axes).map(([k, v]) => {
+    const pct = v.pct;
+    const cohortMed = (cohort[k] || {}).p50;
+    const barCls = pct == null ? 'bar-na' : pct >= 70 ? 'bar-strong' : pct >= 50 ? 'bar-mid' : pct >= 30 ? 'bar-low' : 'bar-weak';
+    const rawDisp = v.raw == null ? '—' : (Math.abs(v.raw) >= 1000 ? Math.round(v.raw).toLocaleString('en-US') : v.raw.toFixed(3));
+    const medDisp = cohortMed == null ? '—' : (Math.abs(cohortMed) >= 1000 ? Math.round(cohortMed).toLocaleString('en-US') : cohortMed.toFixed(3));
+    return `<tr>
+      <td class="radar-axis-label">${v.label}</td>
+      <td class="num">${rawDisp}</td>
+      <td class="num radar-pct"><span class="radar-bar ${barCls}" style="width:${pct == null ? 0 : pct}%"></span><strong>${pct == null ? '—' : pct.toFixed(0)}</strong></td>
+      <td class="num">${medDisp}</td>
+    </tr>`;
+  }).join('');
+  return `
+    <div class="radar-hero ${shapeCls}">
+      <div class="stress-hero-aurora"></div>
+      <div class="stress-hero-content">
+        <div class="stress-hero-eyebrow">🎯 Promotion Radar · 8 ejes percentil-rank · cohorte n=${meta.n_eligible ?? '—'}</div>
+        <div class="radar-hero-grid">
+          <div class="radar-big">
+            <div class="radar-big-num">${r.area_pct == null ? '—' : r.area_pct.toFixed(0)}<span class="radar-big-suffix">/100</span></div>
+            <div class="radar-big-label">Área media (composite)</div>
+          </div>
+          <div class="radar-big">
+            <div class="radar-big-shape">${r.shape_label}</div>
+            <div class="radar-big-label">Forma del polígono</div>
+          </div>
+          <div class="radar-big">
+            <div class="radar-big-num ${asymCls}">${r.asymmetry == null ? '—' : r.asymmetry.toFixed(1)}σ</div>
+            <div class="radar-big-label">${r.asymmetry_label} · stdev de ejes</div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="radar-grid-2">
+      <div class="radar-canvas-wrap"><canvas id="radar-chart"></canvas></div>
+      <div class="radar-table-wrap">
+        <table class="radar-table">
+          <thead><tr><th>Eje</th><th class="num">Tu valor</th><th class="num">Percentil</th><th class="num">Mediana cohorte</th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>
+    </div>
+    <p class="muted-note">El radar normaliza cada eje al rango percentil dentro de la cohorte gating-eligible (mediana = 50). El polígono dorado punteado es el bot mediano. Un eje en 90 + otro en 20 = bot <strong>espiga</strong> (riesgoso); ejes parejos cerca de 70 = <strong>equilibrado alto</strong> (ideal para promover).</p>
+  `;
+}
+
+function drawRadarChart(b) {
+  const canvas = document.getElementById('radar-chart');
+  if (!canvas) return;
+  const r = b.promotion_radar;
+  if (!r) return;
+  const order = ['returns','risk_adjusted','consistency','decay_health','sample_size','regime_robustness','oos_generalization','capacity_headroom'];
+  const labels = order.map(k => (r.axes[k] || {}).label || k);
+  const botData = order.map(k => (r.axes[k] || {}).pct ?? 0);
+  const medianData = order.map(() => 50);  // P50 by definition of percentile rank
+  if (modalState.charts.main) { modalState.charts.main.destroy(); modalState.charts.main = null; }
+  modalState.charts.main = new Chart(canvas, {
+    type: 'radar',
+    data: {
+      labels,
+      datasets: [
+        {
+          label: 'Cohorte mediana (P50)',
+          data: medianData,
+          borderColor: 'rgba(255,195,107,0.7)',
+          backgroundColor: 'rgba(255,195,107,0.06)',
+          borderDash: [5, 5],
+          pointRadius: 2,
+          pointBackgroundColor: 'rgba(255,195,107,0.8)',
+          borderWidth: 1.5,
+        },
+        {
+          label: `Este bot (área ${(r.area_pct ?? 0).toFixed(0)})`,
+          data: botData,
+          borderColor: '#3ddc97',
+          backgroundColor: 'rgba(61,220,151,0.22)',
+          pointRadius: 4,
+          pointBackgroundColor: '#3ddc97',
+          pointBorderColor: '#0a0b12',
+          pointBorderWidth: 2,
+          borderWidth: 2.5,
+          fill: true,
+        },
+      ],
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      animation: { duration: 700 },
+      plugins: {
+        legend: { display: true, labels: { color: '#9aa3bb', font: { size: 11 } } },
+        tooltip: {
+          backgroundColor: 'rgba(10,11,18,0.95)',
+          callbacks: { label: (it) => `${it.dataset.label}: ${it.raw.toFixed(0)} pct` },
+        },
+      },
+      scales: {
+        r: {
+          min: 0, max: 100,
+          ticks: { color: '#6b7390', backdropColor: 'transparent', stepSize: 25, font: { size: 10 } },
+          grid: { color: 'rgba(255,255,255,0.07)' },
+          angleLines: { color: 'rgba(255,255,255,0.1)' },
+          pointLabels: { color: '#cfd5e6', font: { size: 11, weight: '600' } },
+        },
+      },
+    },
+  });
+}
+
+// =====================================================================
+// 🎻 TRADE QUALITY VIOLIN — distribución de $ por trade
+// =====================================================================
+function renderViolinPanel(b) {
+  const td = b.trade_distribution;
+  if (!td) return `<div class="empty-state">⚠️ Sin distribución de trades: el bot tiene menos de 30 trades cerrados.</div>`;
+  const dtypeCls = ({
+    GRINDER: 'positive',
+    BALANCEADO: 'positive',
+    OUTLIER_DEPENDIENTE: 'warning',
+    LOTTERY: 'profit-negative',
+    PERDEDOR: 'profit-negative',
+    INDETERMINADO: '',
+  })[td.distribution_type] || '';
+  const usd = (n) => n == null ? '—' : `$${n.toFixed(2)}`;
+  return `
+    <div class="violin-hero ${dtypeCls}">
+      <div class="stress-hero-aurora"></div>
+      <div class="stress-hero-content">
+        <div class="stress-hero-eyebrow">🎻 Distribución $ por trade · n=${td.n} · ${td.wins_count} wins · ${td.losses_count} losses</div>
+        <div class="violin-verdict-big">${td.distribution_type}</div>
+        <div class="violin-verdict-hint">${td.interpretation || ''}</div>
+      </div>
+    </div>
+    <div class="violin-canvas-wrap"><canvas id="violin-chart"></canvas></div>
+    <div class="metric-grid violin-metrics">
+      ${card('Mediana', usd(td.median), 'P50 — el trade típico')}
+      ${card('Promedio', usd(td.mean), 'Sensible a outliers')}
+      ${card('σ (stdev)', usd(td.stdev), 'Volatilidad por trade')}
+      ${card('Skewness', td.skewness.toFixed(2), '+ = cola derecha (lottery); − = cola izquierda (grandes losses)')}
+      ${card('Kurtosis exceso', td.excess_kurtosis.toFixed(2), '>0 = colas pesadas; >3 = muy peligroso')}
+      ${card('Top 5% contribución', td.top5pct_contribution_pct == null ? '—' : `${td.top5pct_contribution_pct.toFixed(0)}%`, `Los ${td.top5pct_count} mejores trades aportan este % del net total`)}
+      ${card('P5 (peor 5%)', usd(td.p5), 'Cola izquierda — si los pierdes, cuánto duele')}
+      ${card('P95 (mejor 5%)', usd(td.p95), 'Cola derecha — máximo win típico')}
+      ${card('Best / Worst', `${usd(td.max)} / ${usd(td.min)}`, 'Trade más grande arriba y abajo')}
+    </div>
+    <p class="muted-note">Una cola derecha enorme (LOTTERY) implica que la rentabilidad en cuenta real es frágil: si el broker recorta esos outliers (slippage, gaps, requotes), el net colapsa. Bots <strong>GRINDER</strong> son los preferidos para promoción — pequeñas ganancias consistentes que la realidad real no puede destruir.</p>
+  `;
+}
+
+async function drawViolinChart(b) {
+  const canvas = document.getElementById('violin-chart');
+  if (!canvas) return;
+  const td = b.trade_distribution;
+  if (!td) return;
+  let trades = [];
+  try {
+    const res = await fetch(`data/bots/${b.vps}/${b.account_login}-${b.magic}.json?t=${Date.now()}`);
+    if (res.ok) { const j = await res.json(); trades = (j.trades || []).map(t => t.net).filter(n => typeof n === 'number'); }
+  } catch {}
+  if (trades.length === 0) { canvas.parentElement.innerHTML = '<div class="empty-state">Sin trades disponibles.</div>'; return; }
+
+  const W = canvas.clientWidth || 700;
+  const H = 240;
+  canvas.width = W * (window.devicePixelRatio || 1);
+  canvas.height = H * (window.devicePixelRatio || 1);
+  canvas.style.height = H + 'px';
+  const ctx = canvas.getContext('2d');
+  ctx.scale(window.devicePixelRatio || 1, window.devicePixelRatio || 1);
+
+  const padL = 60, padR = 30, padT = 20, padB = 36;
+  const w = W - padL - padR, h = H - padT - padB;
+
+  const xMin = td.min, xMax = td.max;
+  const xRange = xMax - xMin || 1;
+  const xPad = xRange * 0.05;
+  const x0 = xMin - xPad, x1 = xMax + xPad;
+  const xToPx = (v) => padL + ((v - x0) / (x1 - x0)) * w;
+
+  // KDE Gaussian, Silverman bandwidth from backend (or recompute)
+  const bw = td.kde_bandwidth || (1.06 * td.stdev * Math.pow(trades.length, -0.2)) || 1;
+  const NBINS = 220;
+  const dens = new Array(NBINS).fill(0);
+  const xs = new Array(NBINS);
+  for (let i = 0; i < NBINS; i++) xs[i] = x0 + (i / (NBINS - 1)) * (x1 - x0);
+  const norm = 1 / (Math.sqrt(2 * Math.PI) * bw);
+  for (const t of trades) {
+    for (let i = 0; i < NBINS; i++) {
+      const z = (xs[i] - t) / bw;
+      dens[i] += norm * Math.exp(-0.5 * z * z);
+    }
+  }
+  let maxD = 0;
+  for (const d of dens) if (d > maxD) maxD = d;
+  if (maxD <= 0) maxD = 1;
+  const cy = padT + h / 2;
+  const halfH = h * 0.42;
+  const dToOffset = (d) => (d / maxD) * halfH;
+
+  // BG
+  ctx.fillStyle = 'rgba(10,11,18,0.5)';
+  ctx.fillRect(padL, padT, w, h);
+
+  // Zero line
+  if (x0 < 0 && x1 > 0) {
+    const xZero = xToPx(0);
+    ctx.strokeStyle = 'rgba(255,255,255,0.18)';
+    ctx.setLineDash([4, 4]);
+    ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(xZero, padT); ctx.lineTo(xZero, padT + h); ctx.stroke();
+    ctx.setLineDash([]);
+  }
+
+  // Violin polygon — mirror upper/lower around cy
+  ctx.beginPath();
+  for (let i = 0; i < NBINS; i++) {
+    const px = xToPx(xs[i]);
+    const py = cy - dToOffset(dens[i]);
+    if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+  }
+  for (let i = NBINS - 1; i >= 0; i--) {
+    const px = xToPx(xs[i]);
+    const py = cy + dToOffset(dens[i]);
+    ctx.lineTo(px, py);
+  }
+  ctx.closePath();
+
+  // Gradient fill: red side (negative) → green side (positive)
+  const grad = ctx.createLinearGradient(padL, 0, padL + w, 0);
+  if (x0 < 0 && x1 > 0) {
+    const tZero = (0 - x0) / (x1 - x0);
+    grad.addColorStop(0, 'rgba(255,107,139,0.55)');
+    grad.addColorStop(Math.max(0, tZero - 0.02), 'rgba(255,107,139,0.4)');
+    grad.addColorStop(Math.min(1, tZero + 0.02), 'rgba(61,220,151,0.4)');
+    grad.addColorStop(1, 'rgba(61,220,151,0.55)');
+  } else {
+    grad.addColorStop(0, td.mean >= 0 ? 'rgba(61,220,151,0.45)' : 'rgba(255,107,139,0.45)');
+    grad.addColorStop(1, td.mean >= 0 ? 'rgba(61,220,151,0.65)' : 'rgba(255,107,139,0.65)');
+  }
+  ctx.fillStyle = grad;
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(255,255,255,0.35)';
+  ctx.lineWidth = 1.2;
+  ctx.stroke();
+
+  // Inner box (P25–P75)
+  const xP25 = xToPx(td.p25), xP75 = xToPx(td.p75);
+  ctx.fillStyle = 'rgba(255,255,255,0.18)';
+  ctx.fillRect(xP25, cy - 6, xP75 - xP25, 12);
+  ctx.strokeStyle = 'rgba(255,255,255,0.5)';
+  ctx.strokeRect(xP25, cy - 6, xP75 - xP25, 12);
+
+  // Median line
+  const xMed = xToPx(td.median);
+  ctx.strokeStyle = '#fff';
+  ctx.lineWidth = 2.2;
+  ctx.beginPath(); ctx.moveTo(xMed, cy - 12); ctx.lineTo(xMed, cy + 12); ctx.stroke();
+
+  // P5/P95 whiskers
+  for (const [v, lab] of [[td.p5, 'P5'], [td.p95, 'P95']]) {
+    const px = xToPx(v);
+    ctx.strokeStyle = 'rgba(255,255,255,0.45)';
+    ctx.lineWidth = 1.2;
+    ctx.beginPath(); ctx.moveTo(px, cy - 10); ctx.lineTo(px, cy + 10); ctx.stroke();
+    ctx.fillStyle = '#9aa3bb';
+    ctx.font = '10px JetBrains Mono, monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText(lab, px, padT + h + 18);
+  }
+
+  // X-axis ticks (5 ticks)
+  ctx.fillStyle = '#6b7390';
+  ctx.font = '10px JetBrains Mono, monospace';
+  ctx.textAlign = 'center';
+  for (let i = 0; i <= 5; i++) {
+    const v = x0 + (i / 5) * (x1 - x0);
+    const px = padL + (i / 5) * w;
+    ctx.fillText(`$${v.toFixed(2)}`, px, padT + h + 30);
+  }
+  // Y-axis label
+  ctx.save();
+  ctx.translate(18, padT + h / 2);
+  ctx.rotate(-Math.PI / 2);
+  ctx.fillStyle = '#9aa3bb';
+  ctx.font = '11px Inter, sans-serif';
+  ctx.fillText('densidad de trades', 0, 0);
+  ctx.restore();
+}
+
+// =====================================================================
+// ⚖️ ADVERSARIAL PAIR FINDER — top-3 partners
+// =====================================================================
+function renderPairsPanel(b) {
+  const pr = b.pair_recommendations;
+  if (!pr) return `<div class="empty-state">⚠️ Pair Finder solo disponible para bots READY/NEAR (este es ${b.promotion_status || '—'}).</div>`;
+  const usd = (n) => n == null ? '—' : `$${Number(n).toLocaleString('en-US', { maximumFractionDigits: 0 })}`;
+  const cards = pr.partners.map((p, idx) => {
+    const gainCls = (p.diversification_gain_pct || 0) > 0 ? 'positive' : 'profit-negative';
+    const rhoCls = p.rho == null ? '' : p.rho < -0.2 ? 'positive' : p.rho < 0.2 ? 'warning' : 'profit-negative';
+    const rhoLabel = p.rho == null ? '—' : p.rho < -0.2 ? '🟢 hedge' : p.rho < 0.2 ? '🟡 indep.' : '🔴 redundante';
+    const c = p.combined || {};
+    return `
+      <div class="pair-card pair-card-${idx + 1}">
+        <div class="pair-card-header">
+          <div class="pair-rank">#${idx + 1}</div>
+          <div>
+            <div class="pair-magic">${p.magic} <span class="status-pill status-${(p.status||'').toLowerCase()}">${p.status}</span></div>
+            <div class="pair-sub">${p.symbol || '—'} · ${p.vps} · cuenta ${p.login} · score ${p.score?.toFixed(1) ?? '—'}</div>
+          </div>
+        </div>
+        <canvas class="pair-canvas" data-pair-idx="${idx}"></canvas>
+        <div class="pair-metrics-row">
+          <div class="pair-metric"><span>ρ corr</span><strong class="${rhoCls}">${p.rho == null ? '—' : p.rho.toFixed(2)} ${rhoLabel}</strong></div>
+          <div class="pair-metric"><span>Combo Calmar</span><strong>${c.calmar?.toFixed(2) ?? '—'}</strong></div>
+          <div class="pair-metric"><span>Combo Sharpe</span><strong>${c.sharpe?.toFixed(2) ?? '—'}</strong></div>
+          <div class="pair-metric"><span>Combo DD</span><strong class="profit-negative">${usd(c.max_dd)}</strong></div>
+          <div class="pair-metric pair-metric-gain"><span>Diversification gain</span><strong class="${gainCls}">${p.diversification_gain_pct == null ? '—' : (p.diversification_gain_pct > 0 ? '+' : '') + p.diversification_gain_pct.toFixed(1) + '%'}</strong></div>
+        </div>
+      </div>`;
+  }).join('');
+  return `
+    <div class="pairs-hero">
+      <div class="stress-hero-aurora"></div>
+      <div class="stress-hero-content">
+        <div class="stress-hero-eyebrow">⚖️ Adversarial Pair Finder · evaluó ${pr.n_evaluated} candidatos · top-3 partners</div>
+        <div class="pairs-hero-title">No promuevas un bot solo — promuévelo en par</div>
+        <div class="pairs-hero-sub">Solo Calmar de este bot: <strong>${pr.solo.calmar?.toFixed(2) ?? '—'}</strong> · DD solo: <strong class="profit-negative">${usd(pr.solo.max_dd)}</strong>. Cada par calculado al 50/50 sobre daily_net. Ranking: diversificación gain ↓ + ρ asc.</div>
+      </div>
+    </div>
+    <div class="pairs-grid">${cards}</div>
+    <p class="muted-note">${pr.method} Una <strong>diversification gain positiva</strong> indica que el par mejora el Calmar combinado vs cualquiera de los dos solo — eso es la verdadera firma de diversificación. ρ negativo = hedge real (cuando uno cae, el otro sube).</p>
+  `;
+}
+
+async function drawPairsCharts(b) {
+  const pr = b.pair_recommendations;
+  if (!pr) return;
+  // Load main bot series
+  const baseUrl = (k) => `data/bots/${k.vps}/${k.login}-${k.magic}.json?t=${Date.now()}`;
+  const aSeries = await loadDailyNetMap({ vps: b.vps, login: b.account_login, magic: b.magic });
+  if (!aSeries) return;
+  for (let i = 0; i < pr.partners.length; i++) {
+    const p = pr.partners[i];
+    const canvas = document.querySelector(`.pair-canvas[data-pair-idx="${i}"]`);
+    if (!canvas) continue;
+    const bSeries = await loadDailyNetMap(p);
+    if (!bSeries) continue;
+    drawPairCanvas(canvas, aSeries, bSeries);
+  }
+}
+
+async function loadDailyNetMap({ vps, login, magic }) {
+  try {
+    const res = await fetch(`data/bots/${vps}/${login}-${magic}.json?t=${Date.now()}`);
+    if (!res.ok) return null;
+    const j = await res.json();
+    const map = {};
+    for (const row of (j.daily_equity_series || [])) {
+      if (row.date) map[row.date] = row.daily_net || 0;
+    }
+    return map;
+  } catch { return null; }
+}
+
+function drawPairCanvas(canvas, aMap, bMap) {
+  const W = canvas.clientWidth || 380;
+  const H = 130;
+  canvas.width = W * (window.devicePixelRatio || 1);
+  canvas.height = H * (window.devicePixelRatio || 1);
+  canvas.style.height = H + 'px';
+  const ctx = canvas.getContext('2d');
+  ctx.scale(window.devicePixelRatio || 1, window.devicePixelRatio || 1);
+  const dates = Array.from(new Set([...Object.keys(aMap), ...Object.keys(bMap)])).sort();
+  if (dates.length < 5) return;
+  let cumA = 0, cumB = 0, cumC = 0;
+  const a = [], bArr = [], cArr = [];
+  for (const d of dates) {
+    cumA += aMap[d] || 0;
+    cumB += bMap[d] || 0;
+    cumC += 0.5 * (aMap[d] || 0) + 0.5 * (bMap[d] || 0);
+    a.push(cumA); bArr.push(cumB); cArr.push(cumC);
+  }
+  const all = [...a, ...bArr, ...cArr];
+  const yMin = Math.min(0, ...all);
+  const yMax = Math.max(0, ...all);
+  const yRange = (yMax - yMin) || 1;
+  const padL = 8, padR = 8, padT = 8, padB = 18;
+  const w = W - padL - padR, h = H - padT - padB;
+  const xToPx = (i) => padL + (i / (dates.length - 1)) * w;
+  const yToPx = (v) => padT + h - ((v - yMin) / yRange) * h;
+  // Zero line
+  if (yMin < 0 && yMax > 0) {
+    ctx.strokeStyle = 'rgba(255,255,255,0.12)';
+    ctx.setLineDash([2, 2]);
+    ctx.beginPath(); ctx.moveTo(padL, yToPx(0)); ctx.lineTo(padL + w, yToPx(0)); ctx.stroke();
+    ctx.setLineDash([]);
+  }
+  const drawLine = (data, color, width, alpha) => {
+    ctx.strokeStyle = color; ctx.lineWidth = width; ctx.globalAlpha = alpha;
+    ctx.beginPath();
+    for (let i = 0; i < data.length; i++) {
+      const px = xToPx(i), py = yToPx(data[i]);
+      if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+    }
+    ctx.stroke(); ctx.globalAlpha = 1;
+  };
+  drawLine(a, '#7c9cff', 1, 0.55);     // bot A solo (subtle)
+  drawLine(bArr, '#ffc36b', 1, 0.55);  // bot B solo (subtle)
+  drawLine(cArr, '#3ddc97', 2.4, 1);   // 50/50 combined (highlighted)
+  // Legend
+  ctx.font = '9px JetBrains Mono, monospace';
+  ctx.textAlign = 'left';
+  ctx.fillStyle = '#7c9cff'; ctx.fillText('— A solo', padL, H - 6);
+  ctx.fillStyle = '#ffc36b'; ctx.fillText('— B solo', padL + 60, H - 6);
+  ctx.fillStyle = '#3ddc97'; ctx.fillText('— A+B (50/50)', padL + 120, H - 6);
+}
+
+// =====================================================================
+// 🕰️ TIME MACHINE — retroactive promotion replay
+// =====================================================================
+const tmState = { capital: 10000, daily: null, dates: null, cum: null, idx: 0 };
+
+function renderTimeMachinePanel(b) {
+  return `
+    <div class="tm-hero">
+      <div class="stress-hero-aurora"></div>
+      <div class="stress-hero-content">
+        <div class="stress-hero-eyebrow">🕰️ Time Machine · simulación retroactiva con cuenta real</div>
+        <div class="tm-hero-title">¿Qué pasaría si lo prometía en X fecha con Y capital?</div>
+        <div class="tm-hero-sub">Mueve el slider para escoger la fecha de promoción hipotética. La curva muestra cómo evolucionaría tu equity REAL desde ese día hasta hoy, asumiendo que el bot reproduce sus daily_net históricos sobre tu capital inicial.</div>
+      </div>
+    </div>
+    <div class="tm-controls">
+      <label class="tm-label">Capital inicial:
+        <input id="tm-capital" type="number" min="1000" max="1000000" step="500" value="10000" />
+        <span class="tm-currency">USD</span>
+      </label>
+      <label class="tm-label tm-slider-label">Fecha de promoción:
+        <input id="tm-date" type="range" min="0" max="0" step="1" value="0" />
+        <span id="tm-date-display">—</span>
+      </label>
+    </div>
+    <div class="tm-stats">
+      <div class="tm-stat">
+        <div class="tm-stat-label">Capital inicial</div>
+        <div class="tm-stat-value" id="tm-stat-initial">—</div>
+        <div class="tm-stat-hint" id="tm-stat-since">—</div>
+      </div>
+      <div class="tm-stat tm-stat-final">
+        <div class="tm-stat-label">Capital HOY</div>
+        <div class="tm-stat-value" id="tm-stat-final">—</div>
+        <div class="tm-stat-hint" id="tm-stat-pnl">—</div>
+      </div>
+      <div class="tm-stat">
+        <div class="tm-stat-label">Retorno total</div>
+        <div class="tm-stat-value" id="tm-stat-return">—</div>
+        <div class="tm-stat-hint" id="tm-stat-cagr">—</div>
+      </div>
+      <div class="tm-stat">
+        <div class="tm-stat-label">Max DD durante</div>
+        <div class="tm-stat-value" id="tm-stat-dd">—</div>
+        <div class="tm-stat-hint">peak-to-trough sobre capital</div>
+      </div>
+    </div>
+    <div class="tm-canvas-wrap"><canvas id="tm-chart"></canvas></div>
+    <p class="muted-note">⚠️ Simulación: asume que el bot operaría idéntico sobre tu capital. No re-escala lots a tu balance ni considera margin/slippage diferentes. Es un <strong>recall histórico</strong>, no una predicción. Útil para validar arrepentimiento ("si hubiera promovido este bot el día X, hoy tendría $Y").</p>
+  `;
+}
+
+async function initTimeMachine(b) {
+  const dateInput = document.getElementById('tm-date');
+  const capInput = document.getElementById('tm-capital');
+  const display = document.getElementById('tm-date-display');
+  if (!dateInput || !capInput) return;
+  let daily = null;
+  try {
+    const res = await fetch(`data/bots/${b.vps}/${b.account_login}-${b.magic}.json?t=${Date.now()}`);
+    if (res.ok) { const j = await res.json(); daily = j.daily_equity_series || []; }
+  } catch {}
+  if (!daily || daily.length < 2) {
+    document.querySelector('.tm-canvas-wrap').innerHTML = '<div class="empty-state">Sin daily_equity_series suficiente.</div>';
+    return;
+  }
+  tmState.daily = daily;
+  tmState.dates = daily.map(p => p.date);
+  // Allow promotion at any historical date EXCEPT the very last (need ≥1 day forward)
+  const maxIdx = Math.max(0, daily.length - 2);
+  dateInput.min = 0;
+  dateInput.max = maxIdx;
+  dateInput.value = 0;  // earliest date
+  const update = () => {
+    const idx = parseInt(dateInput.value, 10) || 0;
+    const cap = Math.max(1000, parseFloat(capInput.value) || 10000);
+    tmState.idx = idx;
+    tmState.capital = cap;
+    if (display) display.textContent = tmState.dates[idx];
+    drawTimeMachine(b);
+  };
+  dateInput.oninput = update;
+  capInput.oninput = update;
+  update();
+}
+
+function drawTimeMachine(b) {
+  const canvas = document.getElementById('tm-chart');
+  if (!canvas || !tmState.daily) return;
+  const startIdx = tmState.idx;
+  const cap = tmState.capital;
+  const slice = tmState.daily.slice(startIdx);
+  if (slice.length < 2) return;
+  // Compute equity from selected start date forward
+  let cum = 0, peak = 0, maxDD = 0;
+  const labels = [];
+  const eq = [];
+  const ddLine = [];
+  for (const p of slice) {
+    cum += p.daily_net || 0;
+    if (cum > peak) peak = cum;
+    const dd = peak - cum;
+    if (dd > maxDD) maxDD = dd;
+    labels.push(new Date(p.date));
+    eq.push(round2(cap + cum));
+    ddLine.push(-round2(dd));
+  }
+  const finalEquity = cap + cum;
+  const totalRet = (cum / cap) * 100;
+  const days = slice.length;
+  const cagr = days >= 30 ? (Math.pow(finalEquity / cap, 365 / days) - 1) * 100 : null;
+  const ddPct = (maxDD / cap) * 100;
+  // Update stats
+  const setText = (id, txt, cls) => { const el = document.getElementById(id); if (el) { el.textContent = txt; if (cls != null) el.className = el.className.replace(/(positive|profit-negative|negative|warning)/g, '') + ' ' + cls; } };
+  setText('tm-stat-initial', fmt.usd(cap, true));
+  setText('tm-stat-since', `desde ${tmState.dates[startIdx]}`);
+  setText('tm-stat-final', fmt.usd(finalEquity, true), finalEquity >= cap ? 'positive' : 'profit-negative');
+  setText('tm-stat-pnl', `${cum >= 0 ? '+' : ''}${fmt.usd(cum, true)} en ${days} días`);
+  setText('tm-stat-return', `${totalRet >= 0 ? '+' : ''}${totalRet.toFixed(2)}%`, totalRet >= 0 ? 'positive' : 'profit-negative');
+  setText('tm-stat-cagr', cagr != null ? `CAGR ${cagr >= 0 ? '+' : ''}${cagr.toFixed(2)}%` : '—');
+  setText('tm-stat-dd', `${ddPct.toFixed(2)}%`);
+  // Chart
+  if (modalState.charts.main) { modalState.charts.main.destroy(); modalState.charts.main = null; }
+  modalState.charts.main = new Chart(canvas, {
+    type: 'line',
+    data: {
+      labels,
+      datasets: [
+        {
+          label: `Equity simulada (${fmt.usd(cap, true)} → ${fmt.usd(finalEquity, true)})`,
+          data: eq,
+          borderColor: finalEquity >= cap ? '#3ddc97' : '#ff6b8b',
+          backgroundColor: finalEquity >= cap ? 'rgba(61,220,151,0.18)' : 'rgba(255,107,139,0.18)',
+          fill: true, tension: 0.25, pointRadius: 0, borderWidth: 2.4,
+          yAxisID: 'y',
+        },
+        {
+          label: `Drawdown (max ${ddPct.toFixed(1)}%)`,
+          data: ddLine,
+          borderColor: 'rgba(255,107,139,0.55)',
+          backgroundColor: 'rgba(255,107,139,0.08)',
+          fill: true, tension: 0, pointRadius: 0, borderWidth: 1,
+          yAxisID: 'y2', borderDash: [4, 3],
+        },
+      ],
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      animation: { duration: 350 },
+      plugins: {
+        legend: { display: true, labels: { color: '#9aa3bb', font: { size: 11 } } },
+        tooltip: {
+          backgroundColor: 'rgba(10,11,18,0.95)',
+          callbacks: { label: (it) => it.dataset.yAxisID === 'y2' ? `DD ${it.raw}%` : `${fmt.usd(it.raw, true)}` },
+        },
+      },
+      scales: {
+        x: { type: 'time', time: { unit: labels.length > 200 ? 'month' : 'week' }, ticks: { color: '#6b7390', font: { size: 10 } }, grid: { display: false } },
+        y: { position: 'left', ticks: { color: '#6b7390', callback: (v) => fmt.usd(v, true) }, grid: { color: 'rgba(255,255,255,0.04)' } },
+        y2: { position: 'right', ticks: { color: '#6b7390', callback: (v) => `${v}` }, grid: { display: false }, max: 0 },
+      },
+    },
+  });
+}
+
+// =====================================================================
+// 📈 SURVIVAL CURVE (Kaplan-Meier cohort mortality)
+// =====================================================================
+let _survivalCache = null;
+async function loadSurvivalTable() {
+  if (_survivalCache) return _survivalCache;
+  try {
+    const res = await fetch(`data/survival.json?t=${Date.now()}`);
+    if (!res.ok) return null;
+    _survivalCache = await res.json();
+    return _survivalCache;
+  } catch { return null; }
+}
+
+function renderSurvivalPanel(b) {
+  return `
+    <div class="surv-hero">
+      <div class="stress-hero-aurora"></div>
+      <div class="stress-hero-content">
+        <div class="stress-hero-eyebrow">📈 Análisis de supervivencia · Kaplan-Meier · base rate empírico</div>
+        <div class="surv-hero-title">¿Cuántos bots como este sobreviven?</div>
+        <div class="surv-hero-sub" id="surv-hero-sub">Cargando cohorte…</div>
+      </div>
+    </div>
+    <div class="surv-canvas-wrap"><canvas id="surv-chart"></canvas></div>
+    <div class="surv-table-wrap" id="surv-table-wrap"></div>
+    <p class="muted-note">Curva escalonada Kaplan-Meier: P(T>t) = probabilidad de seguir <strong>vivo</strong> a t meses. <strong>Muerte</strong> = cualquiera de: decay_flag, drift severo (≥1.3), net negativo con ≥3 meses, o DD&gt;20% balance. Bandas = 95% CI (Greenwood log-log). El base rate empírico de la cohorte es la única defensa real contra el sesgo de selección sobre 218 bots: <strong>"este bot puede tener score 90, pero ¿cuántos bots con score 90 mueren a los 6 meses?"</strong>.</p>
+  `;
+}
+
+async function drawSurvivalChart(b) {
+  const surv = await loadSurvivalTable();
+  if (!surv) {
+    const wrap = document.querySelector('.surv-canvas-wrap');
+    if (wrap) wrap.innerHTML = '<div class="empty-state">⚠️ survival.json no disponible (¿pipeline aún sin correr?).</div>';
+    return;
+  }
+  const canvas = document.getElementById('surv-chart');
+  if (!canvas) return;
+  const botKey = `${b.vps}-${b.account_login}-${b.magic}`;
+  const bucketId = (surv.bot_to_bucket || {})[botKey];
+  const overall = surv.curves.overall;
+  const cohort = bucketId ? surv.curves[bucketId] : null;
+  const sym = (b.symbols || [])[0] ? (b.symbols[0].split('.')[0].toUpperCase()) : null;
+  const symCurve = sym ? surv.curves[`sym_${sym}`] : null;
+
+  const sub = document.getElementById('surv-hero-sub');
+  if (sub) {
+    const lookup = (curve, t) => {
+      if (!curve) return null;
+      let last = curve.curve[0];
+      for (const pt of curve.curve) { if (pt.t <= t) last = pt; else break; }
+      return last;
+    };
+    const m6 = lookup(cohort || overall, 6), m12 = lookup(cohort || overall, 12);
+    const cohortLab = cohort ? cohort.label : overall.label;
+    sub.innerHTML = `
+      Tu cohorte: <strong>${cohortLab}</strong> · n=${(cohort||overall).n} (${(cohort||overall).n_dead} muertos)<br>
+      Supervivencia a 6 meses: <strong>${m6 ? (m6.S * 100).toFixed(0) : '—'}%</strong> ·
+      a 12 meses: <strong>${m12 ? (m12.S * 100).toFixed(0) : '—'}%</strong>
+    `;
+  }
+
+  // Build datasets
+  const buildPoints = (curve) => (curve?.curve || []).map(p => ({ x: p.t, y: p.S * 100 }));
+  const buildBand = (curve, side) => (curve?.curve || []).map(p => ({ x: p.t, y: (side === 'lo' ? p.ci_lo : p.ci_hi) * 100 }));
+
+  const datasets = [];
+  if (cohort) {
+    datasets.push({
+      label: `CI 95 lo · ${cohort.label}`,
+      data: buildBand(cohort, 'lo'),
+      borderColor: 'rgba(61,220,151,0.0)',
+      backgroundColor: 'rgba(61,220,151,0.0)',
+      fill: false, pointRadius: 0, stepped: true, borderWidth: 0,
+    });
+    datasets.push({
+      label: `CI 95 hi · ${cohort.label}`,
+      data: buildBand(cohort, 'hi'),
+      borderColor: 'rgba(61,220,151,0.0)',
+      backgroundColor: 'rgba(61,220,151,0.18)',
+      fill: '-1', pointRadius: 0, stepped: true, borderWidth: 0,
+    });
+    datasets.push({
+      label: `${cohort.label} (tu cohorte · n=${cohort.n})`,
+      data: buildPoints(cohort),
+      borderColor: '#3ddc97',
+      backgroundColor: 'rgba(61,220,151,0.0)',
+      fill: false, pointRadius: 3, pointBackgroundColor: '#3ddc97',
+      stepped: true, borderWidth: 2.6,
+    });
+  }
+  datasets.push({
+    label: `Overall (n=${overall.n})`,
+    data: buildPoints(overall),
+    borderColor: 'rgba(124,156,255,0.85)',
+    fill: false, pointRadius: 0, stepped: true, borderWidth: 1.8, borderDash: [4, 4],
+  });
+  if (symCurve && symCurve !== cohort) {
+    datasets.push({
+      label: `${symCurve.label} (n=${symCurve.n})`,
+      data: buildPoints(symCurve),
+      borderColor: 'rgba(255,195,107,0.85)',
+      fill: false, pointRadius: 0, stepped: true, borderWidth: 1.8, borderDash: [2, 3],
+    });
+  }
+  if (modalState.charts.main) { modalState.charts.main.destroy(); modalState.charts.main = null; }
+  modalState.charts.main = new Chart(canvas, {
+    type: 'line',
+    data: { datasets },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      animation: { duration: 600 },
+      plugins: {
+        legend: { display: true, labels: { color: '#9aa3bb', font: { size: 11 }, filter: (item) => !item.text.startsWith('CI 95') } },
+        tooltip: {
+          backgroundColor: 'rgba(10,11,18,0.95)',
+          callbacks: { label: (it) => `${it.dataset.label}: ${it.raw.y.toFixed(1)}% vivos a ${it.raw.x.toFixed(0)}m` },
+        },
+      },
+      scales: {
+        x: { type: 'linear', title: { display: true, text: 'Meses activos', color: '#9aa3bb' }, ticks: { color: '#6b7390', stepSize: 3 }, grid: { color: 'rgba(255,255,255,0.04)' } },
+        y: { min: 0, max: 100, title: { display: true, text: 'P(T > t) · supervivencia (%)', color: '#9aa3bb' }, ticks: { color: '#6b7390', callback: (v) => `${v}%` }, grid: { color: 'rgba(255,255,255,0.04)' } },
+      },
+    },
+  });
+
+  // Bucket breakdown table
+  const wrap = document.getElementById('surv-table-wrap');
+  if (wrap) {
+    const buckets = (surv.buckets || []).map(id => surv.curves[id]).filter(Boolean);
+    const rows = buckets.map(c => {
+      const lookup = (t) => { let last = c.curve[0]; for (const pt of c.curve) { if (pt.t <= t) last = pt; else break; } return last; };
+      const m3 = lookup(3), m6 = lookup(6), m12 = lookup(12), m18 = lookup(18);
+      const isMine = bucketId && c === cohort;
+      return `<tr class="${isMine ? 'surv-row-mine' : ''}">
+        <td>${isMine ? '👈 ' : ''}${c.label}</td>
+        <td class="num">${c.n}</td>
+        <td class="num">${c.n_dead}</td>
+        <td class="num">${m3 ? (m3.S * 100).toFixed(0) + '%' : '—'}</td>
+        <td class="num">${m6 ? (m6.S * 100).toFixed(0) + '%' : '—'}</td>
+        <td class="num">${m12 ? (m12.S * 100).toFixed(0) + '%' : '—'}</td>
+        <td class="num">${m18 ? (m18.S * 100).toFixed(0) + '%' : '—'}</td>
+      </tr>`;
+    }).join('');
+    wrap.innerHTML = `
+      <table class="surv-table">
+        <thead>
+          <tr><th>Cohorte (score bucket)</th><th class="num">n</th><th class="num">muertos</th><th class="num">3m</th><th class="num">6m</th><th class="num">12m</th><th class="num">18m</th></tr>
+        </thead>
+        <tbody>${rows}</tbody>
+      </table>`;
+  }
 }
 
 // =====================================================================
