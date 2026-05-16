@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.kizcapital.heartbeat</string>
+
+    <!-- Out-of-band heartbeat for Battle of Bots dashboard sync.
+         Runs every 10 min on the Mac, fully independent of GH Actions.
+         Detects staleness, alerts via email, and triggers auto-recovery. -->
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/opt/homebrew/opt/python@3.14/Frameworks/Python.framework/Versions/3.14/bin/python3</string>
+        <string>/Users/yodyiznaga/Documents/Claude/MT5 MCP/Battle of Bots/scripts/heartbeat_check.py</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/yodyiznaga/Documents/Claude/MT5 MCP/Battle of Bots</string>
+
+    <key>StartInterval</key>
+    <integer>600</integer>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/yodyiznaga/Documents/Claude/MT5 MCP/Battle of Bots/data/heartbeat.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/yodyiznaga/Documents/Claude/MT5 MCP/Battle of Bots/data/heartbeat.err.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <key>HOME</key>
+        <string>/Users/yodyiznaga</string>
+    </dict>
+
+    <!-- Keep restart logic conservative: launchd reschedules every 600s anyway. -->
+    <key>ThrottleInterval</key>
+    <integer>60</integer>
+</dict>
+</plist>

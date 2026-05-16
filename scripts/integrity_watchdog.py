@@ -345,6 +345,26 @@ def main() -> int:
             }
             if missing:
                 fails.append(f"supabase missing files: {len(missing)} of {len(bots)}")
+            # Per-VPS freshness emitted by post_merge.py — surface stale VPSs
+            # in the issue body so triage is one click instead of a grep.
+            vf = snap.get("vps_freshness") or {}
+            stale_vps = []
+            for v_id in sorted(vf.keys()):
+                v = vf[v_id] or {}
+                if not v.get("present"):
+                    stale_vps.append(f"{v_id}=missing")
+                elif v.get("stale"):
+                    lag_min = round((v.get("lag_sec") or 0) / 60, 1)
+                    stale_vps.append(f"{v_id}={lag_min}min")
+            info["steps"]["vps_freshness"] = {
+                "summary": {k: {"lag_min": round((vf[k].get("lag_sec") or 0) / 60, 1),
+                                 "stale": bool(vf[k].get("stale"))}
+                            for k in vf if vf[k].get("present")},
+                "stale": stale_vps,
+                "partial_data": bool(snap.get("partial_data")),
+            }
+            if stale_vps:
+                fails.append(f"stale VPSs: {', '.join(stale_vps)}")
 
     # Step 5 — Vercel version pin (warn only)
     app_v, css_v = vercel_version_pin()

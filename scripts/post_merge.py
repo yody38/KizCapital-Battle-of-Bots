@@ -2146,6 +2146,194 @@ def build_survival_table(snap):
 
 # --- Main ----------------------------------------------------------------
 
+def _parse_iso_safe(s):
+    if not s:
+        return None
+    try:
+        if s.endswith("Z"):
+            s = s[:-1] + "+00:00"
+        return datetime.fromisoformat(s)
+    except Exception:
+        return None
+
+
+def compute_vps_freshness(data_dir, vps_ids=None):
+    """For each snapshot_vpsN.json present, compute lag from now() vs its
+    generated_at. Returns ({vps_id: {lag_sec, stale, generated_at}}, partial)."""
+    if vps_ids is None:
+        vps_ids = ["vps1", "vps2", "vps3", "vps4", "vps5"]
+    now = datetime.now(timezone.utc)
+    out = {}
+    partial = False
+    for v in vps_ids:
+        p = os.path.join(data_dir, f"snapshot_{v}.json")
+        if not os.path.exists(p):
+            out[v] = {"present": False}
+            partial = True
+            continue
+        try:
+            with open(p) as f:
+                snap = json.load(f)
+            gen_t = _parse_iso_safe(snap.get("generated_at"))
+            if not gen_t:
+                # Fallback: file mtime
+                gen_t = datetime.fromtimestamp(os.path.getmtime(p), tz=timezone.utc)
+            lag = (now - gen_t).total_seconds()
+            stale = lag > 90 * 60  # > 90 min = stale (3 missed cycles)
+            out[v] = {
+                "present": True,
+                "generated_at": gen_t.isoformat(timespec="seconds"),
+                "lag_sec": int(lag),
+                "stale": stale,
+                "bot_count": len([b for b in snap.get("bots", []) if b.get("magic")]),
+            }
+            if stale:
+                partial = True
+        except Exception as e:
+            out[v] = {"present": True, "error": str(e)}
+            partial = True
+    return out, partial
+
+
+def aggregate_health_metrics(data_dir):
+    """Read heartbeat_log.jsonl + integrity_health_log.jsonl tails to compute
+    uptime_pct_30d, mean_lag_sec_7d, recovery_count_7d. Defensive — returns
+    empty dict if no logs."""
+    metrics = {}
+    now = datetime.now(timezone.utc)
+    hb_path = os.path.join(data_dir, "heartbeat_log.jsonl")
+    if os.path.exists(hb_path):
+        ok = warn = fail = 0
+        lags_7d = []
+        cutoff_30 = now.timestamp() - 30 * 86400
+        cutoff_7 = now.timestamp() - 7 * 86400
+        try:
+            with open(hb_path) as f:
+                for line in f:
+                    try:
+                        r = json.loads(line)
+                    except Exception:
+                        continue
+                    t = _parse_iso_safe(r.get("ts"))
+                    if not t or t.timestamp() < cutoff_30:
+                        continue
+                    res = r.get("result")
+                    if res == "ok":
+                        ok += 1
+                    elif res == "warn":
+                        warn += 1
+                    elif res == "fail":
+                        fail += 1
+                    if t.timestamp() >= cutoff_7 and isinstance(r.get("lag_sec"), (int, float)):
+                        lags_7d.append(r["lag_sec"])
+            total = ok + warn + fail
+            if total:
+                metrics["uptime_pct_30d"] = round(100.0 * ok / total, 2)
+                metrics["heartbeat_samples_30d"] = total
+            if lags_7d:
+                metrics["mean_lag_sec_7d"] = round(sum(lags_7d) / len(lags_7d), 1)
+                metrics["max_lag_sec_7d"] = round(max(lags_7d), 1)
+        except Exception:
+            pass
+    dr_path = os.path.join(data_dir, "dispatch_refresh_log.jsonl")
+    if os.path.exists(dr_path):
+        rec = 0
+        cutoff_7 = now.timestamp() - 7 * 86400
+        try:
+            with open(dr_path) as f:
+                for line in f:
+                    try:
+                        r = json.loads(line)
+                    except Exception:
+                        continue
+                    t = _parse_iso_safe(r.get("ts"))
+                    if not t or t.timestamp() < cutoff_7:
+                        continue
+                    if any(a.get("post_lag_min") is not None and a["post_lag_min"] <= 35
+                           for a in r.get("attempts", [])):
+                        rec += 1
+            metrics["recovery_count_7d"] = rec
+        except Exception:
+            pass
+    return metrics
+
+
+def write_sync_status_md(data_dir, snap, vps_freshness, health_metrics, partial_data):
+    """Auto-generated operations dashboard — overwritten each cycle."""
+    md_path = os.path.join(data_dir, "..", "SYNC_STATUS.md")
+    md_path = os.path.normpath(md_path)
+    now_iso = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    bots = [b for b in snap.get("bots", []) if b.get("magic")]
+    accounts = snap.get("accounts", [])
+
+    lines = []
+    lines.append("# SYNC_STATUS — Battle of Bots")
+    lines.append("")
+    lines.append("> Auto-generated by `post_merge.py` after each successful cycle. Do not edit by hand.")
+    lines.append("")
+    lines.append(f"**Last cycle:** `{now_iso}`")
+    lines.append(f"**Snapshot generated_at:** `{snap.get('generated_at','?')}`")
+    lines.append(f"**Bots indexed:** {len(bots)}")
+    lines.append(f"**Accounts indexed:** {len(accounts)}")
+    lines.append(f"**Partial data:** {'⚠️ YES — see VPS table' if partial_data else 'no'}")
+    lines.append("")
+    lines.append("## VPS freshness")
+    lines.append("")
+    lines.append("| VPS | present | generated_at | lag (min) | bots | stale |")
+    lines.append("|-----|---------|--------------|----------:|-----:|:-----:|")
+    for v in sorted(vps_freshness.keys()):
+        d = vps_freshness[v]
+        if not d.get("present"):
+            lines.append(f"| {v} | ❌ no | — | — | — | — |")
+            continue
+        if "error" in d:
+            lines.append(f"| {v} | ⚠️ err | — | — | — | — |")
+            continue
+        lag_min = round(d["lag_sec"] / 60, 1)
+        st = "🛑" if d.get("stale") else "✅"
+        lines.append(f"| {v} | ✅ | `{d['generated_at']}` | {lag_min} | {d.get('bot_count', 0)} | {st} |")
+    lines.append("")
+    lines.append("## Health metrics")
+    lines.append("")
+    if health_metrics:
+        for k, v in health_metrics.items():
+            lines.append(f"- **{k}**: {v}")
+    else:
+        lines.append("_no heartbeat history yet — will populate after first 24h_")
+    lines.append("")
+    lines.append("## Troubleshooting commands")
+    lines.append("")
+    lines.append("```bash")
+    lines.append("# Latest GH Actions runs")
+    lines.append("gh run list --repo yody38/KizCapital-Battle-of-Bots --limit 10")
+    lines.append("")
+    lines.append("# Manual heartbeat check")
+    lines.append("python3 'Battle of Bots/scripts/heartbeat_check.py' --no-email")
+    lines.append("")
+    lines.append("# Manual integrity verification")
+    lines.append("python3 'Battle of Bots/scripts/integrity_watchdog.py' --no-issue")
+    lines.append("")
+    lines.append("# Manual dispatch (recovers stuck pipeline)")
+    lines.append("python3 'Battle of Bots/scripts/dispatch_refresh.py' --reason manual")
+    lines.append("")
+    lines.append("# Tail heartbeat log")
+    lines.append("tail -20 'Battle of Bots/data/heartbeat_log.jsonl'")
+    lines.append("```")
+    lines.append("")
+    lines.append("## Links")
+    lines.append("")
+    lines.append("- Dashboard: https://kiz-capital-bots-kiz-capital-battle-of-bots-projects.vercel.app/")
+    lines.append("- GH Actions: https://github.com/yody38/KizCapital-Battle-of-Bots/actions")
+    lines.append("- Billing:    https://github.com/settings/billing")
+    lines.append("")
+
+    tmp = md_path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines))
+    os.replace(tmp, md_path)
+    return md_path
+
+
 def main():
     if len(sys.argv) < 2:
         print("usage: post_merge.py <data_dir>", file=sys.stderr)
@@ -2156,6 +2344,11 @@ def main():
         snap = json.load(f)
 
     accounts_by_login = {a["login"]: a for a in snap.get("accounts", [])}
+
+    # Per-VPS freshness — computed from snapshot_vpsN.json before any enrichment.
+    vps_freshness, partial_data = compute_vps_freshness(data_dir)
+    snap["vps_freshness"] = vps_freshness
+    snap["partial_data"] = partial_data
 
     enriched = 0
     for b in snap.get("bots", []):
@@ -2368,12 +2561,33 @@ def main():
         os.replace(tmp4, surv_path)
         survival_n_curves = len(survival.get("curves") or {})
 
+    # Health metrics aggregated from heartbeat + dispatch logs.
+    health_metrics = aggregate_health_metrics(data_dir)
+    if health_metrics:
+        snap["health_metrics"] = health_metrics
+        # Re-save snapshot with the additions (vps_freshness was already there,
+        # but health_metrics + final status need to persist).
+        tmpH = snap_path + ".hm.tmp"
+        with open(tmpH, "w") as f:
+            json.dump(snap, f, ensure_ascii=False, indent=2)
+        os.replace(tmpH, snap_path)
+
+    # Auto-generated operations status page.
+    try:
+        sync_md = write_sync_status_md(data_dir, snap, vps_freshness, health_metrics, partial_data)
+        sync_md_msg = f"sync_status={os.path.basename(sync_md)}"
+    except Exception as e:
+        sync_md_msg = f"sync_status_err={e}"
+
     counts = {}
     for b in snap.get("bots", []):
         s = b.get("promotion_status") or "?"
         counts[s] = counts.get(s, 0) + 1
+    n_stale_vps = sum(1 for v in vps_freshness.values()
+                      if v.get("present") and v.get("stale"))
     print(
         f"post_merge OK enriched={enriched} status={counts} "
+        f"vps_stale={n_stale_vps} partial={partial_data} {sync_md_msg} "
         f"stress={stress_count} oos={oos_count} regime={regime_count} "
         f"drift={drift_count} drift_flagged={drift_flagged} "
         f"capacity={capacity_count} real_bots={real_bot_count} "

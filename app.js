@@ -121,6 +121,61 @@ async function loadSnapshot() {
   }
 }
 
+// --- Staleness banner (out-of-band sync alert) ---------------------------
+// Reads s.generated_at and s.partial_data + s.vps_freshness from the snapshot
+// and surfaces sync health prominently. Thresholds match heartbeat_check.py:
+//   ≤ 35 min  → hidden
+//   35–90 min → warn (yellow)
+//   > 90 min  → critical (red, pulse)
+function renderStalenessBanner(snap) {
+  const el = document.getElementById('staleness-banner');
+  if (!el) return;
+  const textEl = el.querySelector('.staleness-banner__text');
+  const partialEl = el.querySelector('.staleness-banner__partial');
+  const iconEl = el.querySelector('.staleness-banner__icon');
+  if (!snap || !snap.generated_at) {
+    el.classList.add('hidden');
+    return;
+  }
+  const lagMin = (Date.now() - new Date(snap.generated_at).getTime()) / 60000;
+  const partial = snap.partial_data === true;
+  const stalePerVps = snap.vps_freshness
+    ? Object.entries(snap.vps_freshness)
+        .filter(([, v]) => v && v.present && v.stale)
+        .map(([k]) => k.toUpperCase())
+    : [];
+
+  el.classList.remove('warn', 'critical', 'hidden');
+
+  if (lagMin <= 35 && !partial) {
+    el.classList.add('hidden');
+    return;
+  }
+  let cls = 'warn';
+  let msg = `Sincronización con retraso: ${Math.floor(lagMin)} min sin actualizar. El sistema está reintentando.`;
+  let icon = '⚠️';
+  if (lagMin > 90) {
+    cls = 'critical';
+    icon = '🛑';
+    const since = new Date(snap.generated_at);
+    const hh = String(since.getUTCHours()).padStart(2,'0');
+    const mm = String(since.getUTCMinutes()).padStart(2,'0');
+    msg = `Datos no actualizados desde ${hh}:${mm} UTC (${Math.floor(lagMin)} min). Pipeline en investigación — recuperación automática en curso.`;
+  } else if (partial && lagMin <= 35) {
+    msg = 'Datos parciales: el último cycle se completó pero al menos una VPS no respondió.';
+  }
+  iconEl.textContent = icon;
+  textEl.textContent = msg;
+  el.classList.add(cls);
+
+  if (stalePerVps.length) {
+    partialEl.textContent = `VPS caídas: ${stalePerVps.join(', ')}`;
+    partialEl.classList.remove('hidden');
+  } else {
+    partialEl.classList.add('hidden');
+  }
+}
+
 // --- Freshness indicator -------------------------------------------------
 
 function setFreshness(iso, errorMsg) {
@@ -180,6 +235,9 @@ function render() {
 
   // Determine freshness against oldest source
   setFreshness(s.oldest_source_generated_at || s.generated_at);
+  // Out-of-band staleness banner (sticky, prominent — survives even if no
+  // per-bot files load). Reads s.vps_freshness + s.partial_data from post_merge.
+  try { renderStalenessBanner(s); } catch(e) { console.error('staleness banner failed', e); }
 
   const safe = (fn, name) => { try { fn(); } catch (e) { console.error(name + ' failed:', e); } };
   safe(renderVpsPills, 'renderVpsPills');
