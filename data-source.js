@@ -67,56 +67,5 @@
   window.fetch = patchedFetch;
 })();
 
-// ---------------------------------------------------------------------------
-// Live equity stream for REAL accounts (#25425, #32081 on VPS5).
-// Reads from public.live_real_state via Supabase Realtime + REST.
-// ---------------------------------------------------------------------------
-(function () {
-  if (window.kizLiveReal) return;
-
-  const TABLE = "live_real_state";
-
-  async function fetchOnce() {
-    if (!window.kizSupabase) return [];
-    const { data, error } = await window.kizSupabase
-      .from(TABLE)
-      .select("login,vps,ts,balance,equity,margin,free_margin,profit,positions,source_age_ms,publisher_id")
-      .order("login", { ascending: true });
-    if (error) {
-      console.warn("[kiz] live_real_state fetch failed", error.message || error);
-      return [];
-    }
-    return Array.isArray(data) ? data : [];
-  }
-
-  function subscribe(onUpdate) {
-    if (!window.kizSupabase || typeof onUpdate !== "function") return null;
-    const channel = window.kizSupabase
-      .channel("kiz-live-real")
-      .on(
-        "postgres_changes",
-        { event: "*", schema: "public", table: TABLE },
-        (payload) => {
-          const row = payload.new || payload.old;
-          if (row) {
-            try { onUpdate(row, payload.eventType); }
-            catch (err) { console.error("[kiz] live onUpdate handler threw", err); }
-          }
-        }
-      )
-      .subscribe((status) => {
-        if (status === "CHANNEL_ERROR" || status === "TIMED_OUT" || status === "CLOSED") {
-          console.warn("[kiz] live channel status:", status);
-        }
-      });
-    return channel;
-  }
-
-  function unsubscribe(channel) {
-    if (channel && window.kizSupabase) {
-      try { window.kizSupabase.removeChannel(channel); } catch {}
-    }
-  }
-
-  window.kizLiveReal = { fetchOnce, subscribe, unsubscribe };
-})();
+// Live equity stream for real accounts removed 2026-05-17 to fit GH Actions
+// free tier. Real accounts now use the same 30-min snapshot path as demos.
