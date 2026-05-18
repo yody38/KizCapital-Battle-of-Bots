@@ -5,19 +5,29 @@ Una sola vez. Después es 100% automático.
 
 ---
 
-## PASO 0 — Restaurar GitHub Actions billing (BLOQUEANTE)
+## PASO 0 — Liquidar saldo viejo de GH Actions (solo si lo hay)
 
-El pipeline está caído **porque GH Actions rechaza nuevos runs por billing**, no
-por código. Hasta que esto esté arreglado, **nada del resto funciona**.
+El repo ya es **público** desde 2026-05-17 → GitHub Actions sobre runners
+Linux es **gratis ilimitado** para repos públicos. Pero hay una sutileza:
+si la cuenta tuvo facturas previas pendientes (era el caso aquí — billing
+falló antes de hacer el repo público), GitHub bloquea TODOS los workflows
+hasta que ese saldo se liquide.
 
 1. Abrir: https://github.com/settings/billing
-2. Revisar payment method y spending limit.
-3. Confirmar reactivación corriendo:
+2. Si ves saldo pendiente o "payment failed" → liquidarlo (suele ser pequeño:
+   son los minutos consumidos antes del primer bloqueo).
+3. Si no ves nada pendiente → tu cuenta ya está limpia.
+4. Verificar con:
    ```bash
    gh workflow run refresh-dashboard --repo yody38/KizCapital-Battle-of-Bots
-   gh run list --repo yody38/KizCapital-Battle-of-Bots --limit 1
+   sleep 10 && gh run list --repo yody38/KizCapital-Battle-of-Bots --limit 1
    ```
-   El último run debe quedar `queued` o `in_progress` (no `failure` en 2s).
+   El último run debe quedar `queued`/`in_progress` (NO `failure` en 2s
+   con "recent account payments have failed").
+
+A partir de aquí: $0/mes forever. El `live-publisher-tick` (la pieza que
+consumía 27× del free tier) fue eliminada — cuentas reales ahora se ven
+actualizadas cada 30 min como demos, no en streaming de 5s.
 
 ---
 
