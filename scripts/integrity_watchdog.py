@@ -274,7 +274,11 @@ def main() -> int:
             "conclusion": run.get("conclusion"),
             "updated_at": run.get("updatedAt"),
         }
-        if run["status"] != "completed" or run.get("conclusion") != "success":
+        if run["status"] == "in_progress" or run["status"] == "queued":
+            # Race: watchdog fired while CI is mid-cycle. Not a real drift —
+            # the previous successful cycle's data is still serving the dashboard.
+            info["steps"]["ci"]["note"] = "pending — skipped (race)"
+        elif run["status"] != "completed" or run.get("conclusion") != "success":
             fails.append(f"CI run #{run['databaseId']} status={run['status']} conclusion={run.get('conclusion')}")
     except Exception as e:
         info["steps"]["ci"] = {"error": str(e)}
