@@ -7,7 +7,7 @@
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
 <title>Battle of Bots — MT5 Portfolio</title>
-<link rel="stylesheet" href="styles.css?v=20260517a">
+<link rel="stylesheet" href="styles.css?v=20260526a">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500;700&display=swap" rel="stylesheet">
@@ -43,6 +43,10 @@
         <span class="dot"></span>
         <span class="label">Cargando…</span>
       </div>
+      <button id="mcp-chip" class="mcp-chip mcp-chip--loading" type="button" title="Salud de los 5 MCP servers · ping cada 5 min">
+        <span class="mcp-chip-dot" aria-hidden="true"></span>
+        <span class="mcp-chip-label">MCP <span id="mcp-chip-count">—/5</span></span>
+      </button>
       <button id="corr-btn" class="btn-primary" title="Matriz de correlación entre top bots">
         <span>📊 Correlación</span>
       </button>
@@ -796,6 +800,34 @@
     </div>
   </div>
 
+  <!-- 🛰️ MCP Health modal -->
+  <div id="mcp-modal-overlay" class="corr-overlay" hidden>
+    <div class="corr-aurora"></div>
+    <div class="corr-aurora corr-aurora-2"></div>
+    <div class="corr-aurora corr-aurora-3"></div>
+    <div class="corr-fullscreen mcp-fullscreen" role="dialog" aria-labelledby="mcp-modal-title">
+      <button class="corr-close-btn" id="mcp-modal-close" aria-label="Cerrar">×</button>
+      <header class="corr-header">
+        <div class="corr-title-block">
+          <div class="corr-eyebrow">Kiz Capital LLC · Infrastructure Health</div>
+          <h2 id="mcp-modal-title">🛰️ MCP Server Status · 5 VPS</h2>
+          <p class="corr-sub" id="mcp-modal-sub">Probe cada 5 min vía Tailscale + SSH. Status = ok / stale (snapshot &gt; 45 min) / degraded (MT5 no responde) / down (SSH falla). Issue automático tras 2 fallas consecutivas.</p>
+        </div>
+        <div class="corr-stats">
+          <div class="corr-stat"><span class="corr-stat-label">OK</span><strong id="mcp-stat-ok" class="positive">—</strong></div>
+          <div class="corr-stat"><span class="corr-stat-label">Total</span><strong id="mcp-stat-total">—</strong></div>
+          <div class="corr-stat"><span class="corr-stat-label">Críticos</span><strong id="mcp-stat-crit" class="negative">—</strong></div>
+          <div class="corr-stat"><span class="corr-stat-label">Última lectura</span><strong id="mcp-stat-checked">—</strong></div>
+        </div>
+      </header>
+      <main class="corr-main">
+        <section class="mcp-grid" id="mcp-grid">
+          <div class="empty-state">Cargando estado de MCP…</div>
+        </section>
+      </main>
+    </div>
+  </div>
+
   <button id="cmp-fab" class="cmp-fab" hidden title="Abrir comparador head-to-head">
     <span class="cmp-fab-icon">⚔️</span>
     <span class="cmp-fab-label">Comparar selección</span>
@@ -814,6 +846,6 @@
 
 </main>
 
-<script src="app.js?v=20260517a"></script>
+<script src="app.js?v=20260607a"></script>
 </body>
 </html>

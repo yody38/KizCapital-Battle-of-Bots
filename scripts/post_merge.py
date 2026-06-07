@@ -282,13 +282,19 @@ def pearson(xs, ys):
     return (num / den) if den > 0 else None
 
 
-def build_correlation_matrix(snapshot, data_dir):
-    """Build correlation matrix from daily_equity_series of qualifying bots."""
+def build_correlation_matrix(snapshot, data_dir, real_accounts=None):
+    """Build correlation matrix from daily_equity_series of qualifying bots.
+
+    Real-account bots are excluded — they live only in the Real Accounts section,
+    not in the demo competition views.
+    """
+    real_accounts = real_accounts or set()
     bots = snapshot.get("bots", [])
     candidates = [b for b in bots
                   if (b.get("trades") or 0) >= MIN_CORR_TRADES
                   and b.get("magic")
-                  and (b.get("promotion_score") is not None)]
+                  and (b.get("promotion_score") is not None)
+                  and (b.get("vps"), b.get("account_login")) not in real_accounts]
     candidates.sort(key=lambda b: -(b.get("promotion_score") or 0))
     candidates = candidates[:MAX_CORR_BOTS]
 
@@ -932,13 +938,17 @@ def institutional_metrics(daily_series, trades, account_balance):
 
 # --- 4. Portfolio Optimizer (Risk Parity / Inv-Vol / Equal) -------------
 
-def build_portfolio(snap, data_dir):
+def build_portfolio(snap, data_dir, real_accounts=None):
     """Compute risk-parity, inverse-volatility, and equal-weight allocations
     over the top N (READY/NEAR) candidates by promotion_score.
+
+    Real-account bots are excluded — they are already promoted, not candidates.
     """
+    real_accounts = real_accounts or set()
     bots = [b for b in snap.get("bots", [])
             if b.get("promotion_status") in PORTFOLIO_MIN_STATUS
-            and b.get("magic")]
+            and b.get("magic")
+            and (b.get("vps"), b.get("account_login")) not in real_accounts]
     bots.sort(key=lambda b: -(b.get("promotion_score") or 0))
     bots = bots[:PORTFOLIO_MAX_BOTS]
     if not bots:
@@ -2563,14 +2573,14 @@ def main():
         json.dump(snap, f, ensure_ascii=False, indent=2)
     os.replace(tmp, snap_path)
 
-    corr = build_correlation_matrix(snap, data_dir)
+    corr = build_correlation_matrix(snap, data_dir, real_accounts)
     corr_path = os.path.join(data_dir, "correlations.json")
     tmp2 = corr_path + ".tmp"
     with open(tmp2, "w") as f:
         json.dump(corr, f, ensure_ascii=False, separators=(",", ":"))
     os.replace(tmp2, corr_path)
 
-    portfolio = build_portfolio(snap, data_dir)
+    portfolio = build_portfolio(snap, data_dir, real_accounts)
     if portfolio:
         port_path = os.path.join(data_dir, "portfolio.json")
         tmp3 = port_path + ".tmp"

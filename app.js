@@ -631,8 +631,9 @@ function renderNewBots() {
   const now = Date.now();
   const cutoff = now - NEW_BOTS_DAYS * 24 * 60 * 60 * 1000;
 
-  // Source: ALL bots from snapshot (real + demo), magic ≠ 0, ≥1 closed trade, first_trade within 30d
+  // Source: demo bots only (exclude real-account bots — they live only in the Real Accounts section), magic ≠ 0, ≥1 closed trade, first_trade within 30d
   let allBots = (state.snapshot.bots || [])
+    .filter(b => !state.realLogins.has(b.account_login))
     .filter(b => b.magic && b.magic !== 0)
     .filter(b => (b.trades || 0) >= 1)
     .map(b => {
@@ -1467,7 +1468,8 @@ function renderCandidates() {
   const CANDIDATE_STATUSES = new Set(['READY', 'NEAR', 'WATCH']);
   let pool = (state.snapshot.bots || [])
     .filter(b => b.promotion_score != null && b.magic && b.magic !== 0
-              && CANDIDATE_STATUSES.has(b.promotion_status));
+              && CANDIDATE_STATUSES.has(b.promotion_status)
+              && !state.realLogins.has(b.account_login));
   pool.sort((a, b) => (b.promotion_score - a.promotion_score) || (b.net_profit - a.net_profit));
   if (counter) counter.textContent = pool.length;
   const f = CANDIDATE_STATUSES.has(state.candidatesStatusFilter) ? state.candidatesStatusFilter : 'READY';
@@ -1517,7 +1519,8 @@ function renderForwardTracker() {
   const counter = document.getElementById('tracker-count');
   if (!tbody) return;
   const tracked = (state.snapshot.bots || [])
-    .filter(b => b.tracker && b.magic && b.magic !== 0);
+    .filter(b => b.tracker && b.magic && b.magic !== 0
+              && !state.realLogins.has(b.account_login));
   // Sort: BELOW (alarm) → TOO_SOON → ON_TRACK → ABOVE (best last so problems show first)
   const order = { BELOW: 0, TOO_SOON: 1, ON_TRACK: 2, ABOVE: 3 };
   tracked.sort((a, b) => {
@@ -1701,7 +1704,8 @@ function bldGetUniverse() {
   const snap = state.snapshot;
   if (!snap) return [];
   return (snap.bots || [])
-    .filter(b => (b.promotion_status === 'READY' || b.promotion_status === 'NEAR') && b.magic !== 0)
+    .filter(b => (b.promotion_status === 'READY' || b.promotion_status === 'NEAR') && b.magic !== 0
+              && !state.realLogins.has(b.account_login))
     .map(b => ({
       key: bldKey(b.vps, b.account_login, b.magic),
       vps: b.vps,
@@ -3689,7 +3693,115 @@ wireDriftControls();
 wireQueryBar();
 wireDNAModal();
 wireCompareModal();
+wireMcpHealth();
 loadSnapshot();
+
+// ----------------------- MCP Health chip + modal -----------------------
+async function fetchMcpHealth() {
+  try {
+    const res = await fetch('data/mcp_health.json?ts=' + Date.now());
+    if (!res || !res.ok) return null;
+    return await res.json();
+  } catch (e) { return null; }
+}
+
+function classifyMcp(data) {
+  if (!data || typeof data.ok_count !== 'number') return { tone: 'loading', label: '—/5' };
+  const label = `${data.ok_count}/${data.total}`;
+  if (data.ok_count === data.total) return { tone: 'ok', label };
+  if (data.any_critical) return { tone: 'crit', label };
+  return { tone: 'warn', label };
+}
+
+function _mcpEsc(s) {
+  return String(s == null ? '' : s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
+function renderMcpChip(data) {
+  const chip = document.getElementById('mcp-chip');
+  if (!chip) return;
+  const count = document.getElementById('mcp-chip-count');
+  const { tone, label } = classifyMcp(data);
+  chip.classList.remove('mcp-chip--loading', 'mcp-chip--ok', 'mcp-chip--warn', 'mcp-chip--crit');
+  chip.classList.add(`mcp-chip--${tone}`);
+  if (count) count.textContent = label;
+}
+
+function renderMcpModal(data) {
+  const grid = document.getElementById('mcp-grid');
+  if (!grid) return;
+  const sub = document.getElementById('mcp-modal-sub');
+  const sOk = document.getElementById('mcp-stat-ok');
+  const sTot = document.getElementById('mcp-stat-total');
+  const sCrit = document.getElementById('mcp-stat-crit');
+  const sChk = document.getElementById('mcp-stat-checked');
+
+  if (!data) {
+    grid.innerHTML = '<div class="empty-state">Sin datos todavía. El workflow mcp-health corre cada 5 min.</div>';
+    if (sOk) sOk.textContent = '—';
+    if (sTot) sTot.textContent = '—';
+    if (sCrit) sCrit.textContent = '—';
+    if (sChk) sChk.textContent = '—';
+    return;
+  }
+  const rows = Object.values(data.vps || {}).sort((a, b) => a.vps_id.localeCompare(b.vps_id));
+  const crit = rows.filter(r => (r.consecutive_fails || 0) >= 2).length;
+  if (sOk) sOk.textContent = data.ok_count;
+  if (sTot) sTot.textContent = data.total;
+  if (sCrit) sCrit.textContent = crit;
+  if (sChk) sChk.textContent = data.checked_at ? new Date(data.checked_at).toLocaleString() : '—';
+
+  grid.innerHTML = rows.map(r => {
+    const dot = r.status === 'ok' ? '🟢' : ((r.consecutive_fails || 0) >= 2 ? '🔴' : '🟡');
+    const age = (r.snapshot_age_sec != null) ? `${Math.round(r.snapshot_age_sec / 60)} min` : '—';
+    const ssh = (r.ssh_ms != null) ? `${Math.round(r.ssh_ms)} ms` : '—';
+    const reason = r.fail_reason ? `<div class="mcp-card-reason">⚠️ ${_mcpEsc(r.fail_reason)}</div>` : '';
+    const fails = r.consecutive_fails || 0;
+    return `
+      <article class="mcp-card mcp-card--${_mcpEsc(r.status)}">
+        <header class="mcp-card-head">
+          <span class="mcp-card-dot">${dot}</span>
+          <strong class="mcp-card-title">${_mcpEsc(r.vps_id).toUpperCase()}</strong>
+          <span class="mcp-card-host">${_mcpEsc(r.host)}</span>
+        </header>
+        <div class="mcp-card-stats">
+          <div><span>Status</span><strong>${_mcpEsc(r.status)}</strong></div>
+          <div><span>SSH</span><strong>${ssh}</strong></div>
+          <div><span>Snapshot</span><strong>${age}</strong></div>
+          <div><span>Fails</span><strong class="${fails >= 2 ? 'negative' : ''}">${fails}</strong></div>
+        </div>
+        ${reason}
+      </article>`;
+  }).join('');
+}
+
+async function refreshMcpHealth() {
+  const data = await fetchMcpHealth();
+  window.__kizMcpHealth = data;
+  renderMcpChip(data);
+  renderMcpModal(data);
+}
+
+function wireMcpHealth() {
+  const chip = document.getElementById('mcp-chip');
+  const overlay = document.getElementById('mcp-modal-overlay');
+  const closeBtn = document.getElementById('mcp-modal-close');
+  if (chip && overlay) {
+    chip.addEventListener('click', () => {
+      renderMcpModal(window.__kizMcpHealth);
+      overlay.hidden = false;
+    });
+  }
+  if (closeBtn && overlay) closeBtn.addEventListener('click', () => { overlay.hidden = true; });
+  if (overlay) overlay.addEventListener('click', (e) => { if (e.target.id === 'mcp-modal-overlay') overlay.hidden = true; });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && overlay && !overlay.hidden) overlay.hidden = true;
+  });
+  refreshMcpHealth();
+  setInterval(refreshMcpHealth, 60000);
+}
 
 function wireNewBotsControls() {
   const search = document.getElementById('new-bots-search');
