@@ -525,15 +525,25 @@ def update_forward_tracker(snap, data_dir, today_iso):
     """
     history_path = os.path.join(data_dir, "candidates_history.jsonl")
     history = []
+    corrupt_lines = 0
     if os.path.exists(history_path):
         with open(history_path) as f:
-            for line in f:
-                line = line.strip()
+            for lineno, raw in enumerate(f, 1):
+                line = raw.strip()
                 if line:
                     try:
                         history.append(json.loads(line))
-                    except json.JSONDecodeError:
-                        pass
+                    except json.JSONDecodeError as exc:
+                        # Do NOT swallow silently: a corrupt append-only ledger
+                        # produces false tracker verdicts. Count + log; the gate
+                        # in verify_integrity fails the cycle past a threshold.
+                        corrupt_lines += 1
+                        if corrupt_lines <= 10:
+                            print(
+                                f"[post_merge]   tracker corrupt line {lineno} "
+                                f"in candidates_history.jsonl: {exc}",
+                                file=sys.stderr,
+                            )
 
     by_key = {}
     for row in history:
@@ -632,7 +642,18 @@ def update_forward_tracker(snap, data_dir, today_iso):
         }
         tracked += 1
 
-    return {"appended": appended, "tracked": tracked}
+    if corrupt_lines:
+        print(
+            f"[post_merge]   tracker_health: {corrupt_lines} corrupt line(s) in "
+            f"candidates_history.jsonl ({len(history)} valid)",
+            file=sys.stderr,
+        )
+    return {
+        "appended": appended,
+        "tracked": tracked,
+        "corrupt_lines": corrupt_lines,
+        "history_lines": len(history) + corrupt_lines,
+    }
 
 
 # --- 5. Regime / temporal robustness analysis ---------------------------
@@ -2490,6 +2511,13 @@ def main():
     # Forward Tracker — append today's status of READY/NEAR bots, decorate with verdict
     today_iso = datetime.now(timezone.utc).isoformat()
     tracker_stats = update_forward_tracker(snap, data_dir, today_iso)
+    # Surface tracker ledger health so verify_integrity can gate on corruption.
+    snap["tracker_health"] = {
+        "corrupt_lines": tracker_stats.get("corrupt_lines", 0),
+        "history_lines": tracker_stats.get("history_lines", 0),
+        "appended": tracker_stats.get("appended", 0),
+        "tracked": tracker_stats.get("tracked", 0),
+    }
 
     # Promotion Radar — 8-axis percentile-rank normalized cohort view (mutates bots).
     radar_meta = compute_promotion_radar(snap, accounts_by_login)

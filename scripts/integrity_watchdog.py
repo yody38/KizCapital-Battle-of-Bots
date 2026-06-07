@@ -56,6 +56,7 @@ VERCEL_URL = "https://kiz-capital-bots-kiz-capital-battle-of-bots-projects.verce
 # CI run finish → upload completes within ~30s. We allow up to 15 min just
 # in case the watchdog catches a moment when CI is mid-cycle.
 STALE_TOLERANCE_SEC = 15 * 60
+MCP_DEADMAN_SEC = 20 * 60  # mcp-health runs */5 → >20min stale = 4 missed cycles = monitor dead
 
 
 # ---------- env / helpers ----------
@@ -369,6 +370,31 @@ def main() -> int:
             }
             if stale_vps:
                 fails.append(f"stale VPSs: {', '.join(stale_vps)}")
+
+        # Step 4b — MCP-health dead-man: the */5 monitor must itself be alive.
+        # Reads mcp_health.json (uploaded by mcp_health.py) and fails if it is
+        # absent or stale (>20min = 4 missed cycles). Catches the monitor dying
+        # silently — it was un-deployed for 12 days (2026-05-26 → 2026-06-07).
+        now = datetime.now(timezone.utc)
+        code, mcp = supa_get_json(url, key, "mcp_health.json")
+        if code != 200 or not mcp:
+            fails.append(f"mcp_health.json fetch http={code} (MCP monitor dead/undeployed?)")
+            info["steps"]["mcp_health"] = {"http": code}
+        else:
+            checked = parse_iso(mcp.get("checked_at") or mcp.get("generated_at"))
+            age = (now - checked).total_seconds() if checked else None
+            info["steps"]["mcp_health"] = {
+                "summary": mcp.get("summary"),
+                "checked_at": mcp.get("checked_at"),
+                "age_sec": int(age) if age is not None else None,
+                "any_critical": mcp.get("any_critical"),
+            }
+            if age is None:
+                fails.append("mcp_health.json has no parseable checked_at")
+            elif age > MCP_DEADMAN_SEC:
+                fails.append(f"mcp-health dead-man: monitor last ran {int(age/60)}min ago (>20min)")
+            if mcp.get("any_critical"):
+                fails.append(f"mcp-health critical: {mcp.get('summary')} VPS(s) failing")
 
     # Step 5 — Vercel version pin (warn only)
     app_v, css_v = vercel_version_pin()

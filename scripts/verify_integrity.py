@@ -10,8 +10,15 @@ Reads `data/snapshot.json` and validates that every bot listed has:
   4. per-bot.net_profit ≈ sum(trade.net) (internal consistency of per-bot file).
   5. daily_equity_series is non-empty and covers from first_trade onward.
 
+Cross-cutting gates (snapshot-level, re-derivable — no wall-clock):
+  6. Real-account freshness — each REAL account's hosting VPS must be present and
+     fresh (hard gate); demo staleness is warn-only. + real-count matches
+     real_portfolio.account_count (catches a real silently dropping out).
+  7. Forward-tracker ledger health — > 5 corrupt lines in candidates_history.jsonl
+     (surfaced by post_merge as tracker_health) fails the cycle.
+
 Optional remote check (--check-remote):
-  6. sha256(local file) == sha256(file downloaded from Supabase Storage).
+  8. sha256(local file) == sha256(file downloaded from Supabase Storage).
      Confirms what is deployed matches what is local.
 
 Writes `data/integrity_report.json` with full results.
@@ -141,6 +148,64 @@ def check_bot(bot: dict, tolerance: float) -> list[str]:
     return fails
 
 
+def check_freshness(snap: dict) -> tuple[list[str], list[str], dict]:
+    """5th check — real-account data authenticity (HARD gate) + demo staleness (WARN).
+
+    Re-derivable from the snapshot itself (uses the `vps_freshness` block baked in
+    by post_merge + `real_portfolio.account_count`) — no wall-clock here, so it is
+    Data-Integrity-DNA compliant. Hard-fails only for REAL accounts; demo is warn-only.
+    Note: mirror.sh already aborts the cycle at 30min snapshot age, so under normal
+    operation a VPS is never `stale` (>90min) here — this is a defense-in-depth
+    safety net that catches a real account served from a stale/absent VPS, or a
+    real account silently dropping out.
+    """
+    hard: list[str] = []   # contributes to ok=false (REAL accounts only)
+    warn: list[str] = []   # surfaced only, never gates (demo)
+    vps_fresh = snap.get("vps_freshness") or {}
+    accounts = snap.get("accounts") or []
+    real_accts = [a for a in accounts if a.get("is_real")]
+    detail: dict = {"real_accounts": [], "demo_on_stale_vps": 0}
+
+    # (a) Real-account count must match real_portfolio (catches a real dropping out).
+    expected_real = (snap.get("real_portfolio") or {}).get("account_count")
+    if isinstance(expected_real, int) and len(real_accts) != expected_real:
+        hard.append(
+            f"freshness: real account count mismatch — accounts.is_real={len(real_accts)} "
+            f"real_portfolio.account_count={expected_real}"
+        )
+
+    # (b) Each real account's hosting VPS must be fresh and present.
+    for a in real_accts:
+        login = a.get("login")
+        vps = a.get("vps")
+        vf = vps_fresh.get(vps) if vps else None
+        status, live_feed = "ok", True
+        if vf is None:
+            status = "unknown"
+            warn.append(f"freshness: real {login} on {vps} — no vps_freshness metadata (cannot verify)")
+        elif vf.get("present") is False:
+            status, live_feed = "vps_absent", False
+            hard.append(f"freshness: real {login} — hosting VPS {vps} ABSENT from this cycle")
+        elif vf.get("stale"):
+            status, live_feed = "vps_stale", False
+            hard.append(f"freshness: real {login} — hosting VPS {vps} STALE (lag={vf.get('lag_sec')}s)")
+        detail["real_accounts"].append(
+            {"login": login, "vps": vps, "status": status, "live_feed": live_feed}
+        )
+
+    # (c) Demo accounts on a stale/absent VPS — warn only (do NOT gate).
+    for a in accounts:
+        if a.get("is_real"):
+            continue
+        vf = vps_fresh.get(a.get("vps"))
+        if vf and (vf.get("stale") or vf.get("present") is False):
+            detail["demo_on_stale_vps"] += 1
+    if detail["demo_on_stale_vps"]:
+        warn.append(f"freshness: {detail['demo_on_stale_vps']} demo account(s) on a stale/absent VPS")
+
+    return hard, warn, detail
+
+
 def remote_hash_diffs(
     local_paths: list[tuple[Path, str]], env: dict[str, str]
 ) -> list[str]:
@@ -210,6 +275,18 @@ def main() -> int:
                 if "daily_equity_series" in f:
                     series_missing += 1
 
+    # 5th check — real-account freshness/authenticity (hard) + demo staleness (warn).
+    freshness_hard, freshness_warn, freshness_detail = check_freshness(snap)
+    all_fails.extend(freshness_hard)
+
+    # Forward-tracker ledger corruption gate (post_merge surfaces tracker_health).
+    tracker_health = snap.get("tracker_health") or {}
+    tracker_corrupt = tracker_health.get("corrupt_lines", 0)
+    if tracker_corrupt > 5:
+        all_fails.append(
+            f"tracker_health: {tracker_corrupt} corrupt lines in candidates_history.jsonl (>5)"
+        )
+
     remote_fails: list[str] = []
     if args.check_remote:
         env = load_env()
@@ -238,10 +315,15 @@ def main() -> int:
             "trade_mismatches": trade_mismatches,
             "net_profit_mismatches": net_mismatches,
             "series_missing": series_missing,
+            "freshness_hard_fails": len(freshness_hard),
+            "tracker_corrupt_lines": tracker_corrupt,
             "remote_check_run": args.check_remote,
             "remote_failures": len(remote_fails),
         },
         "tolerance_usd": args.tolerance,
+        "freshness": freshness_detail,
+        "warnings": freshness_warn,
+        "tracker_health": tracker_health,
         "failures_per_bot": per_bot_fails,
         "remote_failures": remote_fails,
     }
@@ -253,8 +335,12 @@ def main() -> int:
         f"trade_mismatches={trade_mismatches} "
         f"net_mismatches={net_mismatches} "
         f"series_missing={series_missing} "
+        f"freshness_hard={len(freshness_hard)} "
+        f"tracker_corrupt={tracker_corrupt} "
         f"remote_fails={len(remote_fails)}"
     )
+    for w in freshness_warn:
+        print(f"[verify]   WARN {w}", file=sys.stderr)
     if all_fails:
         for line in all_fails[:25]:
             print(f"[verify]   FAIL {line}", file=sys.stderr)

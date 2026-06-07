@@ -41,6 +41,9 @@ jobs:
           SUPABASE_SERVICE_ROLE_KEY=${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           EOF2
 
+      - name: Ensure up-to-date CA bundle (certifi for Supabase TLS)
+        run: python3 -m pip install --quiet --upgrade certifi
+
       - name: Restore upload manifest cache
         uses: actions/cache/restore@v4
         with:
