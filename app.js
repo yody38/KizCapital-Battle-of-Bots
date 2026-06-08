@@ -1529,6 +1529,9 @@ function renderCandidates() {
         <td class="num">${b.months_positive_pct != null ? fmt.pct(b.months_positive_pct) : '—'}</td>
         <td class="num ${decayCls}">${decay}</td>
         <td class="num">${fmt.int(b.trades)}</td>
+        <td class="num profit-positive">${fmt.int(b.wins || 0)}</td>
+        <td class="num profit-negative">${fmt.int((b.trades || 0) - (b.wins || 0))}</td>
+        <td class="num">${fmt.pct(b.win_rate_pct)}</td>
         <td class="num ${b.net_profit >= 0 ? 'profit-positive' : 'profit-negative'}">${fmt.usd(b.net_profit, true)}</td>
       </tr>
     `;
