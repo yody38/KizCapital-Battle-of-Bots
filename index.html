@@ -7,7 +7,7 @@
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
 <title>Battle of Bots — MT5 Portfolio</title>
-<link rel="stylesheet" href="styles.css?v=20260526a">
+<link rel="stylesheet" href="styles.css?v=20260608c">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500;700&display=swap" rel="stylesheet">
@@ -46,6 +46,11 @@
       <button id="mcp-chip" class="mcp-chip mcp-chip--loading" type="button" title="Salud de los 5 MCP servers · ping cada 5 min">
         <span class="mcp-chip-dot" aria-hidden="true"></span>
         <span class="mcp-chip-label">MCP <span id="mcp-chip-count">—/5</span></span>
+      </button>
+      <button id="timing-chip" class="timing-chip timing-chip--loading" type="button" title="Latencia del pipeline end-to-end · desglose por etapa + qué se movió">
+        <span class="timing-chip-dot" aria-hidden="true"></span>
+        <span class="timing-chip-label">⏱ <span id="timing-chip-label">—</span></span>
+        <span class="timing-moved-badge" id="timing-moved-badge" hidden></span>
       </button>
       <button id="corr-btn" class="btn-primary" title="Matriz de correlación entre top bots">
         <span>📊 Correlación</span>
@@ -789,6 +794,37 @@
     </div>
   </div>
 
+  <div id="timing-modal-overlay" class="corr-overlay" hidden>
+    <div class="corr-aurora"></div>
+    <div class="corr-aurora corr-aurora-2"></div>
+    <div class="corr-aurora corr-aurora-3"></div>
+    <div class="corr-fullscreen mcp-fullscreen" role="dialog" aria-labelledby="timing-modal-title">
+      <button class="corr-close-btn" id="timing-modal-close" aria-label="Cerrar">×</button>
+      <header class="corr-header">
+        <div class="corr-title-block">
+          <div class="corr-eyebrow">Kiz Capital LLC · Pipeline Latency</div>
+          <h2 id="timing-modal-title">⏱ Latencia del Pipeline · por etapa</h2>
+          <p class="corr-sub">Wall-clock de cada etapa del ciclo (mirror → reconcile → post-merge → verify → upload), con p50/p95 sobre los últimos ciclos. La etapa dominante se resalta. "Qué se movió" deriva en el browser comparando el snapshot actual vs el anterior.</p>
+        </div>
+        <div class="corr-stats">
+          <div class="corr-stat"><span class="corr-stat-label">End-to-end</span><strong id="timing-stat-e2e" class="positive">—</strong></div>
+          <div class="corr-stat"><span class="corr-stat-label">Muestras</span><strong id="timing-stat-samples">—</strong></div>
+          <div class="corr-stat"><span class="corr-stat-label">Cambios</span><strong id="timing-stat-moved">—</strong></div>
+          <div class="corr-stat"><span class="corr-stat-label">Última</span><strong id="timing-stat-when">—</strong></div>
+        </div>
+      </header>
+      <main class="corr-main">
+        <section class="timing-grid" id="timing-grid">
+          <div class="empty-state">Cargando telemetría…</div>
+        </section>
+        <h3 class="timing-moved-title">🔔 Qué se movió desde el ciclo anterior</h3>
+        <section class="timing-moved" id="timing-moved">
+          <div class="empty-state">—</div>
+        </section>
+      </main>
+    </div>
+  </div>
+
   <button id="cmp-fab" class="cmp-fab" hidden title="Abrir comparador head-to-head">
     <span class="cmp-fab-icon">⚔️</span>
     <span class="cmp-fab-label">Comparar selección</span>
@@ -807,6 +843,6 @@
 
 </main>
 
-<script src="app.js?v=20260608b"></script>
+<script src="app.js?v=20260608c"></script>
 </body>
 </html>

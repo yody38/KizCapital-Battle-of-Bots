@@ -66,47 +66,79 @@ function wilsonLB(wins, n, z = 1.96) {
 
 // --- Data loading --------------------------------------------------------
 
+// --- stale-while-revalidate cache (instant first paint) ---------------------
+// The last good snapshot is cached in localStorage so a returning user sees the
+// dashboard immediately, then it revalidates from the network in the background.
+// Staleness is ALWAYS surfaced (setFreshness reads generated_at) — we never paint
+// a green "fresh" pill over cached data; the cached snapshot carries its own
+// generated_at and the freshness logic ages it honestly.
+const SNAP_CACHE_KEY = 'kiz.snapshot.v1';
+
+function readSnapCache() {
+  try { const r = localStorage.getItem(SNAP_CACHE_KEY); return r ? JSON.parse(r) : null; }
+  catch { return null; }
+}
+function writeSnapCache(data) {
+  try { localStorage.setItem(SNAP_CACHE_KEY, JSON.stringify(data)); } catch { /* quota — non-fatal */ }
+}
+
+// Pure processing of a snapshot object into app state + render. Shared by the
+// instant cache paint and the live network load so both go through one path.
+function applySnapshot(data) {
+  state.snapshot = data;
+  // Filter out pseudo-bots with magic=0 (manual/orphan trades, not real EAs — they have no per-bot file)
+  if (data.bots) data.bots = data.bots.filter(b => b.magic && b.magic !== 0);
+  state.bots = (data.bots || []).map((b, i) => ({ ...b, _rank: i + 1 }));
+  const realAccts = (data.real_portfolio && data.real_portfolio.accounts) || [];
+  state.realLogins = new Set(realAccts.map(a => a.login));
+  // Magics (EAs) already deployed to a real account — excluded from the promotion-discovery
+  // views (Candidatos/Tracker/Builder/Portfolio). Single source of truth: the backend emits
+  // data.real_magics (detect_real_magics). Fall back to local derivation only if an old snapshot
+  // (pre-rollout) lacks the field, so FE and BE never disagree once CI has run.
+  if (Array.isArray(data.real_magics)) {
+    state.realMagics = new Set(data.real_magics);
+  } else {
+    state.realMagics = new Set();
+    (data.bots || []).forEach(b => { if (state.realLogins.has(b.account_login) && b.magic) state.realMagics.add(b.magic); });
+    ((data.real_portfolio && data.real_portfolio.open_positions) || []).forEach(p => { if (p.magic) state.realMagics.add(p.magic); });
+  }
+  state.demoAccounts = (data.accounts || []).filter(a => !a.is_real);
+  // Only show demo accounts where balance > $10,000 (initial deposit for all demo accounts)
+  const DEMO_INITIAL_DEPOSIT = 10000;
+  const allDemoBots = (data.bots || []).filter(b => !state.realLogins.has(b.account_login));
+  const profitableLogins = new Set(
+    state.demoAccounts
+      .filter(a => (a.balance || 0) > DEMO_INITIAL_DEPOSIT)
+      .map(a => String(a.login))
+  );
+  state.demoAccounts = state.demoAccounts.filter(a => profitableLogins.has(String(a.login)));
+  state.demoBots = allDemoBots
+    .filter(b => profitableLogins.has(String(b.account_login)))
+    .filter(b => !isNewBot(b))  // new bots live only in the Bots Nuevos window
+    .map((b, i) => ({ ...b, _rank: i + 1, _wilson: wilsonLB(b.wins || 0, b.trades || 0) * 100 }));
+  render();
+  // Apply URL hash query if present.
+  try { loadFromHash(); } catch(e) { console.error(e); }
+}
+
+// Paint the cached snapshot synchronously on boot (before any network), so the
+// dashboard is interactive instantly. No-op if there's no cache yet.
+function paintCachedSnapshot() {
+  const cached = readSnapCache();
+  if (cached) { try { applySnapshot(cached); } catch (e) { console.error('cache paint failed', e); } }
+}
+
 async function loadSnapshot() {
   const btn = document.getElementById('refresh-btn');
   btn.classList.add('loading');
   try {
+    const prev = state.snapshot;  // for "what moved" diff
     const [snapRes, histRes] = await Promise.all([
       fetch(`data/snapshot.json?t=${Date.now()}`),
       fetch(`data/history.jsonl?t=${Date.now()}`).catch(() => null),
     ]);
     if (!snapRes.ok) throw new Error(`HTTP ${snapRes.status}`);
     const data = await snapRes.json();
-    state.snapshot = data;
-    // Filter out pseudo-bots with magic=0 (manual/orphan trades, not real EAs — they have no per-bot file)
-    if (data.bots) data.bots = data.bots.filter(b => b.magic && b.magic !== 0);
-    state.bots = (data.bots || []).map((b, i) => ({ ...b, _rank: i + 1 }));
-    const realAccts = (data.real_portfolio && data.real_portfolio.accounts) || [];
-    state.realLogins = new Set(realAccts.map(a => a.login));
-    // Magics (EAs) already deployed to a real account — excluded from the promotion-discovery
-    // views (Candidatos/Tracker/Builder/Portfolio). Single source of truth: the backend emits
-    // data.real_magics (detect_real_magics). Fall back to local derivation only if an old snapshot
-    // (pre-rollout) lacks the field, so FE and BE never disagree once CI has run.
-    if (Array.isArray(data.real_magics)) {
-      state.realMagics = new Set(data.real_magics);
-    } else {
-      state.realMagics = new Set();
-      (data.bots || []).forEach(b => { if (state.realLogins.has(b.account_login) && b.magic) state.realMagics.add(b.magic); });
-      ((data.real_portfolio && data.real_portfolio.open_positions) || []).forEach(p => { if (p.magic) state.realMagics.add(p.magic); });
-    }
-    state.demoAccounts = (data.accounts || []).filter(a => !a.is_real);
-    // Only show demo accounts where balance > $10,000 (initial deposit for all demo accounts)
-    const DEMO_INITIAL_DEPOSIT = 10000;
-    const allDemoBots = (data.bots || []).filter(b => !state.realLogins.has(b.account_login));
-    const profitableLogins = new Set(
-      state.demoAccounts
-        .filter(a => (a.balance || 0) > DEMO_INITIAL_DEPOSIT)
-        .map(a => String(a.login))
-    );
-    state.demoAccounts = state.demoAccounts.filter(a => profitableLogins.has(String(a.login)));
-    state.demoBots = allDemoBots
-      .filter(b => profitableLogins.has(String(b.account_login)))
-      .filter(b => !isNewBot(b))  // new bots live only in the Bots Nuevos window
-      .map((b, i) => ({ ...b, _rank: i + 1, _wilson: wilsonLB(b.wins || 0, b.trades || 0) * 100 }));
     if (histRes && histRes.ok) {
       const text = await histRes.text();
       state.history = text.split('\n').filter(Boolean).map(line => {
@@ -115,12 +147,16 @@ async function loadSnapshot() {
     } else {
       state.history = [];
     }
-    render();
-    // Apply URL hash query if present.
-    try { loadFromHash(); } catch(e) { console.error(e); }
+    applySnapshot(data);
+    // "What moved" since the previous render (cache or prior cycle), derived
+    // 100% in the browser — no backend file (Rule of Three: build it when a
+    // consumer like Telegram exists). Surfaced in the latency modal.
+    try { computeWhatMoved(prev, data); } catch (e) { console.error(e); }
+    writeSnapCache(data);
   } catch (err) {
     console.error(err);
-    setFreshness(null, err.message);
+    // Keep whatever the cache painted; only flag freshness if we have nothing.
+    if (!state.snapshot) setFreshness(null, err.message);
   } finally {
     btn.classList.remove('loading');
   }
@@ -3120,9 +3156,15 @@ function closeCorrFloating() {
 function wireEvents() {
   document.getElementById('refresh-btn').addEventListener('click', loadSnapshot);
 
+  // Debounce the ranking search so we don't re-render 248 rows on every keystroke
+  // (the tribunal's pragmatic alternative to row virtualization — same perceived
+  // win at 248 rows, zero structural risk; the perf chip will flag if true
+  // virtualization is ever needed).
+  let _searchT = null;
   document.getElementById('search-input').addEventListener('input', (e) => {
     state.search = e.target.value;
-    applyFilterAndRender();
+    clearTimeout(_searchT);
+    _searchT = setTimeout(applyFilterAndRender, 150);
   });
 
   // Only wire the status filter pills here; VPS pills are wired in renderVpsPills().
@@ -3653,7 +3695,9 @@ wireQueryBar();
 wireDNAModal();
 wireCompareModal();
 wireMcpHealth();
-loadSnapshot();
+wireTiming();
+paintCachedSnapshot();  // instant first paint from localStorage (SWR)
+loadSnapshot();         // then revalidate from the network in the background
 
 // ----------------------- MCP Health chip + modal -----------------------
 async function fetchMcpHealth() {
@@ -3760,6 +3804,168 @@ function wireMcpHealth() {
   });
   refreshMcpHealth();
   setInterval(refreshMcpHealth, 60000);
+}
+
+// ----------------------- Pipeline latency chip + modal -----------------------
+// Reads data/pipeline_timing.json (emitted by mirror.sh/emit_timing.py). Mirrors
+// the MCP chip pattern. The chip shows end-to-end seconds; the modal breaks down
+// each stage (mirror/post_merge/upload/…) with p50/p95, and the "what moved"
+// delta derived in the browser. This is the observability that proved the mirror
+// transport (not post_merge) was 91% of the cycle.
+function fmtMs(ms) {
+  if (ms == null || !isFinite(ms)) return '—';
+  if (ms < 1000) return `${Math.round(ms)} ms`;
+  return `${(ms / 1000).toFixed(ms < 10000 ? 1 : 0)} s`;
+}
+
+async function fetchTiming() {
+  try {
+    const res = await fetch('data/pipeline_timing.json?ts=' + Date.now());
+    if (!res || !res.ok) return null;
+    return await res.json();
+  } catch (e) { return null; }
+}
+
+function classifyTiming(t) {
+  const e2e = t && t.cycle && t.cycle.end_to_end_ms;
+  if (e2e == null) return { tone: 'loading', label: '—' };
+  const label = fmtMs(e2e);
+  // Thresholds tuned to the parallel-mirror baseline (~113s e2e). Amber/red flag
+  // regressions so a slowdown is visible before it becomes staleness.
+  if (e2e <= 180000) return { tone: 'ok', label };
+  if (e2e <= 300000) return { tone: 'warn', label };
+  return { tone: 'crit', label };
+}
+
+function renderTimingChip(t) {
+  const chip = document.getElementById('timing-chip');
+  if (!chip) return;
+  const lab = document.getElementById('timing-chip-label');
+  const { tone, label } = classifyTiming(t);
+  chip.classList.remove('timing-chip--loading', 'timing-chip--ok', 'timing-chip--warn', 'timing-chip--crit');
+  chip.classList.add(`timing-chip--${tone}`);
+  if (lab) lab.textContent = label;
+}
+
+const TIMING_STAGES = [
+  ['mirror_ms', 'Mirror (scp 6 VPS)'],
+  ['reconcile_ms', 'Reconcile'],
+  ['fetch_ledger_ms', 'Fetch ledger'],
+  ['post_merge_ms', 'Post-merge (scores/MC/OOS)'],
+  ['verify_ms', 'Verify integrity'],
+  ['upload_ms', 'Upload Supabase'],
+];
+
+function renderTimingModal(t) {
+  const grid = document.getElementById('timing-grid');
+  if (!grid) return;
+  const sE2E = document.getElementById('timing-stat-e2e');
+  const sSamples = document.getElementById('timing-stat-samples');
+  const sWhen = document.getElementById('timing-stat-when');
+  const sMoved = document.getElementById('timing-stat-moved');
+
+  if (!t || !t.cycle) {
+    grid.innerHTML = '<div class="empty-state">Sin datos todavía. La telemetría se emite cada ciclo de refresh.</div>';
+    if (sE2E) sE2E.textContent = '—';
+    if (sSamples) sSamples.textContent = '—';
+    if (sWhen) sWhen.textContent = '—';
+    if (sMoved) sMoved.textContent = (window.__kizDeltas ? String(window.__kizDeltas.total) : '—');
+    return;
+  }
+  const cyc = t.cycle, p50 = t.p50 || {}, p95 = t.p95 || {};
+  const e2e = cyc.end_to_end_ms || 0;
+  if (sE2E) sE2E.textContent = fmtMs(e2e);
+  if (sSamples) sSamples.textContent = t.samples != null ? String(t.samples) : '—';
+  if (sWhen) sWhen.textContent = t.generated_at ? new Date(t.generated_at).toLocaleString() : '—';
+  if (sMoved) sMoved.textContent = window.__kizDeltas ? String(window.__kizDeltas.total) : '—';
+
+  const maxStage = Math.max(1, ...TIMING_STAGES.map(([k]) => cyc[k] || 0));
+  grid.innerHTML = TIMING_STAGES.map(([k, label]) => {
+    const v = cyc[k] || 0;
+    const pctBar = Math.round((v / maxStage) * 100);
+    const pctCycle = e2e ? Math.round((v / e2e) * 100) : 0;
+    const dominant = pctCycle >= 50 ? ' timing-row--dominant' : '';
+    return `
+      <article class="timing-row${dominant}">
+        <div class="timing-row-head">
+          <strong>${_mcpEsc(label)}</strong>
+          <span class="timing-row-val">${fmtMs(v)} · ${pctCycle}%</span>
+        </div>
+        <div class="timing-bar"><span class="timing-bar-fill" style="width:${pctBar}%"></span></div>
+        <div class="timing-row-pct">p50 ${fmtMs(p50[k])} · p95 ${fmtMs(p95[k])}</div>
+      </article>`;
+  }).join('');
+
+  // "What moved" section
+  const movedBox = document.getElementById('timing-moved');
+  if (movedBox) {
+    const d = window.__kizDeltas;
+    if (!d || d.total === 0) {
+      movedBox.innerHTML = '<div class="empty-state">Sin cambios desde el ciclo anterior.</div>';
+    } else {
+      const items = [];
+      d.transitions.forEach(x => items.push(`<li><span class="moved-tag moved-tag--${_mcpEsc(x.dir)}">${_mcpEsc(x.from)}→${_mcpEsc(x.to)}</span> magic ${x.magic} <span class="moved-vps">${_mcpEsc(x.vps)}</span></li>`));
+      d.scoreMoves.slice(0, 8).forEach(x => items.push(`<li><span class="moved-tag moved-tag--${x.delta >= 0 ? 'up' : 'down'}">${x.delta >= 0 ? '▲' : '▼'} ${Math.abs(x.delta).toFixed(1)}</span> score · magic ${x.magic} <span class="moved-vps">${_mcpEsc(x.vps)}</span></li>`));
+      movedBox.innerHTML = `<ul class="moved-list">${items.join('')}</ul>`;
+    }
+  }
+}
+
+async function refreshTiming() {
+  const data = await fetchTiming();
+  window.__kizTiming = data;
+  renderTimingChip(data);
+  renderTimingModal(data);
+}
+
+// Derive "what moved" between two snapshots, in the browser. Surfaces status
+// transitions (READY/NEAR/WATCH/NO) and material promotion_score changes.
+function computeWhatMoved(prev, next) {
+  const result = { total: 0, transitions: [], scoreMoves: [] };
+  if (!prev || !next || !Array.isArray(prev.bots) || !Array.isArray(next.bots)) {
+    window.__kizDeltas = result; return;
+  }
+  const keyOf = b => `${b.vps}/${b.account_login}/${b.magic}`;
+  const prevMap = new Map(prev.bots.map(b => [keyOf(b), b]));
+  const rank = { NO: 0, WATCH: 1, NEAR: 2, READY: 3 };
+  for (const b of next.bots) {
+    const p = prevMap.get(keyOf(b));
+    if (!p) continue;
+    const ps = p.promotion_status, ns = b.promotion_status;
+    if (ps && ns && ps !== ns) {
+      result.transitions.push({
+        vps: b.vps, magic: b.magic, from: ps, to: ns,
+        dir: (rank[ns] ?? 0) >= (rank[ps] ?? 0) ? 'up' : 'down',
+      });
+    }
+    const pScore = p.promotion_score, nScore = b.promotion_score;
+    if (typeof pScore === 'number' && typeof nScore === 'number') {
+      const delta = nScore - pScore;
+      if (Math.abs(delta) >= 2) result.scoreMoves.push({ vps: b.vps, magic: b.magic, delta });
+    }
+  }
+  result.scoreMoves.sort((a, b) => Math.abs(b.delta) - Math.abs(a.delta));
+  result.total = result.transitions.length + result.scoreMoves.length;
+  window.__kizDeltas = result;
+  // Reflect the count on the chip badge if present.
+  const badge = document.getElementById('timing-moved-badge');
+  if (badge) { badge.textContent = result.total > 0 ? String(result.total) : ''; badge.hidden = result.total === 0; }
+}
+
+function wireTiming() {
+  const chip = document.getElementById('timing-chip');
+  const overlay = document.getElementById('timing-modal-overlay');
+  const closeBtn = document.getElementById('timing-modal-close');
+  if (chip && overlay) {
+    chip.addEventListener('click', () => { renderTimingModal(window.__kizTiming); overlay.hidden = false; });
+  }
+  if (closeBtn && overlay) closeBtn.addEventListener('click', () => { overlay.hidden = true; });
+  if (overlay) overlay.addEventListener('click', (e) => { if (e.target.id === 'timing-modal-overlay') overlay.hidden = true; });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && overlay && !overlay.hidden) overlay.hidden = true;
+  });
+  refreshTiming();
+  setInterval(refreshTiming, 60000);
 }
 
 function wireNewBotsControls() {
