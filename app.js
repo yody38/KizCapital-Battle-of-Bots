@@ -295,7 +295,6 @@ function render() {
   safe(renderDemoWrapper, 'renderDemoWrapper');
   safe(renderStats, 'renderStats');
   safe(renderCandidates, 'renderCandidates');
-  safe(renderForwardTracker, 'renderForwardTracker');
   safe(renderBalanced, 'renderBalanced');
   safe(renderNewBotsVpsPills, 'renderNewBotsVpsPills');
   safe(renderNewBots, 'renderNewBots');
@@ -1684,7 +1683,7 @@ function wireBotModal() {
       if (vps && login && magic) openBotModal(vps, login, magic);
       return;
     }
-    const auditableRow = e.target.closest('#real-bots-tbody tr.bot-row, #balanced-tbody tr.bot-row, #new-bots-tbody tr.bot-row, #candidates-tbody tr.bot-row, #tracker-tbody tr.bot-row, #podium .bot-row, #bots-tbody tr.bot-row, #portfolio-canvas .port-row.bot-row, #bld-selected-list .bld-selected-row.bot-row');
+    const auditableRow = e.target.closest('#real-bots-tbody tr.bot-row, #balanced-tbody tr.bot-row, #new-bots-tbody tr.bot-row, #candidates-tbody tr.bot-row, #podium .bot-row, #bots-tbody tr.bot-row, #portfolio-canvas .port-row.bot-row, #bld-selected-list .bld-selected-row.bot-row');
     if (auditableRow) {
       const { vps, login, magic } = auditableRow.dataset;
       if (vps && login && magic) openBotModal(vps, login, magic);
@@ -1792,58 +1791,8 @@ function renderCandidates() {
   }).join('');
 }
 
-// --- 🚀 Forward Tracker section (dashboard table) ------------------------
-
-function renderForwardTracker() {
-  const tbody = document.getElementById('tracker-tbody');
-  const empty = document.getElementById('tracker-empty');
-  const counter = document.getElementById('tracker-count');
-  if (!tbody) return;
-  const tracked = (state.snapshot.bots || [])
-    .filter(b => b.tracker && b.magic && b.magic !== 0
-              && !state.realLogins.has(b.account_login)
-              && !state.realMagics.has(b.magic));
-  // Sort: BELOW (alarm) → TOO_SOON → ON_TRACK → ABOVE (best last so problems show first)
-  const order = { BELOW: 0, TOO_SOON: 1, ON_TRACK: 2, ABOVE: 3 };
-  tracked.sort((a, b) => {
-    const oa = order[a.tracker.verdict] ?? 4;
-    const ob = order[b.tracker.verdict] ?? 4;
-    if (oa !== ob) return oa - ob;
-    return (b.promotion_score || 0) - (a.promotion_score || 0);
-  });
-  if (counter) counter.textContent = tracked.length;
-  if (!tracked.length) {
-    tbody.innerHTML = '';
-    if (empty) empty.hidden = false;
-    return;
-  }
-  if (empty) empty.hidden = true;
-  const verdictBadge = (v) => {
-    if (v === 'ABOVE') return `<span class="tracker-badge tracker-above">✅ ABOVE</span>`;
-    if (v === 'ON_TRACK') return `<span class="tracker-badge tracker-ontrack">🟡 ON TRACK</span>`;
-    if (v === 'BELOW') return `<span class="tracker-badge tracker-below">🔴 BELOW</span>`;
-    if (v === 'TOO_SOON') return `<span class="tracker-badge tracker-soon">⏳ TOO SOON</span>`;
-    return `<span class="tracker-badge">⏳ NUEVO</span>`;
-  };
-  tbody.innerHTML = tracked.map((b, i) => {
-    const t = b.tracker;
-    return `
-      <tr class="bot-row" data-vps="${b.vps}" data-login="${b.account_login}" data-magic="${b.magic}">
-        <td><span class="rank-badge">${i + 1}</span></td>
-        <td>${verdictBadge(t.verdict)}</td>
-        <td class="mono">${b.magic}</td>
-        <td>${vpsBadge(b.vps)}</td>
-        <td class="mono">${b.account_login}</td>
-        <td class="num"><strong style="color:var(--accent)">${(b.promotion_score ?? 0).toFixed(1)}</strong></td>
-        <td>${statusBadge(b.promotion_status)}</td>
-        <td class="mono">${t.first_seen_date}</td>
-        <td class="num">${t.days_since_first_seen}</td>
-        <td class="num ${t.net_since_first_seen >= 0 ? 'profit-positive' : 'profit-negative'}">${fmt.usd(t.net_since_first_seen, true)}</td>
-        <td class="num">${t.expected_p25 != null ? fmt.usd(t.expected_p25, true) : '—'}</td>
-        <td class="num">${t.expected_p75 != null ? fmt.usd(t.expected_p75, true) : '—'}</td>
-      </tr>`;
-  }).join('');
-}
+// Forward Tracker standalone section removed 2026-06-08 (renderForwardTracker +
+// #tracker-section). Modal tab 🚀 Tracker (renderTrackerPanel) + backend stay.
 
 // --- 💼 PORTFOLIO MODAL --------------------------------------------------
 

@@ -349,40 +349,9 @@
     </div>
   </section>
 
-  <section class="balanced-section" id="tracker-section">
-    <div class="balanced-header">
-      <div>
-        <h2 class="section-title balanced-title">🚀 Forward Tracker — Calibración del Promotion Score</h2>
-        <p class="balanced-subtitle">Desde el día que cada bot entró a <strong>READY/NEAR</strong>, comparamos su net real vs la banda P25–P75 que el modelo proyectó (Monte Carlo). Sirve para validar si nuestro propio scoring funciona · <span id="tracker-count">0</span> bots tracked</p>
-      </div>
-      <div class="balanced-legend" title="Verde = sobre P75 · Amarillo = entre P25-P75 · Rojo = bajo P25">
-        🚦 ABOVE / ON_TRACK / BELOW vs banda esperada
-      </div>
-    </div>
-    <div class="table-wrapper compact">
-      <table id="tracker-table">
-        <thead>
-          <tr>
-            <th>#</th>
-            <th>Veredicto</th>
-            <th>Magic</th>
-            <th>VPS</th>
-            <th>Cuenta</th>
-            <th class="num">Score</th>
-            <th>Estado</th>
-            <th>Primera vez</th>
-            <th class="num">Días</th>
-            <th class="num">Net real</th>
-            <th class="num">Esperado P25</th>
-            <th class="num">Esperado P75</th>
-          </tr>
-        </thead>
-        <tbody id="tracker-tbody"></tbody>
-      </table>
-      <div id="tracker-empty" class="empty-state" hidden>Aún no se han registrado candidatos. Tracker se acumula con cada ejecución de post_merge.</div>
-    </div>
-  </section>
-
+  <!-- Forward Tracker standalone section removed 2026-06-08 (no aporta valor en la
+       vista principal). Se conservan la pestaña 🚀 Tracker del modal de bot y el
+       backend (post_merge tracker + candidates_history.jsonl). NO re-agregar. -->
 
   <details class="demo-wrapper" id="demo-wrapper">
     <summary><span class="demo-chevron">▸</span> 📊 Cuentas Demo (laboratorio) — <span id="demo-accounts-count">0</span> cuentas · <span id="demo-bots-count">0</span> bots · click para expandir</summary>
@@ -843,6 +812,6 @@
 
 </main>
 
-<script src="app.js?v=20260608e"></script>
+<script src="app.js?v=20260608f"></script>
 </body>
 </html>
