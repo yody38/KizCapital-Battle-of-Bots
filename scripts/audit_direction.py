@@ -81,8 +81,9 @@ def derive_account(path: str) -> dict | None:
             closed.append({
                 "magic": magic,
                 "symbol": symbol,
+                "position_id": pos_id,          # canonical join key (builder stores ticket=int(position_id))
                 "order": (open_deal.order if open_deal else None),
-                "ticket": (open_deal.ticket if open_deal else None),
+                "deal_ticket": (open_deal.ticket if open_deal else None),
                 "side": (side_of(open_deal.type) if open_deal else None),
                 "open_time": int(open_deal.time) if open_deal else int(ds_sorted[0].time),
                 "edge": edge,
