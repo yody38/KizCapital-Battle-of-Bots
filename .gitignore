@@ -57,3 +57,4 @@ venv/
 
 # Node (in case)
 node_modules/
+data/_audit/
