@@ -47,6 +47,8 @@ const state = {
   sparkCharts: {},
   candidatesStatusFilter: 'READY',
   correlations: null,
+  realLogins: new Set(),
+  realMagics: new Set(),  // magics (EAs) already deployed to real — excluded from promotion-discovery views
   query: { text: '', visible: false, savedViews: [] },
   compareList: [], // {vps, login, magic, bot, trades, daily}
 };
@@ -80,12 +82,17 @@ async function loadSnapshot() {
     state.bots = (data.bots || []).map((b, i) => ({ ...b, _rank: i + 1 }));
     const realAccts = (data.real_portfolio && data.real_portfolio.accounts) || [];
     state.realLogins = new Set(realAccts.map(a => a.login));
-    // Magics (EAs) currently deployed to a real account — by closed trades this year OR open position.
-    // These are excluded from the promotion-discovery views (Candidatos/Tracker/Builder): the goal is
-    // to surface demo-only EAs not yet in real.
-    state.realMagics = new Set();
-    (data.bots || []).forEach(b => { if (state.realLogins.has(b.account_login) && b.magic) state.realMagics.add(b.magic); });
-    ((data.real_portfolio && data.real_portfolio.open_positions) || []).forEach(p => { if (p.magic) state.realMagics.add(p.magic); });
+    // Magics (EAs) already deployed to a real account — excluded from the promotion-discovery
+    // views (Candidatos/Tracker/Builder/Portfolio). Single source of truth: the backend emits
+    // data.real_magics (detect_real_magics). Fall back to local derivation only if an old snapshot
+    // (pre-rollout) lacks the field, so FE and BE never disagree once CI has run.
+    if (Array.isArray(data.real_magics)) {
+      state.realMagics = new Set(data.real_magics);
+    } else {
+      state.realMagics = new Set();
+      (data.bots || []).forEach(b => { if (state.realLogins.has(b.account_login) && b.magic) state.realMagics.add(b.magic); });
+      ((data.real_portfolio && data.real_portfolio.open_positions) || []).forEach(p => { if (p.magic) state.realMagics.add(p.magic); });
+    }
     state.demoAccounts = (data.accounts || []).filter(a => !a.is_real);
     // Only show demo accounts where balance > $10,000 (initial deposit for all demo accounts)
     const DEMO_INITIAL_DEPOSIT = 10000;
@@ -1621,7 +1628,11 @@ function renderPortfolio() {
   }
   const cap = portfolioState.capital;
   const method = portfolioState.method;
-  const allocations = (data.allocations[String(cap)] || {})[method] || [];
+  // Defense-in-depth: the backend already excludes real-account magics from portfolio.json,
+  // so this is a no-op in steady state. It only fires in the window where the backend is one
+  // cycle stale, guaranteeing the modal never shows capital assigned to an already-real EA.
+  const allocations = ((data.allocations[String(cap)] || {})[method] || [])
+    .filter(a => !state.realMagics.has(a.magic));
   document.getElementById('port-stat-bots').textContent = data.n_bots;
   document.getElementById('port-stat-capital').textContent = `$${cap.toLocaleString('en-US')}`;
   const methodLabel = method === 'inverse_volatility' ? 'Inv. Volatility' : method === 'equal_weight' ? 'Equal Weight' : 'Score Weighted';

@@ -542,10 +542,16 @@ def walk_forward(trades):
 
 # --- 3. Forward Tracker (append-only history) ----------------------------
 
-def update_forward_tracker(snap, data_dir, today_iso):
+def update_forward_tracker(snap, data_dir, today_iso, real_magics=None):
     """Append today's snapshot of every READY/NEAR bot to candidates_history.jsonl
     and compute tracker metrics (days_since_first_seen, net_since, expected band).
+
+    Magics already deployed to real are skipped: the forward tracker is a
+    promotion-discovery ledger of demo-only EAs not yet running real. Excluding
+    them keeps the canonical history/base-rate clean (already-written lines are
+    preserved append-only).
     """
+    real_magics = real_magics or set()
     history_path = os.path.join(data_dir, "candidates_history.jsonl")
     history = []
     corrupt_lines = 0
@@ -589,6 +595,8 @@ def update_forward_tracker(snap, data_dir, today_iso):
             status = b.get("promotion_status")
             if status not in PORTFOLIO_MIN_STATUS:
                 continue
+            if b.get("magic") in real_magics:
+                continue  # already in real — not a discovery candidate
             k = (b.get("vps"), b.get("account_login"), b.get("magic"))
             existing = by_key.get(k, [])
             if existing and existing[-1].get("date", "")[:10] == today_only:
@@ -610,6 +618,8 @@ def update_forward_tracker(snap, data_dir, today_iso):
     # Build tracker block per bot — embed first-seen + verdict directly into bot.
     tracked = 0
     for b in snap.get("bots", []):
+        if b.get("magic") in real_magics:
+            continue  # already in real — no tracker block (keeps snapshot.json clean)
         k = (b.get("vps"), b.get("account_login"), b.get("magic"))
         rows = by_key.get(k, [])
         if not rows:
@@ -964,18 +974,22 @@ def institutional_metrics(daily_series, trades, account_balance):
 
 # --- 4. Portfolio Optimizer (Risk Parity / Inv-Vol / Equal) -------------
 
-def build_portfolio(snap, data_dir, real_accounts=None):
+def build_portfolio(snap, data_dir, real_accounts=None, real_magics=None):
     """Compute risk-parity, inverse-volatility, and equal-weight allocations
     over the top N (READY/NEAR) candidates by promotion_score.
 
     Real-account bots are excluded — they are already promoted, not candidates.
+    Magics already deployed to real (any instance) are excluded too: the portfolio
+    is a promotion-discovery view of demo-only EAs not yet running real.
     """
     real_accounts = real_accounts or set()
+    real_magics = real_magics or set()
     now = datetime.now(timezone.utc)
     bots = [b for b in snap.get("bots", [])
             if b.get("promotion_status") in PORTFOLIO_MIN_STATUS
             and b.get("magic")
             and (b.get("vps"), b.get("account_login")) not in real_accounts
+            and b.get("magic") not in real_magics
             and not _is_new_bot(b, now)]
     bots.sort(key=lambda b: -(b.get("promotion_score") or 0))
     bots = bots[:PORTFOLIO_MAX_BOTS]
@@ -1369,6 +1383,23 @@ def detect_real_accounts(snap):
         if a.get("vps") == "vps5" and a.get("login") in (25425, 32081):
             real.add((a.get("vps"), a.get("login")))
     return real
+
+
+def detect_real_magics(snap):
+    """Return set of magics (EAs) currently deployed to a real account — by closed
+    trades this year OR by an open real position. These magics are excluded from the
+    promotion-discovery views (Candidatos/Tracker/Portfolio): the goal is to surface
+    demo-only EAs not yet running real."""
+    real_logins = {login for (_vps, login) in detect_real_accounts(snap)}
+    magics = set()
+    for b in snap.get("bots", []):
+        if b.get("account_login") in real_logins and b.get("magic"):
+            magics.add(b["magic"])
+    rp = snap.get("real_portfolio") or {}
+    for p in rp.get("open_positions") or []:
+        if p.get("magic"):
+            magics.add(p["magic"])
+    return magics
 
 
 def compute_real_vs_demo_divergence(bot, real_accounts):
@@ -2444,6 +2475,10 @@ def main():
     battle_tested_count = 0
     trade_dist_count = 0
     real_accounts = detect_real_accounts(snap)
+    real_magics = detect_real_magics(snap)
+    # Single source of truth: the frontend consumes this instead of recomputing in
+    # parallel, so FE and BE can never disagree on which magics are already in real.
+    snap["real_magics"] = sorted(real_magics)
     real_bot_count = 0
     # Pass 1: real_vs_demo runs for EVERY bot in a real account, regardless of
     # whether per-bot file exists (some VPS may not yet emit per-bot history
@@ -2554,7 +2589,7 @@ def main():
 
     # Forward Tracker — append today's status of READY/NEAR bots, decorate with verdict
     today_iso = datetime.now(timezone.utc).isoformat()
-    tracker_stats = update_forward_tracker(snap, data_dir, today_iso)
+    tracker_stats = update_forward_tracker(snap, data_dir, today_iso, real_magics)
     # Surface tracker ledger health so verify_integrity can gate on corruption.
     snap["tracker_health"] = {
         "corrupt_lines": tracker_stats.get("corrupt_lines", 0),
@@ -2614,7 +2649,7 @@ def main():
         json.dump(corr, f, ensure_ascii=False, separators=(",", ":"))
     os.replace(tmp2, corr_path)
 
-    portfolio = build_portfolio(snap, data_dir, real_accounts)
+    portfolio = build_portfolio(snap, data_dir, real_accounts, real_magics)
     if portfolio:
         port_path = os.path.join(data_dir, "portfolio.json")
         tmp3 = port_path + ".tmp"
