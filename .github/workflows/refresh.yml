@@ -15,6 +15,8 @@ jobs:
   refresh:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    env:
+      PYTHONHASHSEED: "0"   # deterministic str hashing across processes (Data Integrity DNA)
 
     steps:
       - uses: actions/checkout@v4
@@ -56,6 +58,14 @@ jobs:
         env:
           SSH_KEY: /home/runner/.ssh/id_ed25519_ci
         run: bash scripts/mirror.sh
+
+      - name: Determinism gate (post_merge reproducible across processes)
+        # Runs post_merge twice on the just-mirrored data and asserts byte-identical
+        # output (minus wall-clock stamps). Catches any non-deterministic regression
+        # (unseeded RNG, builtin hash() on str). Data already uploaded — this is a
+        # red-flag alert, not a data gate. Cheap (~20s) relative to the cycle.
+        if: success()
+        run: python3 scripts/test_determinism.py data
 
       - name: Save upload manifest cache
         if: always()

@@ -45,6 +45,14 @@ VPS_ENTRIES=(
 
 mkdir -p "$DATA_DIR" "$BOTS_OUT_DIR"
 ts() { date -u +"%Y-%m-%dT%H:%M:%SZ"; }
+now_ms() { date -u +%s%3N; }   # epoch milliseconds (GNU date; CI runs on ubuntu)
+
+# Per-stage wall-clock telemetry (Feature: pipeline latency). Captured here in the
+# orchestrator; emitted to pipeline_timing.json at the very end so a single source
+# owns the numbers. The file ships next cycle — a 30-min lag on a perf chart is fine.
+PIPE_START_MS=$(now_ms)
+T_MIRROR_MS=0; T_RECONCILE_MS=0; T_FETCH_LEDGER_MS=0
+T_POSTMERGE_MS=0; T_VERIFY_MS=0; T_UPLOAD_MS=0
 
 declare -a FRESH_FILES=()
 
@@ -86,6 +94,7 @@ except Exception:
 PY
 }
 
+MIRROR_START_MS=$(now_ms)
 {
   echo "[$(ts)] mirror starting"
   for entry in "${VPS_ENTRIES[@]}"; do
@@ -344,6 +353,7 @@ else
   echo "[$(ts)] mirror merge FAIL rc=$RC" >> "$LOG"
   exit $RC
 fi
+T_MIRROR_MS=$(( $(now_ms) - MIRROR_START_MS ))   # scp(6 VPS) + merge
 
 # Build manifest of available per-bot files (used by the dashboard audit modal)
 python3 - "$BOTS_OUT_DIR" >> "$LOG" 2>&1 <<'PY'
@@ -377,44 +387,63 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # when a VPS builder wrote snapshot.json while still updating per-bot files.
 # Fail-closed: if reconcile breaks, snapshot.bots[] would lag per-bot files
 # and the dashboard would serve mismatched aggregates — abort the cycle.
+_t0=$(now_ms)
 if ! python3 "$SCRIPT_DIR/reconcile_snapshot.py" >> "$LOG" 2>&1; then
   echo "[$(ts)] reconcile FAIL — aborting cycle (snapshot.bots[] may lag per-bot files)" >> "$LOG"
   exit 3
 fi
+T_RECONCILE_MS=$(( $(now_ms) - _t0 ))
 
 # Pull the append-only forward-tracker ledger from Supabase BEFORE post_merge so it
 # appends to the real history. The CI runner starts without it (data/ is gitignored,
 # not mirrored), so otherwise post_merge rebuilt it empty and the upload clobbered
 # the deployed history every cycle. Fail-closed: abort if the fetch errors.
+_t0=$(now_ms)
 if ! python3 "$SCRIPT_DIR/fetch_ledger.py" >> "$LOG" 2>&1; then
   echo "[$(ts)] fetch_ledger FAIL — aborting cycle (would clobber tracker history)" >> "$LOG"
   exit 3
 fi
+T_FETCH_LEDGER_MS=$(( $(now_ms) - _t0 ))
 
 # Post-merge enrichment: Promotion Score + correlation matrix + portfolio.
 # Fail-closed: if this breaks, scores/correlations/portfolio.json go stale and
 # the dashboard would mix fresh raw data with old derived data — abort.
+_t0=$(now_ms)
 if ! python3 "$SCRIPT_DIR/post_merge.py" "$DATA_DIR" >> "$LOG" 2>&1; then
   echo "[$(ts)] post_merge FAIL — aborting cycle (promotion scores and correlations stale)" >> "$LOG"
   exit 3
 fi
+T_POSTMERGE_MS=$(( $(now_ms) - _t0 ))
 
 # Data Integrity DNA — verify EVERY bot has its per-bot file and stats match
 # BEFORE uploading. If integrity fails, abort so we never ship bad data to
 # the dashboard. Generates data/integrity_report.json (uploaded next).
+_t0=$(now_ms)
 VERIFY_RC=0
 python3 "$SCRIPT_DIR/verify_integrity.py" --strict >> "$LOG" 2>&1 || VERIFY_RC=$?
 if [ $VERIFY_RC -ne 0 ]; then
   echo "[$(ts)] verify_integrity FAIL rc=$VERIFY_RC — see data/integrity_report.json (NOT uploading)" >> "$LOG"
   exit $VERIFY_RC
 fi
+T_VERIFY_MS=$(( $(now_ms) - _t0 ))
 
 # Push fresh data/ (including the just-generated integrity_report.json) to
 # Supabase Storage. Pending-retry on transient failures.
+_t0=$(now_ms)
 UPLOAD_RC=0
 python3 "$SCRIPT_DIR/upload_to_supabase.py" >> "$LOG" 2>&1 || UPLOAD_RC=$?
 if [ $UPLOAD_RC -ne 0 ]; then
   echo "[$(ts)] supabase upload FAIL rc=$UPLOAD_RC — public dashboard data may be stale" >> "$LOG"
   exit $UPLOAD_RC
 fi
+T_UPLOAD_MS=$(( $(now_ms) - _t0 ))
 echo "[$(ts)] mirror cycle OK — verified + uploaded" >> "$LOG"
+
+# Emit per-stage latency telemetry (pipeline_timing.json + rolling p50/p95 history).
+# Best-effort: a telemetry failure must NEVER fail a healthy cycle.
+T_E2E_MS=$(( $(now_ms) - PIPE_START_MS ))
+T_MIRROR_MS="$T_MIRROR_MS" T_RECONCILE_MS="$T_RECONCILE_MS" \
+T_FETCH_LEDGER_MS="$T_FETCH_LEDGER_MS" T_POSTMERGE_MS="$T_POSTMERGE_MS" \
+T_VERIFY_MS="$T_VERIFY_MS" T_UPLOAD_MS="$T_UPLOAD_MS" T_E2E_MS="$T_E2E_MS" \
+  python3 "$SCRIPT_DIR/emit_timing.py" >> "$LOG" 2>&1 || \
+  echo "[$(ts)] emit_timing non-fatal error (timing skipped this cycle)" >> "$LOG"
