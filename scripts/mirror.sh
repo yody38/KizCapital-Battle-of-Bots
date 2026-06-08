@@ -29,9 +29,13 @@ BOTS_SCP_RETRY_DELAY_SEC=${BOTS_SCP_RETRY_DELAY_SEC:-15}
 # every VPS reliably emits .ready (builder v3+).
 READY_FLAG_REQUIRED=${READY_FLAG_REQUIRED:-0}
 
-# Shared scp options: ServerAlive keeps the transfer from hanging when the link stalls.
+# Shared scp options: ServerAlive keeps the transfer from hanging when the link
+# stalls. ControlMaster muxes the 3 transfers per VPS (snapshot + .ready + bots)
+# over ONE TCP+auth session → ~3x fewer sshd forks (the exact resource that a
+# RAM-starved VPS runs out of) and lower latency. -C compresses the per-bot JSON.
 SCP_OPTS=(-i "$SSH_KEY" -o StrictHostKeyChecking=accept-new \
-          -o ConnectTimeout=30 -o ServerAliveInterval=15 -o ServerAliveCountMax=4)
+          -o ConnectTimeout=30 -o ServerAliveInterval=15 -o ServerAliveCountMax=4 \
+          -C -o ControlMaster=auto -o "ControlPath=/tmp/cm-%r@%h:%p" -o ControlPersist=60)
 
 # VPS roster (format "id=host"). Add entries here to scale.
 VPS_ENTRIES=(

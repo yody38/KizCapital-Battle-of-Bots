@@ -2290,15 +2290,22 @@ def compute_vps_freshness(data_dir, vps_ids=None):
             # > 90 min behind = stale (3 missed cycles). lag < -5 min = clock skew /
             # future-dated snapshot: treat as stale too, else a forward clock would
             # present rancid-but-future data as fresh and slip past the freshness gate.
+            # `stale` stays AGE-based (drives the watchdog Issue — no noise on a brief
+            # carry). `carried_forward` is a SEPARATE flag (this VPS was served from
+            # last-good data this cycle): its curves are FROZEN, so the promotion guard
+            # excludes it from READY/NEAR regardless of age — but a 1-cycle carry is
+            # NOT alarmed, only surfaced as partial_data (yellow banner).
+            carried = bool(snap.get("carried_forward"))
             stale = lag > 90 * 60 or lag < -300
             out[v] = {
                 "present": True,
                 "generated_at": gen_t.isoformat(timespec="seconds"),
                 "lag_sec": int(lag),
                 "stale": stale,
+                "carried_forward": carried,
                 "bot_count": len([b for b in snap.get("bots", []) if b.get("magic")]),
             }
-            if stale:
+            if stale or carried:
                 partial = True
         except Exception as e:
             # Corrupt/unreadable VPS snapshot: mark stale+corrupt so the freshness
@@ -2697,6 +2704,23 @@ def main():
             for k in shadow_cola:
                 if b["shadow_gates"].get(k):
                     shadow_cola[k] += 1
+
+    # PROVENANCE GUARD (carry-forward) — REAL-MONEY safety. A VPS served from
+    # frozen last-good data this cycle must NOT seat its bots in READY/NEAR:
+    # promoting real capital on an un-measured (stale) equity curve violates the
+    # DNA. Degrade to WATCH + flag; portfolio/pairs/tracker all key off READY/NEAR
+    # so the exclusion cascades automatically.
+    carried_vps = {v for v, d in vps_freshness.items() if d.get("carried_forward")}
+    if carried_vps:
+        n_degraded = 0
+        for b in snap.get("bots", []):
+            if b.get("vps") in carried_vps:
+                b["frozen_data"] = True
+                if b.get("promotion_status") in ("READY", "NEAR"):
+                    b["promotion_status"] = "WATCH"
+                    b["frozen_downgraded"] = True
+                    n_degraded += 1
+        print(f"[provenance-guard] carried_vps={sorted(carried_vps)} READY/NEAR_degraded_to_WATCH={n_degraded}")
 
     # Forward Tracker — append today's status of READY/NEAR bots, decorate with verdict
     today_iso = datetime.now(timezone.utc).isoformat()

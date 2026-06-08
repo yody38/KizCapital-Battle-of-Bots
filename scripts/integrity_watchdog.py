@@ -57,7 +57,7 @@ VERCEL_URL = "https://kiz-capital-bots-kiz-capital-battle-of-bots-projects.verce
 # in case the watchdog catches a moment when CI is mid-cycle.
 STALE_TOLERANCE_SEC = 15 * 60
 MCP_DEADMAN_SEC = 20 * 60  # mcp-health runs */5 → >20min stale = 4 missed cycles = monitor dead
-LIVE_DEADMAN_SEC = 180     # live stream pushes every ~3s → >180s stale = worker/tailnet/MT5 dead
+LIVE_DEADMAN_SEC = 90      # live stream pushes every ~3s → >90s stale = worker/tailnet/MT5 dead
 LIVE_REAL_LOGINS = {25425, 32081}  # the 2 real accounts on VPS5
 
 
@@ -395,6 +395,16 @@ def main() -> int:
             }
             if stale_vps:
                 fails.append(f"stale VPSs: {', '.join(stale_vps)}")
+            # Carry-forward escalation: a VPS carried from last-good data is fine for
+            # a few cycles (graceful degradation), but data frozen too long must alarm
+            # — it means the VPS never recovered. Demo: >3h. Real (vps5): >35min.
+            for v_id in sorted(vf.keys()):
+                v = vf[v_id] or {}
+                if v.get("carried_forward"):
+                    lag = v.get("lag_sec") or 0
+                    cap = 35 * 60 if v_id == "vps5" else 3 * 3600
+                    if lag > cap:
+                        fails.append(f"carry-forward too long: {v_id} frozen {round(lag/60)}min (>{round(cap/60)}min — VPS never recovered)")
 
         # Step 4b — MCP-health dead-man: the */5 monitor must itself be alive.
         # Reads mcp_health.json (uploaded by mcp_health.py) and fails if it is
