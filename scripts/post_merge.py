@@ -77,7 +77,10 @@ STATUS = [
 
 # Rank-based status caps: SIEMPRE garantizan top5/top5/top10 entre los bots que pasan gating,
 # ordenados por promotion_score. Cualquier bot que pasa gating pero queda fuera del top 20 → NO.
-STATUS_RANK_CAPS = {"READY": 5, "NEAR": 5, "WATCH": 10}
+# Preservation caps (Tribunal del Capital): READY is a REAL-money recommendation on
+# 2 accounts (~$12K) — each extra slot lowers the bar where winner's-curse contaminates.
+# An empty slot costs $0; a badly-filled one can cost a real account. WATCH wide for discovery.
+STATUS_RANK_CAPS = {"READY": 3, "NEAR": 5, "WATCH": 15}
 
 MIN_CORR_TRADES = 25          # min trades to be in correlation matrix
 MAX_CORR_BOTS = 60            # cap matrix size
@@ -2251,7 +2254,7 @@ def compute_vps_freshness(data_dir, vps_ids=None):
     """For each snapshot_vpsN.json present, compute lag from now() vs its
     generated_at. Returns ({vps_id: {lag_sec, stale, generated_at}}, partial)."""
     if vps_ids is None:
-        vps_ids = ["vps1", "vps2", "vps3", "vps4", "vps5"]
+        vps_ids = ["vps1", "vps2", "vps3", "vps4", "vps5", "vps6"]
     now = datetime.now(timezone.utc)
     out = {}
     partial = False
@@ -2528,6 +2531,12 @@ def main():
             b["capacity"] = cap
             capacity_count += 1
 
+        # Commission-honest net for the real-money promotion decision: snapshot
+        # net_profit EXCLUDES commission (profit+swap); per-bot 'net' INCLUDES it.
+        # The candidate ranker/gate uses this so a bot only profitable pre-commission
+        # cannot rank or gate as promotable.
+        b["net_after_commission"] = round(sum(t.get("net", 0.0) for t in trades), 2)
+
         inst = institutional_metrics(daily_series, trades, bal)
         # Solo guardar si al menos una métrica se calculó
         if any(inst.get(k) is not None for k in
@@ -2565,17 +2574,52 @@ def main():
     # BEFORE forward tracker / portfolio so they consume the shrunk values).
     shrinkage_meta = compute_shrunk_scores(snap)
 
-    # 6b) Rank-based status assignment: SIEMPRE top5 READY · top5 NEAR · top10 WATCH
-    # Reemplaza la asignación por umbrales fijos (que dejaba ventanas vacías cuando
-    # nadie pasaba el corte). Solo bots que pasan gating duro entran al ranking.
-    eligible = [b for b in snap.get("bots", [])
-                if all((b.get("promotion_gating") or {}).values())
-                and b.get("promotion_score") is not None
-                and b.get("magic")]
-    eligible.sort(key=lambda b: (b.get("promotion_score") or 0, b.get("net_profit") or 0), reverse=True)
+    # 6b) Rank-based status over the DEMO-ONLY, deduped-by-magic candidate pool.
+    #   · Exclude EAs already on a real account (real_magics/real_logins): this
+    #     section surfaces demo-only EAs not yet promoted to real.
+    #   · Commission-honest net: snapshot net_profit excludes commission — use
+    #     net_after_commission for the net>0 gate AND the rank tiebreak.
+    #   · Dedup by magic: one EA = one slot (best instance) — no duplicate edge.
+    #   · Caps 3/5/15 (preservation). A cap stays under-filled if there aren't
+    #     enough healthy unique EAs — that is signal, not a bug.
+    real_logins = {login for (_v, login) in real_accounts}
+
+    def _net_honest(b):
+        v = b.get("net_after_commission")
+        return v if v is not None else (b.get("net_profit") or 0)
+
+    pool_pre_comm = [b for b in snap.get("bots", [])
+                     if all((b.get("promotion_gating") or {}).values())
+                     and b.get("promotion_score") is not None
+                     and b.get("magic")
+                     and b.get("magic") not in real_magics
+                     and b.get("account_login") not in real_logins]
+    # Commission filter: drop bots that are only profitable BEFORE commission.
+    elig_all = [b for b in pool_pre_comm if _net_honest(b) > 0]
+    commission_filter_dropped = [
+        f"{b.get('magic')}@{b.get('vps')}/{b.get('account_login')}"
+        for b in pool_pre_comm if _net_honest(b) <= 0
+    ]
+    elig_all.sort(key=lambda b: (b.get("promotion_score") or 0, _net_honest(b)), reverse=True)
+
+    # Dedup by magic — first (best) instance wins; the rest are recorded.
+    eligible, seen_magic, dedup_dropped = [], set(), []
+    for b in elig_all:
+        m = b.get("magic")
+        if m in seen_magic:
+            dedup_dropped.append(f"{m}@{b.get('vps')}/{b.get('account_login')}")
+            continue
+        seen_magic.add(m)
+        eligible.append(b)
+
     cap_ready = STATUS_RANK_CAPS["READY"]
     cap_near = STATUS_RANK_CAPS["NEAR"]
     cap_watch = STATUS_RANK_CAPS["WATCH"]
+    # Reset everyone to NO first so excluded / duplicate / already-real bots cannot
+    # keep a stale threshold-status from compute_score; rank is authoritative.
+    for b in snap.get("bots", []):
+        b["promotion_status"] = "NO"
+    shadow_cola = {"cvar_fail": 0, "tail_fail": 0, "sqn_fail": 0}
     for idx, b in enumerate(eligible):
         if idx < cap_ready:
             b["promotion_status"] = "READY"
@@ -2585,7 +2629,18 @@ def main():
             b["promotion_status"] = "WATCH"
         else:
             b["promotion_status"] = "NO"
-    # Bots que fallan gating ya quedaron como "NO" en compute_score.
+        # SHADOW tail gates — RECORD only, do NOT change status (calibrate first).
+        inst = b.get("institutional") or {}
+        cvar, tail, band = inst.get("cvar_95_pct"), inst.get("tail_ratio"), inst.get("sqn_band")
+        b["shadow_gates"] = {
+            "cvar_fail": cvar is not None and cvar < -5.0,
+            "tail_fail": tail is not None and tail < 0.7,
+            "sqn_fail": band == "MALO",
+        }
+        if b["promotion_status"] in ("READY", "NEAR"):
+            for k in shadow_cola:
+                if b["shadow_gates"][k]:
+                    shadow_cola[k] += 1
 
     # Forward Tracker — append today's status of READY/NEAR bots, decorate with verdict
     today_iso = datetime.now(timezone.utc).isoformat()
@@ -2611,6 +2666,16 @@ def main():
         "thresholds": dict(STATUS),
         "shrinkage": shrinkage_meta,
         "computed_at": today_iso,
+        # Candidate-pool transparency (Data Integrity DNA — every figure re-derivable).
+        "rank_caps": dict(STATUS_RANK_CAPS),
+        "ranker": "promotion_score desc, then net_after_commission desc",
+        "eligible_count": len(pool_pre_comm),
+        "pool_post_dedup": len(eligible),
+        "dedup_dropped": dedup_dropped,
+        "commission_filter_dropped": commission_filter_dropped,
+        "real_magics_excluded": sorted(real_magics),
+        "shadow_cola_gates_would_fail": shadow_cola,
+        "shadow_pending": ["corr_max_vs_real", "demo_real_gap"],
     }
     snap["enrichment_meta"] = {
         "stress_runs": MC_RUNS,

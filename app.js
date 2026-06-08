@@ -1492,12 +1492,14 @@ function renderCandidates() {
               && CANDIDATE_STATUSES.has(b.promotion_status)
               && !state.realLogins.has(b.account_login)
               && !state.realMagics.has(b.magic));
-  pool.sort((a, b) => (b.promotion_score - a.promotion_score) || (b.net_profit - a.net_profit));
+  const honestNet = b => (b.net_after_commission != null ? b.net_after_commission : b.net_profit);
+  pool.sort((a, b) => (b.promotion_score - a.promotion_score) || (honestNet(b) - honestNet(a)));
   if (counter) counter.textContent = pool.length;
   const f = CANDIDATE_STATUSES.has(state.candidatesStatusFilter) ? state.candidatesStatusFilter : 'READY';
   pool = pool.filter(b => b.promotion_status === f);
-  // Caps dinámicos: READY top 5 · NEAR top 5 · WATCH top 10
-  const caps = { READY: 5, NEAR: 5, WATCH: 10 };
+  // Caps from the backend (single source of truth) — keeps FE/BE in lockstep.
+  const rc = (state.snapshot.promotion_meta && state.snapshot.promotion_meta.rank_caps) || {};
+  const caps = { READY: rc.READY || 3, NEAR: rc.NEAR || 5, WATCH: rc.WATCH || 15 };
   const top = pool.slice(0, caps[f]);
   if (!top.length) {
     tbody.innerHTML = '';
