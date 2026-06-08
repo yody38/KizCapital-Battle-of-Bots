@@ -27,6 +27,7 @@ Run with: python3 post_merge.py <data_dir>
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import os
@@ -612,6 +613,7 @@ def update_forward_tracker(snap, data_dir, today_iso, real_magics=None):
                 "status": status,
                 "score": b.get("promotion_score"),
                 "net_profit": b.get("net_profit"),
+                "net_after_commission": b.get("net_after_commission"),
                 "trades": b.get("trades"),
             }
             f.write(json.dumps(row, ensure_ascii=False) + "\n")
@@ -637,8 +639,16 @@ def update_forward_tracker(snap, data_dir, today_iso, real_magics=None):
             days_since = (d_today - d_first).days
         except ValueError:
             continue
-        net_at_first = first.get("net_profit") or 0
-        current_net = b.get("net_profit") or 0
+        # Commission-honest net_since, matching the bootstrap band basis (per-bot
+        # t['net'] is post-commission). Use net_after_commission on BOTH ends when
+        # available; legacy ledger rows predate it → both fall back to net_profit so
+        # numerator and denominator stay on the same basis (no units mismatch).
+        if first.get("net_after_commission") is not None and b.get("net_after_commission") is not None:
+            net_at_first = first["net_after_commission"]
+            current_net = b["net_after_commission"]
+        else:
+            net_at_first = first.get("net_profit") or 0
+            current_net = b.get("net_profit") or 0
         net_since = current_net - net_at_first
 
         # Recompute bootstrap MC at the EXACT trades-expected for the elapsed period
@@ -658,7 +668,11 @@ def update_forward_tracker(snap, data_dir, today_iso, real_magics=None):
                 trades_per_day = len(nets) / max(1.0, months_active * 30.0)
                 expected_horizon = max(1, int(round(trades_per_day * days_since)))
                 # Use distinct seed per bot+date so we get fresh randomness day-to-day.
-                seed = MC_SEED ^ (b.get("magic") or 0) ^ hash(today_only) & 0x7FFFFFFF
+                # sha256 (not builtin hash()) → reproducible across processes regardless
+                # of PYTHONHASHSEED; parenthesized so the 0x7FFFFFFF mask applies to the
+                # whole XOR, not just the date term (Data Integrity DNA: every figure reproducible).
+                date_seed = int.from_bytes(hashlib.sha256(today_only.encode()).digest()[:4], "big")
+                seed = (MC_SEED ^ (b.get("magic") or 0) ^ date_seed) & 0x7FFFFFFF
                 fn_sorted, _ = _bootstrap_paths(nets, expected_horizon, 1000, seed)
                 expected_p25 = round(percentile(fn_sorted, 0.25), 2)
                 expected_p50 = round(percentile(fn_sorted, 0.50), 2)
@@ -1096,11 +1110,12 @@ def compute_shrunk_scores(snap):
     hard toward the cohort mean (kills survivorship-by-luck on small samples).
 
     Mutates each bot in-place adding:
-      - promotion_score_raw (original, never overwritten thereafter)
-      - promotion_score_shrunk (final)
-      - promotion_score (= shrunk; UI keeps using this field)
+      - promotion_score_raw (original)
+      - promotion_score_shrunk (the shrunk value, for reference/shadow)
       - shrinkage_meta = {cohort, cohort_n, cohort_prior, global_prior, n_eff, w, delta}
-      - promotion_status recomputed from shrunk score (gating preserved).
+    NOTE: promotion_score STAYS = raw (NOT overwritten — preserves the original status
+    pyramid). promotion_status is assigned later by the rank-based 6b block over the
+    demo-only deduped pool, NOT from the shrunk score here.
     """
     bots = snap.get("bots", [])
     if not bots:
@@ -2584,23 +2599,31 @@ def main():
     #     enough healthy unique EAs — that is signal, not a bug.
     real_logins = {login for (_v, login) in real_accounts}
 
-    def _net_honest(b):
-        v = b.get("net_after_commission")
-        return v if v is not None else (b.get("net_profit") or 0)
+    def _tag(b):
+        return f"{b.get('magic')}@{b.get('vps')}/{b.get('account_login')}"
 
-    pool_pre_comm = [b for b in snap.get("bots", [])
-                     if all((b.get("promotion_gating") or {}).values())
-                     and b.get("promotion_score") is not None
-                     and b.get("magic")
-                     and b.get("magic") not in real_magics
-                     and b.get("account_login") not in real_logins]
-    # Commission filter: drop bots that are only profitable BEFORE commission.
-    elig_all = [b for b in pool_pre_comm if _net_honest(b) > 0]
-    commission_filter_dropped = [
-        f"{b.get('magic')}@{b.get('vps')}/{b.get('account_login')}"
-        for b in pool_pre_comm if _net_honest(b) <= 0
-    ]
-    elig_all.sort(key=lambda b: (b.get("promotion_score") or 0, _net_honest(b)), reverse=True)
+    pool_pre_commission = [b for b in snap.get("bots", [])
+                           if all((b.get("promotion_gating") or {}).values())
+                           and b.get("promotion_score") is not None
+                           and b.get("magic")
+                           and b.get("magic") not in real_magics
+                           and b.get("account_login") not in real_logins]
+    # FAIL-CLOSED commission: a bot whose net_after_commission could NOT be computed
+    # (per-bot file missing) is EXCLUDED — never fall back to the commission-EXCLUDED
+    # snapshot net_profit for a real-money decision. Surfaced + gated by verify_integrity.
+    commission_unknown = [_tag(b) for b in pool_pre_commission if b.get("net_after_commission") is None]
+    with_net = [b for b in pool_pre_commission if b.get("net_after_commission") is not None]
+    elig_all = [b for b in with_net if b["net_after_commission"] > 0]
+    commission_filter_dropped = [_tag(b) for b in with_net if b["net_after_commission"] <= 0]
+    # Deterministic ordering (no float-tie ambiguity): score desc, commission-honest
+    # net desc, trades desc, then vps asc, login asc.
+    elig_all.sort(key=lambda b: (
+        -(b.get("promotion_score") or 0),
+        -(b.get("net_after_commission") or 0),
+        -(b.get("trades") or 0),
+        str(b.get("vps") or ""),
+        b.get("account_login") or 0,
+    ))
 
     # Dedup by magic — first (best) instance wins; the rest are recorded.
     eligible, seen_magic, dedup_dropped = [], set(), []
@@ -2619,7 +2642,37 @@ def main():
     # keep a stale threshold-status from compute_score; rank is authoritative.
     for b in snap.get("bots", []):
         b["promotion_status"] = "NO"
-    shadow_cola = {"cvar_fail": 0, "tail_fail": 0, "sqn_fail": 0}
+    # Preload daily-return series of the bots ALREADY in real (corr shadow): a
+    # candidate that just clones the deployed real portfolio adds no diversification.
+    # build_correlation_matrix excludes reals, so this is a dedicated pass.
+    real_series = []
+    for rb in snap.get("bots", []):
+        if rb.get("account_login") in real_logins and rb.get("magic"):
+            per = load_per_bot(data_dir, rb.get("vps"), rb.get("account_login"), rb.get("magic"))
+            s = (per or {}).get("daily_equity_series") or []
+            dmap = {r.get("date"): r.get("daily_net") for r in s
+                    if r.get("date") is not None and r.get("daily_net") is not None}
+            if len(dmap) >= MIN_CORR_TRADES:
+                real_series.append(dmap)
+
+    def _corr_vs_real(cand):
+        if not real_series:
+            return None
+        per = load_per_bot(data_dir, cand.get("vps"), cand.get("account_login"), cand.get("magic"))
+        s = (per or {}).get("daily_equity_series") or []
+        cmap = {r.get("date"): r.get("daily_net") for r in s
+                if r.get("date") is not None and r.get("daily_net") is not None}
+        best = None
+        for rmap in real_series:
+            common = [d for d in cmap if d in rmap]
+            if len(common) < MIN_CORR_TRADES:
+                continue
+            rho = pearson([cmap[d] for d in common], [rmap[d] for d in common])
+            if rho is not None and (best is None or rho > best):
+                best = rho
+        return round(best, 3) if best is not None else None
+
+    shadow_cola = {"cvar_fail": 0, "tail_fail": 0, "sqn_fail": 0, "corr_fail": 0}
     for idx, b in enumerate(eligible):
         if idx < cap_ready:
             b["promotion_status"] = "READY"
@@ -2629,17 +2682,20 @@ def main():
             b["promotion_status"] = "WATCH"
         else:
             b["promotion_status"] = "NO"
-        # SHADOW tail gates — RECORD only, do NOT change status (calibrate first).
+        # SHADOW gates — RECORD only, do NOT change status (calibrate first).
         inst = b.get("institutional") or {}
         cvar, tail, band = inst.get("cvar_95_pct"), inst.get("tail_ratio"), inst.get("sqn_band")
+        corr_max = _corr_vs_real(b)
         b["shadow_gates"] = {
             "cvar_fail": cvar is not None and cvar < -5.0,
             "tail_fail": tail is not None and tail < 0.7,
             "sqn_fail": band == "MALO",
+            "corr_max_vs_real": corr_max,
+            "corr_fail": corr_max is not None and corr_max > 0.7,
         }
         if b["promotion_status"] in ("READY", "NEAR"):
             for k in shadow_cola:
-                if b["shadow_gates"][k]:
+                if b["shadow_gates"].get(k):
                     shadow_cola[k] += 1
 
     # Forward Tracker — append today's status of READY/NEAR bots, decorate with verdict
@@ -2668,14 +2724,17 @@ def main():
         "computed_at": today_iso,
         # Candidate-pool transparency (Data Integrity DNA — every figure re-derivable).
         "rank_caps": dict(STATUS_RANK_CAPS),
-        "ranker": "promotion_score desc, then net_after_commission desc",
-        "eligible_count": len(pool_pre_comm),
+        "ranker": "promotion_score desc, net_after_commission desc, trades desc, vps asc, login asc",
+        "human_veto_required": True,  # charter SOLO-LECTURA: READY is a proposal, never auto-promote
+        "pool_pre_commission": len(pool_pre_commission),
+        "eligible_count": len(elig_all),  # after commission filter (true promotable pool)
         "pool_post_dedup": len(eligible),
         "dedup_dropped": dedup_dropped,
         "commission_filter_dropped": commission_filter_dropped,
+        "commission_unknown": commission_unknown,  # fail-closed: excluded, gated by verify_integrity
         "real_magics_excluded": sorted(real_magics),
         "shadow_cola_gates_would_fail": shadow_cola,
-        "shadow_pending": ["corr_max_vs_real", "demo_real_gap"],
+        "shadow_pending": ["demo_real_gap"],
     }
     snap["enrichment_meta"] = {
         "stress_runs": MC_RUNS,

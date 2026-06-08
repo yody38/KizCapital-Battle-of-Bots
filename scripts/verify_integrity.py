@@ -322,6 +322,16 @@ def main() -> int:
                 f"tracker_health: ledger empty but {n_candidates} READY/NEAR bot(s) exist"
             )
 
+    # Commission-honest fail-closed: a candidate-pool bot whose net_after_commission
+    # could not be computed is a money-decision figure that is NOT verifiable — abort
+    # the cycle rather than rank/gate it on commission-excluded net (Data Integrity DNA).
+    commission_unknown = (snap.get("promotion_meta") or {}).get("commission_unknown") or []
+    if commission_unknown:
+        all_fails.append(
+            f"promotion: net_after_commission unknown for {len(commission_unknown)} pool bot(s) "
+            f"(per-bot file missing) — {commission_unknown[:5]}"
+        )
+
     remote_fails: list[str] = []
     if args.check_remote:
         env = load_env()

@@ -1499,7 +1499,7 @@ function renderCandidates() {
   pool = pool.filter(b => b.promotion_status === f);
   // Caps from the backend (single source of truth) — keeps FE/BE in lockstep.
   const rc = (state.snapshot.promotion_meta && state.snapshot.promotion_meta.rank_caps) || {};
-  const caps = { READY: rc.READY || 3, NEAR: rc.NEAR || 5, WATCH: rc.WATCH || 15 };
+  const caps = { READY: rc.READY ?? 3, NEAR: rc.NEAR ?? 5, WATCH: rc.WATCH ?? 15 };
   const top = pool.slice(0, caps[f]);
   if (!top.length) {
     tbody.innerHTML = '';
