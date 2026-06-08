@@ -94,131 +94,171 @@ except Exception:
 PY
 }
 
-MIRROR_START_MS=$(now_ms)
-{
-  echo "[$(ts)] mirror starting"
-  for entry in "${VPS_ENTRIES[@]}"; do
-    id="${entry%%=*}"
-    host="${entry#*=}"
-    local_file="$DATA_DIR/snapshot_${id}.json"
-    local_tmp="${local_file}.tmp"
+# Per-VPS fetch — runs in a background subshell, one per VPS. All output goes to
+# the VPS's own log (concatenated in roster order after the barrier, so logs never
+# interleave and no secret could be spliced mid-line). The RESULT is communicated
+# via an atomic status file ($DATA_DIR/.vps_status_<id>):
+#   OK:<snapshot_path>   -> this VPS mirrored cleanly
+#   FAIL:<reason>        -> fail-closed; the whole cycle aborts
+# A subshell that crashes WITHOUT writing a status file is treated as FAIL (the
+# parent only trusts an explicit OK) — fail-closed by construction.
+fetch_vps() {
+  local id="$1" host="$2"
+  local status_file="$DATA_DIR/.vps_status_${id}"
+  rm -f "$status_file"
+  local local_file="$DATA_DIR/snapshot_${id}.json"
+  local local_tmp="${local_file}.tmp"
+  local attempt snap_scp_ok age expected_bots
+  local ready_local snap_ts ready_valid ready_ts ready_bots
+  local bots_target bots_staging bots_attempt_ok staged bots_backup bot_count
 
-    # --- snapshot.json fetch (mandatory, fail-closed with retry) ---
-    # Retry absorbs transient Tailscale flakes on CI runner cold-start: the
-    # first scp can hit a connection-timeout while the route is rehashing,
-    # but a second attempt 15 s later normally succeeds.
-    snap_scp_ok=0
-    for attempt in $(seq 1 "$BOTS_SCP_MAX_ATTEMPTS"); do
-      rm -f "$local_tmp"
-      if scp "${SCP_OPTS[@]}" "$host:$REMOTE_FILE" "$local_tmp" 2>&1; then
-        if [ -s "$local_tmp" ] && head -c 1 "$local_tmp" | grep -q '{'; then
-          snap_scp_ok=1
-          echo "[$(ts)] $id snapshot scp OK on attempt $attempt"
-          break
-        else
-          echo "[$(ts)] $id snapshot INVALID JSON on attempt $attempt — retrying"
-        fi
+  fail() { echo "FAIL:$1" > "${status_file}.tmp" && mv "${status_file}.tmp" "$status_file"; return 1; }
+
+  # --- snapshot.json fetch (mandatory, fail-closed with retry) ---
+  snap_scp_ok=0
+  for attempt in $(seq 1 "$BOTS_SCP_MAX_ATTEMPTS"); do
+    rm -f "$local_tmp"
+    if scp "${SCP_OPTS[@]}" "$host:$REMOTE_FILE" "$local_tmp" 2>&1; then
+      if [ -s "$local_tmp" ] && head -c 1 "$local_tmp" | grep -q '{'; then
+        snap_scp_ok=1
+        echo "[$(ts)] $id snapshot scp OK on attempt $attempt"
+        break
       else
-        echo "[$(ts)] $id snapshot SCP error on attempt $attempt — retrying"
-      fi
-      if [ "$attempt" -lt "$BOTS_SCP_MAX_ATTEMPTS" ]; then
-        sleep "$BOTS_SCP_RETRY_DELAY_SEC"
-      fi
-    done
-    if [ "$snap_scp_ok" -ne 1 ]; then
-      echo "[$(ts)] $id snapshot scp FAILED after $BOTS_SCP_MAX_ATTEMPTS attempts — aborting cycle (fail-closed)"
-      rm -f "$local_tmp"
-      FATAL_VPS="$id:snapshot_scp_exhausted"
-      break
-    fi
-    mv "$local_tmp" "$local_file"
-
-    age=$(snapshot_age_sec "$local_file")
-    if [ "$age" -lt 0 ] || [ "$age" -gt "$SNAPSHOT_MAX_AGE_SEC" ]; then
-      echo "[$(ts)] $id snapshot.json STALE age=${age}s threshold=${SNAPSHOT_MAX_AGE_SEC}s — aborting cycle"
-      FATAL_VPS="$id:snapshot_stale_${age}s"
-      break
-    fi
-    echo "[$(ts)] $id OK $(wc -c < "$local_file") bytes age=${age}s"
-
-    expected_bots=$(expected_bots_in_snapshot "$local_file")
-    if [ "$expected_bots" -lt 0 ]; then
-      echo "[$(ts)] $id could not parse expected bot count — aborting"
-      FATAL_VPS="$id:bots_count_parse"
-      break
-    fi
-
-    # --- .ready flag (builder v3+) ---
-    # The builder writes this file atomically as the LAST step of its cycle.
-    # If we can read it AND its ts matches snapshot.generated_at, we're safe
-    # to scp the per-bot dir — the builder is fully done with this cycle.
-    ready_local="$DATA_DIR/.ready_${id}.json"
-    rm -f "$ready_local"
-    snap_ts=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('generated_at',''))" "$local_file")
-    ready_valid=0
-    if scp "${SCP_OPTS[@]}" "$host:$REMOTE_READY_FILE" "$ready_local" 2>/dev/null; then
-      if [ -s "$ready_local" ]; then
-        ready_ts=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('ts',''))" "$ready_local" 2>/dev/null)
-        ready_bots=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('bot_files_count',-1))" "$ready_local" 2>/dev/null)
-        if [ -n "$ready_ts" ] && [ "$ready_ts" = "$snap_ts" ]; then
-          ready_valid=1
-          echo "[$(ts)] $id .ready OK ts=$ready_ts bot_files_count=$ready_bots"
-        else
-          echo "[$(ts)] $id .ready MISMATCH ready_ts=$ready_ts snap_ts=$snap_ts — builder cycle inconsistent"
-        fi
-      else
-        echo "[$(ts)] $id .ready empty"
+        echo "[$(ts)] $id snapshot INVALID JSON on attempt $attempt — retrying"
       fi
     else
-      echo "[$(ts)] $id .ready not present on remote"
+      echo "[$(ts)] $id snapshot SCP error on attempt $attempt — retrying"
     fi
-    if [ "$ready_valid" -ne 1 ] && [ "$READY_FLAG_REQUIRED" -eq 1 ]; then
-      FATAL_VPS="$id:ready_missing_or_mismatch"
-      break
-    fi
-
-    # --- per-bot files fetch (with retry to absorb upstream-builder race) ---
-    bots_target="$BOTS_OUT_DIR/$id"
-    bots_staging="$BOTS_OUT_DIR/.${id}.staging"
-    bots_attempt_ok=0
-    for attempt in $(seq 1 "$BOTS_SCP_MAX_ATTEMPTS"); do
-      rm -rf "$bots_staging"
-      mkdir -p "$bots_staging"
-      if scp "${SCP_OPTS[@]}" -r "$host:$REMOTE_BOTS_DIR/." "$bots_staging/" 2>&1; then
-        staged=$(find "$bots_staging" -maxdepth 1 -name '*.json' 2>/dev/null | wc -l | tr -d ' ')
-        if [ "$expected_bots" -eq 0 ] || [ "$staged" -ge "$expected_bots" ]; then
-          bots_attempt_ok=1
-          echo "[$(ts)] $id bots scp OK on attempt $attempt — staged=$staged expected=$expected_bots"
-          break
-        else
-          echo "[$(ts)] $id bots staged=$staged < expected=$expected_bots on attempt $attempt — retrying"
-        fi
-      else
-        echo "[$(ts)] $id bots SCP error on attempt $attempt — retrying"
-      fi
-      if [ "$attempt" -lt "$BOTS_SCP_MAX_ATTEMPTS" ]; then
-        sleep "$BOTS_SCP_RETRY_DELAY_SEC"
-      fi
-    done
-
-    if [ "$bots_attempt_ok" -ne 1 ]; then
-      echo "[$(ts)] $id bots scp FAILED after $BOTS_SCP_MAX_ATTEMPTS attempts — aborting cycle"
-      rm -rf "$bots_staging"
-      FATAL_VPS="$id:bots_scp_exhausted"
-      break
-    fi
-
-    # Atomic swap: ensures dashboard NEVER hits a 404 window during refresh.
-    bots_backup="${bots_target}.swap.$$"
-    rm -rf "$bots_backup"
-    if [ -d "$bots_target" ]; then mv "$bots_target" "$bots_backup"; fi
-    mv "$bots_staging" "$bots_target"
-    rm -rf "$bots_backup"
-    bot_count=$(find "$bots_target" -maxdepth 1 -name '*.json' 2>/dev/null | wc -l | tr -d ' ')
-    echo "[$(ts)] $id bots OK $bot_count files (atomic swap, expected=$expected_bots)"
-    FRESH_FILES+=("$id:$local_file")
+    [ "$attempt" -lt "$BOTS_SCP_MAX_ATTEMPTS" ] && sleep "$BOTS_SCP_RETRY_DELAY_SEC"
   done
-} >> "$LOG" 2>&1
+  if [ "$snap_scp_ok" -ne 1 ]; then
+    echo "[$(ts)] $id snapshot scp FAILED after $BOTS_SCP_MAX_ATTEMPTS attempts — aborting cycle (fail-closed)"
+    rm -f "$local_tmp"; fail "${id}:snapshot_scp_exhausted"; return 1
+  fi
+  mv "$local_tmp" "$local_file"
+
+  age=$(snapshot_age_sec "$local_file")
+  if [ "$age" -lt 0 ] || [ "$age" -gt "$SNAPSHOT_MAX_AGE_SEC" ]; then
+    echo "[$(ts)] $id snapshot.json STALE age=${age}s threshold=${SNAPSHOT_MAX_AGE_SEC}s — aborting cycle"
+    fail "${id}:snapshot_stale_${age}s"; return 1
+  fi
+  echo "[$(ts)] $id OK $(wc -c < "$local_file") bytes age=${age}s"
+
+  expected_bots=$(expected_bots_in_snapshot "$local_file")
+  if [ "$expected_bots" -lt 0 ]; then
+    echo "[$(ts)] $id could not parse expected bot count — aborting"
+    fail "${id}:bots_count_parse"; return 1
+  fi
+
+  # --- .ready flag (builder v3+) ---
+  ready_local="$DATA_DIR/.ready_${id}.json"
+  rm -f "$ready_local"
+  snap_ts=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('generated_at',''))" "$local_file")
+  ready_valid=0
+  if scp "${SCP_OPTS[@]}" "$host:$REMOTE_READY_FILE" "$ready_local" 2>/dev/null; then
+    if [ -s "$ready_local" ]; then
+      ready_ts=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('ts',''))" "$ready_local" 2>/dev/null)
+      ready_bots=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('bot_files_count',-1))" "$ready_local" 2>/dev/null)
+      if [ -n "$ready_ts" ] && [ "$ready_ts" = "$snap_ts" ]; then
+        ready_valid=1
+        echo "[$(ts)] $id .ready OK ts=$ready_ts bot_files_count=$ready_bots"
+      else
+        echo "[$(ts)] $id .ready MISMATCH ready_ts=$ready_ts snap_ts=$snap_ts — builder cycle inconsistent"
+      fi
+    else
+      echo "[$(ts)] $id .ready empty"
+    fi
+  else
+    echo "[$(ts)] $id .ready not present on remote"
+  fi
+  if [ "$ready_valid" -ne 1 ] && [ "$READY_FLAG_REQUIRED" -eq 1 ]; then
+    fail "${id}:ready_missing_or_mismatch"; return 1
+  fi
+
+  # --- per-bot files fetch (with retry to absorb upstream-builder race) ---
+  bots_target="$BOTS_OUT_DIR/$id"
+  bots_staging="$BOTS_OUT_DIR/.${id}.staging"
+  bots_attempt_ok=0
+  for attempt in $(seq 1 "$BOTS_SCP_MAX_ATTEMPTS"); do
+    rm -rf "$bots_staging"
+    mkdir -p "$bots_staging"
+    if scp "${SCP_OPTS[@]}" -r "$host:$REMOTE_BOTS_DIR/." "$bots_staging/" 2>&1; then
+      staged=$(find "$bots_staging" -maxdepth 1 -name '*.json' 2>/dev/null | wc -l | tr -d ' ')
+      if [ "$expected_bots" -eq 0 ] || [ "$staged" -ge "$expected_bots" ]; then
+        bots_attempt_ok=1
+        echo "[$(ts)] $id bots scp OK on attempt $attempt — staged=$staged expected=$expected_bots"
+        break
+      else
+        echo "[$(ts)] $id bots staged=$staged < expected=$expected_bots on attempt $attempt — retrying"
+      fi
+    else
+      echo "[$(ts)] $id bots SCP error on attempt $attempt — retrying"
+    fi
+    [ "$attempt" -lt "$BOTS_SCP_MAX_ATTEMPTS" ] && sleep "$BOTS_SCP_RETRY_DELAY_SEC"
+  done
+  if [ "$bots_attempt_ok" -ne 1 ]; then
+    echo "[$(ts)] $id bots scp FAILED after $BOTS_SCP_MAX_ATTEMPTS attempts — aborting cycle"
+    rm -rf "$bots_staging"; fail "${id}:bots_scp_exhausted"; return 1
+  fi
+
+  # Atomic swap: ensures dashboard NEVER hits a 404 window during refresh.
+  # Backup name keyed by $id (unique per VPS) so concurrent swaps never collide.
+  bots_backup="${bots_target}.swap.${id}"
+  rm -rf "$bots_backup"
+  if [ -d "$bots_target" ]; then mv "$bots_target" "$bots_backup"; fi
+  mv "$bots_staging" "$bots_target"
+  rm -rf "$bots_backup"
+  bot_count=$(find "$bots_target" -maxdepth 1 -name '*.json' 2>/dev/null | wc -l | tr -d ' ')
+  echo "[$(ts)] $id bots OK $bot_count files (atomic swap, expected=$expected_bots)"
+  echo "OK:$local_file" > "${status_file}.tmp" && mv "${status_file}.tmp" "$status_file"
+  return 0
+}
+
+# Concurrency cap: VPS scp run in parallel but bounded. Keeps RAM/IO pressure
+# (VPS2 1.5GB, VPS4 slow) sane while collapsing the serial 6× transport that
+# telemetry proved is ~91% of the cycle. Throttle with `wait -n` (bash 4.3+).
+MAX_PARALLEL=${MIRROR_MAX_PARALLEL:-3}
+MIRROR_START_MS=$(now_ms)
+echo "[$(ts)] mirror starting (parallel, cap=$MAX_PARALLEL)" >> "$LOG"
+
+declare -a VPS_IDS=()
+running=0
+for entry in "${VPS_ENTRIES[@]}"; do
+  id="${entry%%=*}"
+  host="${entry#*=}"
+  VPS_IDS+=("$id")
+  set +x  # never trace inside the fetch subshell (defence against secret splicing)
+  fetch_vps "$id" "$host" > "$DATA_DIR/.vps_log_${id}" 2>&1 &
+  running=$((running + 1))
+  if [ "$running" -ge "$MAX_PARALLEL" ]; then
+    wait -n 2>/dev/null || true
+    running=$((running - 1))
+  fi
+done
+wait  # barrier: all VPS fetches complete before we read results
+
+# Concatenate per-VPS logs in roster order (deterministic, no interleaving).
+for id in "${VPS_IDS[@]}"; do
+  [ -f "$DATA_DIR/.vps_log_${id}" ] && cat "$DATA_DIR/.vps_log_${id}" >> "$LOG"
+  rm -f "$DATA_DIR/.vps_log_${id}"
+done
+
+# Read per-VPS status files (the only trusted result channel). Missing or FAIL
+# on ANY VPS aborts the cycle fail-closed — identical guarantee to the old serial
+# break, but evaluated after the barrier.
+for id in "${VPS_IDS[@]}"; do
+  status_file="$DATA_DIR/.vps_status_${id}"
+  if [ ! -f "$status_file" ]; then
+    FATAL_VPS="${id}:no_status_subshell_crashed"
+    break
+  fi
+  st="$(cat "$status_file")"
+  rm -f "$status_file"
+  case "$st" in
+    OK:*) FRESH_FILES+=("$id:${st#OK:}") ;;
+    *)    FATAL_VPS="${st#FAIL:}"; break ;;
+  esac
+done
 
 if [ -n "$FATAL_VPS" ]; then
   echo "[$(ts)] mirror FAIL — fail-closed on $FATAL_VPS (no upload)" >> "$LOG"
