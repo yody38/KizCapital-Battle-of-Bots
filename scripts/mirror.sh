@@ -243,37 +243,62 @@ for id in "${VPS_IDS[@]}"; do
   rm -f "$DATA_DIR/.vps_log_${id}"
 done
 
-# Read per-VPS status files (the only trusted result channel). Missing or FAIL
-# on ANY VPS aborts the cycle fail-closed — identical guarantee to the old serial
-# break, but evaluated after the barrier.
+# Read per-VPS status files (the only trusted result channel). Graceful
+# degradation: a VPS that FAILs (or whose subshell crashed) is COLLECTED as
+# stale rather than aborting the whole cycle — one flaky low-RAM VPS must not
+# freeze the 5 healthy ones. Quorum below enforces the safety limits.
+declare -a STALE_IDS=()
 for id in "${VPS_IDS[@]}"; do
   status_file="$DATA_DIR/.vps_status_${id}"
   if [ ! -f "$status_file" ]; then
-    FATAL_VPS="${id}:no_status_subshell_crashed"
-    break
+    echo "[$(ts)] $id no status (subshell crashed) — treating as stale" >> "$LOG"
+    STALE_IDS+=("$id")
+    continue
   fi
   st="$(cat "$status_file")"
   rm -f "$status_file"
   case "$st" in
     OK:*) FRESH_FILES+=("$id:${st#OK:}") ;;
-    *)    FATAL_VPS="${st#FAIL:}"; break ;;
+    *)    echo "[$(ts)] $id FAIL (${st#FAIL:}) — treating as stale" >> "$LOG"; STALE_IDS+=("${id}") ;;
   esac
 done
 
-if [ -n "$FATAL_VPS" ]; then
-  echo "[$(ts)] mirror FAIL — fail-closed on $FATAL_VPS (no upload)" >> "$LOG"
+# --- Quorum (fail-closed safety limits) ---
+MAX_STALE_VPS=${MAX_STALE_VPS:-1}     # at most this many VPS may be carried stale
+REQUIRED_VPS="${REQUIRED_VPS:-vps5}"  # the REAL-money VPS must always be fresh
+if [ ${#STALE_IDS[@]} -gt "$MAX_STALE_VPS" ]; then
+  echo "[$(ts)] mirror FAIL — ${#STALE_IDS[@]} VPS down (> MAX_STALE_VPS=$MAX_STALE_VPS): ${STALE_IDS[*]} (no upload)" >> "$LOG"
   exit 1
 fi
+for sid in "${STALE_IDS[@]}"; do
+  if [ "$sid" = "$REQUIRED_VPS" ]; then
+    echo "[$(ts)] mirror FAIL — required VPS $REQUIRED_VPS (real accounts) is down — not degrading (no upload)" >> "$LOG"
+    exit 1
+  fi
+done
+
+# --- Carry forward each stale VPS from last-good Supabase data ---
+# Keeps its accounts/bots visible (flagged stale) so no bot vanishes and
+# verify_integrity still passes. If carry-forward fails, we fail closed.
+for sid in "${STALE_IDS[@]}"; do
+  if python3 "$DIR/scripts/carry_forward_stale.py" "$sid" "$DATA_DIR" >> "$LOG" 2>&1; then
+    FRESH_FILES+=("$sid:$DATA_DIR/snapshot_${sid}.json")
+  else
+    echo "[$(ts)] mirror FAIL — carry-forward of $sid failed (cannot safely degrade, no upload)" >> "$LOG"
+    exit 1
+  fi
+done
 
 if [ ${#FRESH_FILES[@]} -ne ${#VPS_ENTRIES[@]} ]; then
-  echo "[$(ts)] mirror FAIL — got ${#FRESH_FILES[@]} VPS, expected ${#VPS_ENTRIES[@]}" >> "$LOG"
+  echo "[$(ts)] mirror FAIL — got ${#FRESH_FILES[@]} VPS (fresh+carried), expected ${#VPS_ENTRIES[@]}" >> "$LOG"
   exit 1
 fi
 
-# Merge via python (vanilla, no deps).
-# Fail-closed mode: no VPS is ever marked stale by the mirror; if a VPS was
-# stale we'd have already aborted above. STALE_ARG stays empty for API compat.
-STALE_ARG=""
+# Stale set flows to the merge → snapshot.stale_vps → dashboard ⚠ per-VPS.
+STALE_ARG="$(IFS=,; echo "${STALE_IDS[*]}")"
+if [ -n "$STALE_ARG" ]; then
+  echo "[$(ts)] mirror DEGRADED — publishing with stale VPS: $STALE_ARG" >> "$LOG"
+fi
 
 HISTORY_FILE="$DATA_DIR/history.jsonl"
 
