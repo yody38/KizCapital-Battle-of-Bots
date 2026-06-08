@@ -22,7 +22,7 @@ session: it dials VPS5 over Tailscale (userspace) and runs
 
    | Var | Value |
    |---|---|
-   | `SSH_PRIVATE_KEY` | CI ed25519 private key (the one authorized on the VPS, = GH secret `SSH_PRIVATE_KEY`) |
+   | `SSH_PRIVATE_KEY_B64` | CI ed25519 private key, **base64-encoded** (preferred — survives single-line env storage). Set headless with: `base64 < ~/.ssh/id_ed25519_ci \| tr -d '\n' \| railway variables -s live-bridge --set-from-stdin SSH_PRIVATE_KEY_B64`. Fallback: `SSH_PRIVATE_KEY` (raw multiline). |
    | `TS_AUTHKEY` | Tailscale **ephemeral + reusable** authkey, tag `tag:ci` |
    | `VPS5_HOST` | `100.70.228.19` (optional, this is the default) |
    | `LIVE_INTERVAL_SECS` | `3` (optional, default 3) |

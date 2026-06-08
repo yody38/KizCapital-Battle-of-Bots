@@ -6,8 +6,10 @@
 # 3. Reconnect forever if the session or the tailnet drops.
 #
 # Required env (set ONLY in Railway, never committed):
-#   SSH_PRIVATE_KEY    CI ed25519 private key (authorized on VPS5)
-#   TS_AUTHKEY         Tailscale ephemeral reusable authkey (tag:ci)
+#   SSH_PRIVATE_KEY_B64  CI ed25519 private key, base64-encoded (preferred —
+#                        survives single-line env storage); OR
+#   SSH_PRIVATE_KEY      the raw multiline key (fallback)
+#   TS_AUTHKEY           Tailscale ephemeral reusable authkey (tag:ci)
 # Optional:
 #   VPS5_HOST          default 100.70.228.19
 #   LIVE_INTERVAL_SECS default 3
@@ -20,7 +22,11 @@ SCRIPT='C:\mt5-mcp\live_publisher.py'
 
 # --- SSH key + config ----------------------------------------------------
 mkdir -p /root/.ssh
-printf '%s\n' "$SSH_PRIVATE_KEY" > /root/.ssh/id_ed25519
+if [ -n "${SSH_PRIVATE_KEY_B64:-}" ]; then
+  printf '%s' "$SSH_PRIVATE_KEY_B64" | base64 -d > /root/.ssh/id_ed25519
+else
+  printf '%s\n' "${SSH_PRIVATE_KEY:-}" > /root/.ssh/id_ed25519
+fi
 chmod 600 /root/.ssh/id_ed25519
 cat > /root/.ssh/config <<EOF
 Host vps5
