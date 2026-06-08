@@ -381,6 +381,15 @@ if ! python3 "$SCRIPT_DIR/reconcile_snapshot.py" >> "$LOG" 2>&1; then
   exit 3
 fi
 
+# Pull the append-only forward-tracker ledger from Supabase BEFORE post_merge so it
+# appends to the real history. The CI runner starts without it (data/ is gitignored,
+# not mirrored), so otherwise post_merge rebuilt it empty and the upload clobbered
+# the deployed history every cycle. Fail-closed: abort if the fetch errors.
+if ! python3 "$SCRIPT_DIR/fetch_ledger.py" >> "$LOG" 2>&1; then
+  echo "[$(ts)] fetch_ledger FAIL — aborting cycle (would clobber tracker history)" >> "$LOG"
+  exit 3
+fi
+
 # Post-merge enrichment: Promotion Score + correlation matrix + portfolio.
 # Fail-closed: if this breaks, scores/correlations/portfolio.json go stale and
 # the dashboard would mix fresh raw data with old derived data — abort.
