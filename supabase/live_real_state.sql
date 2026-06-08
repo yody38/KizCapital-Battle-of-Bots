@@ -25,6 +25,22 @@ create table if not exists public.live_real_state (
 
 create index if not exists idx_live_real_state_ts on public.live_real_state (ts desc);
 
+-- Authoritative server-side timestamp: stamp ts = now() on every insert/update so
+-- freshness is immune to the publisher's (VPS5 Windows) clock skew, and an
+-- out-of-order/replayed write can't carry a misleading older ts. The dashboard
+-- pill derives age from this ts.
+create or replace function public.live_real_state_set_ts() returns trigger as $$
+begin
+  new.ts := now();
+  return new;
+end;
+$$ language plpgsql;
+
+drop trigger if exists trg_live_real_state_ts on public.live_real_state;
+create trigger trg_live_real_state_ts
+  before insert or update on public.live_real_state
+  for each row execute function public.live_real_state_set_ts();
+
 alter table public.live_real_state enable row level security;
 
 -- Whitelisted authenticated users can read (same gate as the dashboard data bucket).

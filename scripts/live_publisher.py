@@ -34,6 +34,7 @@ import logging
 import os
 import socket
 import sys
+import threading
 import time
 from datetime import datetime, timezone
 from logging.handlers import RotatingFileHandler
@@ -57,9 +58,9 @@ HTTP_TIMEOUT = 5
 REAL_LOGINS: set[int] = {25425, 32081}
 TERMINAL_GLOB = r"C:\Program Files\MetaTrader 5 *\terminal64.exe"
 
-# Exit (so Railway restarts the SSH session) after this many consecutive cycles
-# that publish zero rows — indicates MT5 is unreachable / terminals are down.
-MAX_CONSECUTIVE_EMPTY = 20
+# Exit (so Railway restarts the SSH session) after a login is missing this many
+# consecutive cycles — indicates that terminal is unreachable / down.
+MAX_MISSING_STREAK = 6
 
 # login -> terminal path, learned on the first successful cycle so later cycles
 # init only the 2 real terminals instead of all ~12.
@@ -107,6 +108,15 @@ def _snapshot_terminal(path: str) -> dict[str, Any] | None:
             return None
         login = int(info.login)
         if login not in REAL_LOGINS:
+            return None
+
+        # DNA: never publish a fresh ts over stale data. If the terminal lost
+        # its broker link, account_info still returns the last cached snapshot —
+        # publishing it would paint the pill green over dead numbers. Skip the
+        # row instead; ts stops advancing and the dashboard goes stale → red.
+        ti = mt5.terminal_info()
+        if ti is None or not getattr(ti, "connected", False):
+            log.warning("terminal login=%s not connected to broker — skipping cycle", login)
             return None
 
         _login_path_cache[login] = path
@@ -212,19 +222,43 @@ def upsert_state(env: dict[str, str], rows: list[dict[str, Any]]) -> bool:
 
 # --- Main loop -----------------------------------------------------------
 
-def publish_once(env: dict[str, str]) -> int:
+def publish_once(env: dict[str, str]) -> set[int]:
+    """Return the set of logins successfully published this cycle (empty on failure)."""
     rows = collect_real_snapshots()
     if not rows:
-        return 0
+        return set()
     ok = upsert_state(env, rows)
-    if ok:
-        log.info(
-            "published %d rows (logins=%s ages_ms=%s)",
-            len(rows),
-            ",".join(str(r["login"]) for r in rows),
-            ",".join(str(r["source_age_ms"]) for r in rows),
-        )
-    return len(rows) if ok else 0
+    if not ok:
+        return set()
+    log.info(
+        "published %d rows (logins=%s ages_ms=%s)",
+        len(rows),
+        ",".join(str(r["login"]) for r in rows),
+        ",".join(str(r["source_age_ms"]) for r in rows),
+    )
+    return {int(r["login"]) for r in rows}
+
+
+def publish_once_timed(env: dict[str, str], timeout: float) -> set[int]:
+    """Run one cycle with a hard wall-clock cap. A hung mt5.initialize would
+    otherwise freeze the loop forever (zombie that never trips the exit guard);
+    here the loop keeps advancing, the per-login streak grows, and exit(1) lets
+    the Railway supervisor restart with a fresh process (which reaps the leaked
+    daemon thread)."""
+    box: dict[str, set[int]] = {}
+    def _run() -> None:
+        try:
+            box["v"] = publish_once(env)
+        except Exception as exc:  # noqa: BLE001
+            log.exception("publish_once crashed: %s", exc)
+            box["v"] = set()
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
+    t.join(timeout)
+    if t.is_alive():
+        log.error("publish cycle exceeded %ss (MT5 hung?) — treating as empty", timeout)
+        return set()
+    return box.get("v", set())
 
 
 def main() -> None:
@@ -242,32 +276,37 @@ def main() -> None:
     )
 
     backoff = interval
-    consecutive_empty = 0
+    cycle_timeout = max(10.0, interval * 4)
+    # Per-login miss streak: a login missing for MAX_MISSING_STREAK cycles trips
+    # exit(1). Tracking per-login (not a global empty counter) catches the case
+    # where one terminal is permanently dead while the other keeps publishing —
+    # the old global counter reset every cycle and never fired.
+    missing_streak = {lg: 0 for lg in REAL_LOGINS}
 
     while True:
         loop_start = time.monotonic()
-        try:
-            count = publish_once(env)
-            if count == len(REAL_LOGINS):
-                backoff = interval
-                consecutive_empty = 0
-            else:
-                if count == 0:
-                    consecutive_empty += 1
-                else:
-                    consecutive_empty = 0
-                backoff = min(60, max(interval * 2, backoff * 2))
-                log.warning("partial publish %d/%d · next sleep=%ss", count, len(REAL_LOGINS), backoff)
-        except Exception as exc:  # noqa: BLE001
-            log.exception("publish_once crashed: %s", exc)
-            consecutive_empty += 1
-            backoff = min(60, max(interval * 2, backoff * 2))
+        published = publish_once_timed(env, cycle_timeout)
+        for lg in REAL_LOGINS:
+            missing_streak[lg] = 0 if lg in published else missing_streak[lg] + 1
+
+        if published == REAL_LOGINS:
+            backoff = interval
+        else:
+            backoff = min(20, max(interval * 2, backoff * 2))
+            log.warning(
+                "partial publish %d/%d · missing_streak=%s · next sleep=%ss",
+                len(published), len(REAL_LOGINS), missing_streak, backoff,
+            )
 
         if args.once:
             return
 
-        if consecutive_empty >= MAX_CONSECUTIVE_EMPTY:
-            log.error("%d consecutive empty cycles — exiting so the supervisor restarts", consecutive_empty)
+        worst = max(missing_streak.values())
+        if worst >= MAX_MISSING_STREAK:
+            log.error(
+                "login(s) missing %d consecutive cycles (%s) — exiting so the supervisor restarts",
+                worst, {k: v for k, v in missing_streak.items() if v >= MAX_MISSING_STREAK},
+            )
             sys.exit(1)
 
         elapsed = time.monotonic() - loop_start

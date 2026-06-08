@@ -28,12 +28,16 @@ else
   printf '%s\n' "${SSH_PRIVATE_KEY:-}" > /root/.ssh/id_ed25519
 fi
 chmod 600 /root/.ssh/id_ed25519
+# Pinned host key (baked at build via ssh-keyscan) — no TOFU/accept-new window.
+cp /etc/kiz_known_hosts /root/.ssh/known_hosts 2>/dev/null || true
+chmod 644 /root/.ssh/known_hosts 2>/dev/null || true
 cat > /root/.ssh/config <<EOF
 Host vps5
   HostName ${VPS5_HOST}
   User trader
   IdentityFile /root/.ssh/id_ed25519
-  StrictHostKeyChecking accept-new
+  UserKnownHostsFile /root/.ssh/known_hosts
+  StrictHostKeyChecking yes
   ServerAliveInterval 15
   ServerAliveCountMax 3
   ConnectTimeout 20

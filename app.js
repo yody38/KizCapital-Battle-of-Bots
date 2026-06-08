@@ -465,6 +465,7 @@ function refreshLivePillFromState() {
   const age = liveLatestAgeSecs();
   if (age == null) {
     setLivePillStatus('off', 'sin push', null);
+    setLiveUnverified(false);  // no live ever attached → snapshot path owns the cifras
     return;
   }
   // Publisher pushes every ~3s (Railway-held SSH loop). Thresholds tuned to
@@ -472,6 +473,15 @@ function refreshLivePillFromState() {
   if (age < 8) setLivePillStatus('on', 'live', age);
   else if (age < 20) setLivePillStatus('warn', 'lag', age);
   else setLivePillStatus('off', 'stale', age);
+  // Fail-closed (DNA): once the live stream has stalled well past cadence, the
+  // numbers on screen are NO LONGER verifiable in real time. Degrade the SOURCE
+  // visibly instead of silently showing a stale figure as if it were live.
+  setLiveUnverified(age >= 30);
+}
+
+function setLiveUnverified(on) {
+  const section = document.getElementById('real-accounts');
+  if (section) section.classList.toggle('live-unverified', !!on);
 }
 
 function flashLive(el) {
@@ -481,15 +491,15 @@ function flashLive(el) {
   el.classList.add('live-flash');
 }
 
-function _setTextWithFlash(el, text) {
+function _setTextWithFlash(el, text, flash = true) {
   if (!el) return;
   if (el.textContent !== text) {
     el.textContent = text;
-    flashLive(el);
+    if (flash) flashLive(el);
   }
 }
 
-function _setSignedTextWithFlash(el, value) {
+function _setSignedTextWithFlash(el, value, flash = true) {
   if (!el) return;
   const text = fmt.usd(value, true);
   el.classList.remove('positive', 'negative');
@@ -497,7 +507,7 @@ function _setSignedTextWithFlash(el, value) {
   if (sc) el.classList.add(sc);
   if (el.textContent !== text) {
     el.textContent = text;
-    flashLive(el);
+    if (flash) flashLive(el);
   }
 }
 
@@ -526,21 +536,28 @@ function buildPositionRowHtml(p) {
   `;
 }
 
-function applyLivePatch(row) {
+function applyLivePatch(row, opts) {
   if (!row || row.login == null) return;
-  liveState.byLogin.set(Number(row.login), row);
+  const flash = !(opts && opts.silent);
+  const login = Number(row.login);
+
+  // Out-of-order guard: never let an older write clobber a fresher value already
+  // shown (rolling-deploy double-publisher, a manual --once, or a Realtime replay).
+  const prev = liveState.byLogin.get(login);
+  if (prev && (Date.parse(row.ts) || 0) < (Date.parse(prev.ts) || 0)) return;
+  liveState.byLogin.set(login, row);
 
   // Update card.
-  const card = document.querySelector(`.real-card[data-real-login="${row.login}"]`);
+  const card = document.querySelector(`.real-card[data-real-login="${login}"]`);
   if (card) {
     const balanceEl = card.querySelector('[data-live-field="balance"]');
     const equityEl = card.querySelector('[data-live-field="equity"]');
     const profitEl = card.querySelector('[data-live-field="profit"]');
     const marginEl = card.querySelector('[data-live-field="margin"]');
-    _setTextWithFlash(balanceEl, fmt.usd(row.balance));
-    _setTextWithFlash(equityEl, fmt.usd(row.equity));
-    _setSignedTextWithFlash(profitEl, row.profit);
-    _setTextWithFlash(marginEl, fmt.usd(row.margin));
+    _setTextWithFlash(balanceEl, fmt.usd(row.balance), flash);
+    _setTextWithFlash(equityEl, fmt.usd(row.equity), flash);
+    _setSignedTextWithFlash(profitEl, row.profit, flash);
+    _setTextWithFlash(marginEl, fmt.usd(row.margin), flash);
   }
 
   // Update header totals — aggregate across all known logins.
@@ -550,9 +567,9 @@ function applyLivePatch(row) {
     totEq += Number(r.equity) || 0;
     totFloat += Number(r.profit) || 0;
   }
-  _setTextWithFlash(document.getElementById('real-balance'), fmt.usd(totBal));
-  _setTextWithFlash(document.getElementById('real-equity'), fmt.usd(totEq));
-  _setSignedTextWithFlash(document.getElementById('real-floating'), totFloat);
+  _setTextWithFlash(document.getElementById('real-balance'), fmt.usd(totBal), flash);
+  _setTextWithFlash(document.getElementById('real-equity'), fmt.usd(totEq), flash);
+  _setSignedTextWithFlash(document.getElementById('real-floating'), totFloat, flash);
 
   // Update positions table — replace the rows for this login, leave others.
   const tbody = document.getElementById('real-positions-tbody');
@@ -584,16 +601,21 @@ function initLiveStream() {
     rows.forEach(applyLivePatch);
   }).catch((err) => console.warn('[kiz] live initial fetch failed', err));
 
+  // Unsubscribe a prior channel before re-subscribing (defensive against leaks).
+  if (liveState.channel) window.kizLiveReal.unsubscribe(liveState.channel);
   liveState.channel = window.kizLiveReal.subscribe(applyLivePatch);
 
   // 1-second pill refresh so age stays current even between pushes.
   if (liveState.pollTimer) clearInterval(liveState.pollTimer);
   liveState.pollTimer = setInterval(refreshLivePillFromState, 1000);
 
-  window.addEventListener('beforeunload', () => {
-    if (liveState.channel) window.kizLiveReal.unsubscribe(liveState.channel);
-    if (liveState.pollTimer) clearInterval(liveState.pollTimer);
-  });
+  const teardown = () => {
+    if (liveState.channel) { window.kizLiveReal.unsubscribe(liveState.channel); liveState.channel = null; }
+    if (liveState.pollTimer) { clearInterval(liveState.pollTimer); liveState.pollTimer = null; }
+  };
+  // pagehide covers bfcache / mobile where beforeunload doesn't fire.
+  window.addEventListener('beforeunload', teardown);
+  window.addEventListener('pagehide', teardown);
 }
 
 function renderRealAccounts() {
@@ -710,6 +732,15 @@ function renderRealAccounts() {
 
   // Activate Realtime stream (idempotent — only attaches once).
   initLiveStream();
+
+  // Anti-clobber: this render just rewrote the cards/totals/positions with the
+  // 30-min snapshot. initLiveStream() above is a no-op after the first call, so
+  // re-apply any live row at least as fresh as this snapshot — otherwise a real
+  // account shows a 30-min-old balance until the next push. Silent = no flash.
+  const snapTs = Date.parse(s.generated_at || 0) || 0;
+  liveState.byLogin.forEach((r) => {
+    if ((Date.parse(r.ts) || 0) >= snapTs) applyLivePatch(r, { silent: true });
+  });
 }
 
 function renderDemoWrapper() {

@@ -3662,6 +3662,24 @@ tr.bot-row:hover { background: rgba(124, 156, 255, 0.06); }
 }
 .live-flash { animation: liveFlash 1s ease-out; }
 
+/* Fail-closed: live stream stalled (age ≥ 30s) → the real-account figures are no
+   longer verifiable in real time. Degrade the source visibly. */
+#real-accounts.live-unverified { position: relative; }
+#real-accounts.live-unverified::before {
+  content: "⚠ Stream en vivo caído — cifras NO verificables en tiempo real (mostrando último dato conocido)";
+  display: block;
+  margin: 0 0 14px;
+  padding: 10px 16px;
+  border-radius: 12px;
+  background: rgba(255, 107, 139, 0.12);
+  border: 1px solid rgba(255, 107, 139, 0.45);
+  color: #ff9bb0;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.3px;
+}
+
 /* =====================================================================
    Subtitle counter chip (operaciones cerradas).
    ===================================================================== */

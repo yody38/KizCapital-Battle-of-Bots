@@ -18,6 +18,9 @@ COPY --from=ts /usr/local/bin/tailscale  /usr/local/bin/tailscale
 COPY --from=ts /usr/local/bin/tailscaled /usr/local/bin/tailscaled
 
 COPY entrypoint.sh /entrypoint.sh
+# VPS5 SSH host key, pinned at build time (ssh-keyscan'd from the tailnet) so the
+# worker verifies it instead of trusting-on-first-use (no accept-new).
+COPY known_hosts /etc/kiz_known_hosts
 RUN chmod +x /entrypoint.sh \
  && mkdir -p /var/run/tailscale /var/lib/tailscale /root/.ssh
 

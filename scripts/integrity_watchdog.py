@@ -57,6 +57,8 @@ VERCEL_URL = "https://kiz-capital-bots-kiz-capital-battle-of-bots-projects.verce
 # in case the watchdog catches a moment when CI is mid-cycle.
 STALE_TOLERANCE_SEC = 15 * 60
 MCP_DEADMAN_SEC = 20 * 60  # mcp-health runs */5 → >20min stale = 4 missed cycles = monitor dead
+LIVE_DEADMAN_SEC = 180     # live stream pushes every ~3s → >180s stale = worker/tailnet/MT5 dead
+LIVE_REAL_LOGINS = {25425, 32081}  # the 2 real accounts on VPS5
 
 
 # ---------- env / helpers ----------
@@ -418,6 +420,36 @@ def main() -> int:
                 fails.append(f"mcp-health dead-man: monitor last ran {int(age/60)}min ago (>20min)")
             if mcp.get("any_critical"):
                 fails.append(f"mcp-health critical: {mcp.get('summary')} VPS(s) failing")
+
+        # Step 4b — Live equity stream freshness (the 2 REAL accounts). This is the
+        # only pipeline without its own watchdog; if it dies (Railway down, TS
+        # authkey expired, SSH hung), the dashboard silently falls back to the
+        # 30-min snapshot. Verify BOTH real logins are fresh — full denominator,
+        # not "if one lives they all live".
+        try:
+            ep = f"{url.rstrip('/')}/rest/v1/live_real_state?select=login,ts"
+            req = urlrequest.Request(ep, headers={"Authorization": f"Bearer {key}", "apikey": key})
+            with urlrequest.urlopen(req, timeout=20) as r:
+                live_rows = json.loads(r.read())
+        except Exception as e:
+            live_rows = None
+            fails.append(f"live_real_state fetch failed: {e}")
+        if live_rows is not None:
+            ages = {}
+            for row in live_rows:
+                t = parse_iso(row.get("ts"))
+                if t and row.get("login") in LIVE_REAL_LOGINS:
+                    ages[int(row["login"])] = (now - t).total_seconds()
+            info["steps"]["live_stream"] = {"ages_sec": {str(k): int(v) for k, v in ages.items()}}
+            missing = LIVE_REAL_LOGINS - set(ages)
+            if missing:
+                fails.append(f"live-stream: no row for real login(s) {sorted(missing)}")
+            stale = {k: int(v) for k, v in ages.items() if v > LIVE_DEADMAN_SEC}
+            if stale:
+                fails.append(
+                    f"live-stream dead-man: real account(s) stale {stale}s "
+                    f"(>{LIVE_DEADMAN_SEC}s — Railway worker / tailnet / MT5 down?)"
+                )
 
     # Step 5 — Vercel version pin (warn only)
     app_v, css_v = vercel_version_pin()
