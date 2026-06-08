@@ -3615,8 +3615,52 @@ tr.bot-row:hover { background: rgba(124, 156, 255, 0.06); }
   .cmp-fab-label { display: none; }
 }
 
-/* Live equity stream removed 2026-05-17 — real accounts now update every
-   30 min via the regular snapshot path (no live pill, no flash animation). */
+/* =====================================================================
+   Live equity stream (real accounts) — pill + flash.
+   ===================================================================== */
+.real-header { position: relative; }
+.live-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+  padding: 6px 12px;
+  border-radius: 999px;
+  background: rgba(26, 22, 44, 0.6);
+  border: 1px solid rgba(255,255,255,0.08);
+  color: #cfd5e6;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.6px;
+  cursor: pointer;
+  user-select: none;
+  transition: background 160ms ease, border-color 160ms ease, color 160ms ease;
+}
+.live-pill:hover { background: rgba(36, 30, 60, 0.85); }
+.live-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: currentColor;
+  box-shadow: 0 0 0 0 currentColor;
+}
+.live-pill-label { text-transform: uppercase; }
+.live-pill-age { color: #9aa3bb; font-weight: 600; letter-spacing: 0; }
+.live-pill.live-on { color: #3ddc97; border-color: rgba(61, 220, 151, 0.35); }
+.live-pill.live-on .live-dot { animation: livePulse 1.4s ease-in-out infinite; }
+.live-pill.live-warn { color: #ffb86b; border-color: rgba(255, 184, 107, 0.4); }
+.live-pill.live-warn .live-dot { animation: livePulse 0.9s ease-in-out infinite; }
+.live-pill.live-off { color: #ff6b8b; border-color: rgba(255, 107, 139, 0.35); }
+@keyframes livePulse {
+  0%, 100% { box-shadow: 0 0 0 0 currentColor; opacity: 1; }
+  50%      { box-shadow: 0 0 0 5px rgba(0,0,0,0); opacity: 0.6; }
+}
+@keyframes liveFlash {
+  0%   { background: rgba(61, 220, 151, 0.45); box-shadow: 0 0 12px rgba(61,220,151,0.55); }
+  100% { background: transparent; box-shadow: none; }
+}
+.live-flash { animation: liveFlash 1s ease-out; }
 
 /* =====================================================================
    Subtitle counter chip (operaciones cerradas).

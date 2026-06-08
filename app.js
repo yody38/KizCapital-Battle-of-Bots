@@ -53,6 +53,14 @@ const state = {
   compareList: [], // {vps, login, magic, bot, trades, daily}
 };
 
+// Live equity stream (real accounts) — populated by initLiveStream().
+const liveState = {
+  channel: null,
+  initialized: false,
+  byLogin: new Map(),     // login -> latest row from public.live_real_state
+  pollTimer: null,
+};
+
 // --- Math helpers --------------------------------------------------------
 
 function wilsonLB(wins, n, z = 1.96) {
@@ -412,6 +420,182 @@ function drawSpark(canvas, points, color) {
   } catch (err) { console.warn('sparkline failed', err); }
 }
 
+function ensureLivePill() {
+  let pill = document.getElementById('live-pill');
+  if (pill) return pill;
+  const header = document.querySelector('.real-header');
+  if (!header) return null;
+  pill = document.createElement('div');
+  pill.id = 'live-pill';
+  pill.className = 'live-pill live-off';
+  pill.title = 'Stream en tiempo real desde la VPS · click para forzar fetch';
+  pill.innerHTML = '<span class="live-dot"></span><span class="live-pill-label">offline</span><span class="live-pill-age"></span>';
+  pill.addEventListener('click', async () => {
+    if (!window.kizLiveReal) return;
+    const rows = await window.kizLiveReal.fetchOnce();
+    rows.forEach(applyLivePatch);
+  });
+  header.appendChild(pill);
+  return pill;
+}
+
+function setLivePillStatus(state, label, ageSecs) {
+  const pill = document.getElementById('live-pill');
+  if (!pill) return;
+  pill.classList.remove('live-on', 'live-warn', 'live-off');
+  pill.classList.add(`live-${state}`);
+  pill.querySelector('.live-pill-label').textContent = label;
+  const ageEl = pill.querySelector('.live-pill-age');
+  ageEl.textContent = ageSecs == null ? '' : `· ${ageSecs.toFixed(1)}s`;
+}
+
+function liveLatestAgeSecs() {
+  let oldest = null;
+  for (const row of liveState.byLogin.values()) {
+    const t = new Date(row.ts).getTime();
+    if (Number.isFinite(t)) {
+      if (oldest == null || t < oldest) oldest = t;
+    }
+  }
+  if (oldest == null) return null;
+  return Math.max(0, (Date.now() - oldest) / 1000);
+}
+
+function refreshLivePillFromState() {
+  const age = liveLatestAgeSecs();
+  if (age == null) {
+    setLivePillStatus('off', 'sin push', null);
+    return;
+  }
+  // Publisher pushes every ~3s (Railway-held SSH loop). Thresholds tuned to
+  // that cadence: green while fresh, amber on lag, red when the stream stalls.
+  if (age < 8) setLivePillStatus('on', 'live', age);
+  else if (age < 20) setLivePillStatus('warn', 'lag', age);
+  else setLivePillStatus('off', 'stale', age);
+}
+
+function flashLive(el) {
+  if (!el) return;
+  el.classList.remove('live-flash');
+  void el.offsetWidth;
+  el.classList.add('live-flash');
+}
+
+function _setTextWithFlash(el, text) {
+  if (!el) return;
+  if (el.textContent !== text) {
+    el.textContent = text;
+    flashLive(el);
+  }
+}
+
+function _setSignedTextWithFlash(el, value) {
+  if (!el) return;
+  const text = fmt.usd(value, true);
+  el.classList.remove('positive', 'negative');
+  const sc = signedClass(value);
+  if (sc) el.classList.add(sc);
+  if (el.textContent !== text) {
+    el.textContent = text;
+    flashLive(el);
+  }
+}
+
+function buildPositionRowHtml(p) {
+  const fmtDist = (price, target) => {
+    if (!price || !target) return '—';
+    const d = distancePct(price, target);
+    if (d == null || !isFinite(d)) return target;
+    return `${target} (${d > 0 ? '+' : ''}${d.toFixed(2)}%)`;
+  };
+  const typeStr = (p.type || '').toString();
+  return `
+    <tr data-position-login="${p.login}" data-position-ticket="${p.ticket}">
+      <td>#${p.login}</td>
+      <td><code>${p.magic}</code></td>
+      <td><span class="symbol-tag">${p.symbol}</span></td>
+      <td class="pos-${typeStr.toLowerCase()}">${typeStr}</td>
+      <td class="num">${p.volume}</td>
+      <td class="num">${p.price_open}</td>
+      <td class="num">${p.price_current}</td>
+      <td class="num">${fmtDist(p.price_current, p.sl)}</td>
+      <td class="num">${fmtDist(p.price_current, p.tp)}</td>
+      <td class="num ${signedClass(p.profit)}">${fmt.usd(p.profit, true)}</td>
+      <td>${fmt.shortTime(p.time_open ? new Date(p.time_open * 1000).toISOString() : null)}</td>
+    </tr>
+  `;
+}
+
+function applyLivePatch(row) {
+  if (!row || row.login == null) return;
+  liveState.byLogin.set(Number(row.login), row);
+
+  // Update card.
+  const card = document.querySelector(`.real-card[data-real-login="${row.login}"]`);
+  if (card) {
+    const balanceEl = card.querySelector('[data-live-field="balance"]');
+    const equityEl = card.querySelector('[data-live-field="equity"]');
+    const profitEl = card.querySelector('[data-live-field="profit"]');
+    const marginEl = card.querySelector('[data-live-field="margin"]');
+    _setTextWithFlash(balanceEl, fmt.usd(row.balance));
+    _setTextWithFlash(equityEl, fmt.usd(row.equity));
+    _setSignedTextWithFlash(profitEl, row.profit);
+    _setTextWithFlash(marginEl, fmt.usd(row.margin));
+  }
+
+  // Update header totals — aggregate across all known logins.
+  let totBal = 0, totEq = 0, totFloat = 0;
+  for (const r of liveState.byLogin.values()) {
+    totBal += Number(r.balance) || 0;
+    totEq += Number(r.equity) || 0;
+    totFloat += Number(r.profit) || 0;
+  }
+  _setTextWithFlash(document.getElementById('real-balance'), fmt.usd(totBal));
+  _setTextWithFlash(document.getElementById('real-equity'), fmt.usd(totEq));
+  _setSignedTextWithFlash(document.getElementById('real-floating'), totFloat);
+
+  // Update positions table — replace the rows for this login, leave others.
+  const tbody = document.getElementById('real-positions-tbody');
+  const empty = document.getElementById('real-positions-empty');
+  if (tbody) {
+    tbody
+      .querySelectorAll(`tr[data-position-login="${row.login}"]`)
+      .forEach((tr) => tr.remove());
+    const positions = Array.isArray(row.positions) ? row.positions : [];
+    positions.forEach((p) => {
+      const html = buildPositionRowHtml({ ...p, login: row.login });
+      tbody.insertAdjacentHTML('beforeend', html);
+    });
+    const anyPositions = !!tbody.querySelector('tr');
+    if (empty) empty.hidden = anyPositions;
+  }
+
+  refreshLivePillFromState();
+}
+
+function initLiveStream() {
+  if (liveState.initialized || !window.kizLiveReal) return;
+  liveState.initialized = true;
+  ensureLivePill();
+  refreshLivePillFromState();
+
+  // Initial fetch so the UI doesn't wait for the first push.
+  window.kizLiveReal.fetchOnce().then((rows) => {
+    rows.forEach(applyLivePatch);
+  }).catch((err) => console.warn('[kiz] live initial fetch failed', err));
+
+  liveState.channel = window.kizLiveReal.subscribe(applyLivePatch);
+
+  // 1-second pill refresh so age stays current even between pushes.
+  if (liveState.pollTimer) clearInterval(liveState.pollTimer);
+  liveState.pollTimer = setInterval(refreshLivePillFromState, 1000);
+
+  window.addEventListener('beforeunload', () => {
+    if (liveState.channel) window.kizLiveReal.unsubscribe(liveState.channel);
+    if (liveState.pollTimer) clearInterval(liveState.pollTimer);
+  });
+}
+
 function renderRealAccounts() {
   const s = state.snapshot;
   const section = document.getElementById('real-accounts');
@@ -478,7 +662,7 @@ function renderRealAccounts() {
       return `${target} (${d > 0 ? '+' : ''}${d.toFixed(2)}%)`;
     };
     posBody.innerHTML = rp.open_positions.map(p => `
-        <tr>
+        <tr data-position-login="${p.login}" data-position-ticket="${p.ticket}">
           <td>#${p.login}</td>
           <td><code>${p.magic}</code></td>
           <td><span class="symbol-tag">${p.symbol}</span></td>
@@ -523,6 +707,9 @@ function renderRealAccounts() {
       </tr>
     `).join('');
   }
+
+  // Activate Realtime stream (idempotent — only attaches once).
+  initLiveStream();
 }
 
 function renderDemoWrapper() {
