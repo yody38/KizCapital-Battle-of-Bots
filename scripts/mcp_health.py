@@ -58,6 +58,12 @@ SSH_TIMEOUT = 8
 STALE_SEC = int(os.environ.get("MCP_HEALTH_STALE_SEC", 2700))
 FAIL_THRESHOLD = 2
 AUTO_RECOVERY = os.environ.get("AUTO_RECOVERY", "0") == "1"
+# Free-RAM early warning. The failure that froze the dashboard for 2h was a
+# low-RAM VPS (1-1.5GB / 11 MT5 terminals) exhausting its pagefile → sshd could
+# no longer fork scp/the builder. We probe free RAM each cycle so a VPS trending
+# toward exhaustion alerts BEFORE it cascades. Below CRIT → degraded (alerts).
+LOW_RAM_WARN_MB = int(os.environ.get("MCP_HEALTH_LOW_RAM_MB", 250))
+CRIT_RAM_MB = int(os.environ.get("MCP_HEALTH_CRIT_RAM_MB", 120))
 
 REMOTE_SNAPSHOT = "C:/mt5-mcp/snapshot.json"
 
@@ -150,6 +156,26 @@ def probe_vps(vps_id: str, host: str) -> dict:
         result["status"] = "stale"
         result["fail_reason"] = f"snapshot age {age}s > {STALE_SEC}s"
         return result
+
+    # 3. Free-RAM early warning (the VPS3-freeze failure mode). Cheap PS query;
+    #    when RAM is already exhausted the snapshot read above would have failed,
+    #    so reaching here means we can usually measure it.
+    ps_mem = (
+        "powershell -NoProfile -Command "
+        "\"[int]((Get-CimInstance Win32_OperatingSystem).FreePhysicalMemory/1024)\""
+    )
+    rc, stdout, stderr, ms = ssh_cmd(host, ps_mem, timeout=12)
+    try:
+        free_mb = int(stdout.strip())
+        result["free_ram_mb"] = free_mb
+        if free_mb < CRIT_RAM_MB:
+            result["status"] = "degraded"
+            result["fail_reason"] = f"free RAM {free_mb}MB < {CRIT_RAM_MB}MB (pagefile-exhaustion risk)"
+            return result
+        if free_mb < LOW_RAM_WARN_MB:
+            result["low_ram_warn"] = True
+    except (ValueError, TypeError):
+        pass  # could not measure; hard failures are already gated by the snapshot read
 
     result["status"] = "ok"
     return result
