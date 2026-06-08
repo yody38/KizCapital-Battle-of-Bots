@@ -335,12 +335,35 @@ def main() -> int:
                     if lag > STALE_TOLERANCE_SEC:
                         fails.append(f"supabase stale: {int(lag)}s behind CI run")
 
+            # gate on the 'upload' subsection written by upload_to_supabase.py —
+            # verify runs BEFORE upload, so integrity ok can be true while the
+            # upload is stuck. Without this the UPLOAD_STUCK signal never alerts.
+            up = supa_report.get("upload")
+            if up is None:
+                fails.append("supabase integrity_report missing 'upload' section (re-upload failed or stale)")
+            elif not up.get("ok", True):
+                fails.append(
+                    f"upload not ok: failed={up.get('failed')} stuck={up.get('stuck_count')} "
+                    f"classes={up.get('fail_by_class')}"
+                )
+            info["steps"]["upload"] = up
+
         # Step 4 — HEAD probe per-bot files
         code, snap = supa_get_json(url, key, "snapshot.json")
         if code != 200 or not snap:
             fails.append(f"supabase snapshot.json fetch http={code}")
             info["steps"]["files"] = {"error": f"snapshot_http={code}"}
         else:
+            # Pipeline wall-clock dead-man: if the whole cron/CI died, the deployed
+            # snapshot.generated_at stops advancing (the vps_freshness inside it is
+            # frozen, so it cannot self-detect this). Precedent: mcp-health dead 12d.
+            snap_t = parse_iso(snap.get("generated_at"))
+            snap_age = (datetime.now(timezone.utc) - snap_t).total_seconds() if snap_t else None
+            info["steps"]["snapshot_age_sec"] = int(snap_age) if snap_age is not None else None
+            if snap_age is None:
+                fails.append("supabase snapshot.json has no parseable generated_at")
+            elif snap_age > 90 * 60:
+                fails.append(f"pipeline dead-man: snapshot {int(snap_age/60)}min old (>90min — cron/CI stalled)")
             bots = [b for b in snap.get("bots", []) if b.get("magic", 0) != 0]
             missing = head_all_bot_files(url, key, bots)
             info["steps"]["files"] = {

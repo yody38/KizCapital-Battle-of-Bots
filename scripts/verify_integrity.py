@@ -52,6 +52,13 @@ BUCKET = "dashboard-data"
 
 DEFAULT_TOLERANCE = 0.05  # USD
 
+# Known real-money accounts (single-owner charter). Anchoring the freshness check
+# to this constant — rather than len(is_real) vs real_portfolio.account_count, which
+# are both derived from the same merge and therefore tautological — actually catches
+# a real account silently dropping out. Adding a 3rd real account requires editing
+# this set (documented manual maintenance, same pattern as vps-access).
+EXPECTED_REAL = {("vps5", 25425), ("vps5", 32081)}
+
 
 def load_env() -> dict[str, str]:
     if not ENV_FILE.exists():
@@ -166,12 +173,20 @@ def check_freshness(snap: dict) -> tuple[list[str], list[str], dict]:
     real_accts = [a for a in accounts if a.get("is_real")]
     detail: dict = {"real_accounts": [], "demo_on_stale_vps": 0}
 
-    # (a) Real-account count must match real_portfolio (catches a real dropping out).
-    expected_real = (snap.get("real_portfolio") or {}).get("account_count")
-    if isinstance(expected_real, int) and len(real_accts) != expected_real:
+    # (a) Each EXPECTED real account must be present (anchored to a constant, not a
+    #     same-source count — see EXPECTED_REAL). Missing = a real silently dropped.
+    present_real = {(a.get("vps"), a.get("login")) for a in real_accts}
+    missing_real = EXPECTED_REAL - present_real
+    if missing_real:
         hard.append(
-            f"freshness: real account count mismatch — accounts.is_real={len(real_accts)} "
-            f"real_portfolio.account_count={expected_real}"
+            f"freshness: expected real account(s) ABSENT from snapshot: "
+            f"{sorted(missing_real)} (present reals: {sorted(present_real)})"
+        )
+    extra_real = present_real - EXPECTED_REAL
+    if extra_real:
+        warn.append(
+            f"freshness: unexpected real account(s) {sorted(extra_real)} — "
+            f"add to EXPECTED_REAL in verify_integrity.py to gate them"
         )
 
     # (b) Each real account's hosting VPS must be fresh and present.
@@ -186,6 +201,12 @@ def check_freshness(snap: dict) -> tuple[list[str], list[str], dict]:
         elif vf.get("present") is False:
             status, live_feed = "vps_absent", False
             hard.append(f"freshness: real {login} — hosting VPS {vps} ABSENT from this cycle")
+        elif vf.get("corrupt") or vf.get("error"):
+            status, live_feed = "vps_corrupt", False
+            hard.append(
+                f"freshness: real {login} — hosting VPS {vps} snapshot CORRUPT/UNREADABLE "
+                f"({vf.get('error')})"
+            )
         elif vf.get("stale"):
             status, live_feed = "vps_stale", False
             hard.append(f"freshness: real {login} — hosting VPS {vps} STALE (lag={vf.get('lag_sec')}s)")
@@ -279,13 +300,27 @@ def main() -> int:
     freshness_hard, freshness_warn, freshness_detail = check_freshness(snap)
     all_fails.extend(freshness_hard)
 
-    # Forward-tracker ledger corruption gate (post_merge surfaces tracker_health).
+    # Forward-tracker ledger health (post_merge surfaces tracker_health):
+    # >5 corrupt = hard gate; >=1 = warn (gradient); empty ledger while READY/NEAR
+    # bots exist = tracker not recording (warn).
     tracker_health = snap.get("tracker_health") or {}
     tracker_corrupt = tracker_health.get("corrupt_lines", 0)
     if tracker_corrupt > 5:
         all_fails.append(
             f"tracker_health: {tracker_corrupt} corrupt lines in candidates_history.jsonl (>5)"
         )
+    elif tracker_corrupt >= 1:
+        freshness_warn.append(
+            f"tracker_health: {tracker_corrupt} corrupt line(s) in candidates_history.jsonl"
+        )
+    if tracker_health.get("history_lines", 0) == 0:
+        n_candidates = sum(
+            1 for b in snap.get("bots", []) if b.get("promotion_status") in ("READY", "NEAR")
+        )
+        if n_candidates:
+            freshness_warn.append(
+                f"tracker_health: ledger empty but {n_candidates} READY/NEAR bot(s) exist"
+            )
 
     remote_fails: list[str] = []
     if args.check_remote:

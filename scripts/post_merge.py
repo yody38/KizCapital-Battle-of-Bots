@@ -558,8 +558,17 @@ def update_forward_tracker(snap, data_dir, today_iso):
 
     today_only = today_iso[:10]
     appended = 0
+    # Do NOT append onto a corrupt ledger — that compounds corruption and the
+    # verify_integrity gate would then fail the cycle anyway. Skip today's write
+    # (corrupt_lines is surfaced via tracker_health for triage).
+    if corrupt_lines:
+        print(
+            f"[post_merge]   tracker: skipping today's append — ledger has "
+            f"{corrupt_lines} corrupt line(s), fix candidates_history.jsonl first",
+            file=sys.stderr,
+        )
     with open(history_path, "a") as f:
-        for b in snap.get("bots", []):
+        for b in (snap.get("bots", []) if not corrupt_lines else []):
             status = b.get("promotion_status")
             if status not in PORTFOLIO_MIN_STATUS:
                 continue
@@ -2210,7 +2219,10 @@ def compute_vps_freshness(data_dir, vps_ids=None):
                 # Fallback: file mtime
                 gen_t = datetime.fromtimestamp(os.path.getmtime(p), tz=timezone.utc)
             lag = (now - gen_t).total_seconds()
-            stale = lag > 90 * 60  # > 90 min = stale (3 missed cycles)
+            # > 90 min behind = stale (3 missed cycles). lag < -5 min = clock skew /
+            # future-dated snapshot: treat as stale too, else a forward clock would
+            # present rancid-but-future data as fresh and slip past the freshness gate.
+            stale = lag > 90 * 60 or lag < -300
             out[v] = {
                 "present": True,
                 "generated_at": gen_t.isoformat(timespec="seconds"),
@@ -2221,7 +2233,10 @@ def compute_vps_freshness(data_dir, vps_ids=None):
             if stale:
                 partial = True
         except Exception as e:
-            out[v] = {"present": True, "error": str(e)}
+            # Corrupt/unreadable VPS snapshot: mark stale+corrupt so the freshness
+            # gate (verify_integrity.check_freshness) hard-fails for real accounts
+            # on this VPS instead of silently passing (present=True, stale absent).
+            out[v] = {"present": True, "error": str(e), "stale": True, "corrupt": True}
             partial = True
     return out, partial
 

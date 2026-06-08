@@ -338,10 +338,16 @@ def main() -> int:
     # Patch integrity_report.json (verify_integrity ran BEFORE upload, so it
     # can't carry upload state on its own) and re-upload only the two status
     # files so the deployed dashboard sees them within the same cycle.
+    status_reupload_failed = False
     try:
         if REPORT_FILE.exists():
             rep = json.loads(REPORT_FILE.read_text(encoding="utf-8"))
             rep["upload"] = upload_status
+            # If the upload itself isn't clean, the deployed data is incomplete:
+            # flip integrity ok=false so the dashboard banner + watchdog reflect it.
+            if not upload_status["ok"]:
+                rep["ok"] = False
+                rep.setdefault("summary", {})["upload_not_ok"] = True
             REPORT_FILE.write_text(json.dumps(rep, indent=2), encoding="utf-8")
             for status_obj in ("integrity_report.json", "upload_health.json"):
                 sp = DATA_DIR / status_obj
@@ -349,9 +355,11 @@ def main() -> int:
                     try:
                         uploader.upload(status_obj, sp)
                     except Exception as exc:  # noqa: BLE001
+                        status_reupload_failed = True
                         cls = classify_exc(exc)
                         print(f"[upload]   status re-upload FAILED {status_obj}: {exc} [{cls}]", file=sys.stderr)
     except Exception as exc:  # noqa: BLE001
+        status_reupload_failed = True
         print(f"[upload]   could not patch integrity_report.json: {exc}", file=sys.stderr)
 
     print(
@@ -367,6 +375,7 @@ def main() -> int:
     if failed:
         for line in failed[:10]:
             print(f"[upload]   FAIL {line}", file=sys.stderr)
+    if failed or status_reupload_failed:
         return 2
     return 0
 
