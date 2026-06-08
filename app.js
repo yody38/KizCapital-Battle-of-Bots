@@ -47,7 +47,6 @@ const state = {
   sparkCharts: {},
   candidatesStatusFilter: 'READY',
   correlations: null,
-  driftSeverityFilter: 'all',
   query: { text: '', visible: false, savedViews: [] },
   compareList: [], // {vps, login, magic, bot, trades, daily}
 };
@@ -81,6 +80,12 @@ async function loadSnapshot() {
     state.bots = (data.bots || []).map((b, i) => ({ ...b, _rank: i + 1 }));
     const realAccts = (data.real_portfolio && data.real_portfolio.accounts) || [];
     state.realLogins = new Set(realAccts.map(a => a.login));
+    // Magics (EAs) currently deployed to a real account — by closed trades this year OR open position.
+    // These are excluded from the promotion-discovery views (Candidatos/Tracker/Builder): the goal is
+    // to surface demo-only EAs not yet in real.
+    state.realMagics = new Set();
+    (data.bots || []).forEach(b => { if (state.realLogins.has(b.account_login) && b.magic) state.realMagics.add(b.magic); });
+    ((data.real_portfolio && data.real_portfolio.open_positions) || []).forEach(p => { if (p.magic) state.realMagics.add(p.magic); });
     state.demoAccounts = (data.accounts || []).filter(a => !a.is_real);
     // Only show demo accounts where balance > $10,000 (initial deposit for all demo accounts)
     const DEMO_INITIAL_DEPOSIT = 10000;
@@ -240,7 +245,6 @@ function render() {
   safe(renderStats, 'renderStats');
   safe(renderCandidates, 'renderCandidates');
   safe(renderForwardTracker, 'renderForwardTracker');
-  safe(renderDriftSection, 'renderDriftSection');
   safe(renderBalanced, 'renderBalanced');
   safe(renderNewBotsVpsPills, 'renderNewBotsVpsPills');
   safe(renderNewBots, 'renderNewBots');
@@ -1479,7 +1483,8 @@ function renderCandidates() {
   let pool = (state.snapshot.bots || [])
     .filter(b => b.promotion_score != null && b.magic && b.magic !== 0
               && CANDIDATE_STATUSES.has(b.promotion_status)
-              && !state.realLogins.has(b.account_login));
+              && !state.realLogins.has(b.account_login)
+              && !state.realMagics.has(b.magic));
   pool.sort((a, b) => (b.promotion_score - a.promotion_score) || (b.net_profit - a.net_profit));
   if (counter) counter.textContent = pool.length;
   const f = CANDIDATE_STATUSES.has(state.candidatesStatusFilter) ? state.candidatesStatusFilter : 'READY';
@@ -1530,7 +1535,8 @@ function renderForwardTracker() {
   if (!tbody) return;
   const tracked = (state.snapshot.bots || [])
     .filter(b => b.tracker && b.magic && b.magic !== 0
-              && !state.realLogins.has(b.account_login));
+              && !state.realLogins.has(b.account_login)
+              && !state.realMagics.has(b.magic));
   // Sort: BELOW (alarm) → TOO_SOON → ON_TRACK → ABOVE (best last so problems show first)
   const order = { BELOW: 0, TOO_SOON: 1, ON_TRACK: 2, ABOVE: 3 };
   tracked.sort((a, b) => {
@@ -1715,7 +1721,8 @@ function bldGetUniverse() {
   if (!snap) return [];
   return (snap.bots || [])
     .filter(b => (b.promotion_status === 'READY' || b.promotion_status === 'NEAR') && b.magic !== 0
-              && !state.realLogins.has(b.account_login))
+              && !state.realLogins.has(b.account_login)
+              && !state.realMagics.has(b.magic))
     .map(b => ({
       key: bldKey(b.vps, b.account_login, b.magic),
       vps: b.vps,
@@ -3226,79 +3233,6 @@ function wireCorrModal() {
 }
 
 // =========================================================================
-//  🚨 DRIFT WATCH SECTION
-// =========================================================================
-
-function renderDriftSection() {
-  const section = document.getElementById('drift-section');
-  const tbody = document.getElementById('drift-tbody');
-  const empty = document.getElementById('drift-empty');
-  const counter = document.getElementById('drift-count');
-  if (!section || !tbody) return;
-  const all = (state.snapshot?.bots || []).filter(b => b.drift && b.drift.flag && b.magic);
-  if (counter) counter.textContent = all.length;
-  if (!all.length) { section.hidden = true; return; }
-  section.hidden = false;
-  // Severity filter
-  const f = state.driftSeverityFilter || 'all';
-  const filtered = all.filter(b => {
-    const s = b.drift.severity || 0;
-    if (f === 'severe') return s >= 2.0;
-    if (f === 'moderate') return s >= 1.3 && s < 2.0;
-    if (f === 'incipient') return s < 1.3;
-    return true;
-  });
-  // Sort by severity DESC
-  filtered.sort((a, b) => (b.drift.severity || 0) - (a.drift.severity || 0));
-  if (!filtered.length) {
-    tbody.innerHTML = '';
-    if (empty) { empty.hidden = false; empty.textContent = 'Ningún bot en este nivel de severidad.'; }
-    return;
-  }
-  if (empty) empty.hidden = true;
-  tbody.innerHTML = filtered.map((b, i) => {
-    const d = b.drift;
-    const sev = d.severity || 0;
-    const sevCls = sev >= 2.0 ? 'profit-negative' : sev >= 1.3 ? 'warning' : '';
-    const sevBadge = sev >= 2.0
-      ? `<span class="status-pill status-no" title="Severidad ${sev.toFixed(2)}×">🔴 SEVERO ${sev.toFixed(2)}×</span>`
-      : sev >= 1.3
-      ? `<span class="status-pill status-watch" title="Severidad ${sev.toFixed(2)}×">🟠 MODERADO ${sev.toFixed(2)}×</span>`
-      : `<span class="status-pill status-near" title="Severidad ${sev.toFixed(2)}×">🟡 INCIPIENTE ${sev.toFixed(2)}×</span>`;
-    const delta = d.net_delta_per_day || 0;
-    const dCls = delta < 0 ? 'profit-negative' : 'profit-positive';
-    const sym = (b.symbols || []).join(',');
-    return `
-      <tr class="bot-row" data-vps="${b.vps}" data-login="${b.account_login}" data-magic="${b.magic}">
-        <td><span class="rank-badge">${i + 1}</span></td>
-        <td>${sevBadge}</td>
-        <td class="mono">${b.magic}</td>
-        <td>${vpsBadge(b.vps)}</td>
-        <td class="mono">${b.account_login}</td>
-        <td>${sym}</td>
-        <td class="mono">${d.breakpoint_date || '—'}</td>
-        <td class="num">${d.days_since_break ?? '—'}</td>
-        <td class="num">$${(d.net_before_per_day ?? 0).toFixed(2)}</td>
-        <td class="num">$${(d.net_after_per_day ?? 0).toFixed(2)}</td>
-        <td class="num ${dCls}">${delta > 0 ? '+' : ''}$${delta.toFixed(2)}</td>
-        <td class="num">${(b.promotion_score ?? 0).toFixed(1)}</td>
-        <td>${statusBadge(b.promotion_status)}</td>
-      </tr>`;
-  }).join('');
-}
-
-function wireDriftControls() {
-  document.querySelectorAll('#drift-severity-pills .pill').forEach(pill => {
-    pill.addEventListener('click', () => {
-      document.querySelectorAll('#drift-severity-pills .pill').forEach(p => p.classList.remove('active'));
-      pill.classList.add('active');
-      state.driftSeverityFilter = pill.dataset.sev;
-      try { renderDriftSection(); } catch(e) { console.error(e); }
-    });
-  });
-}
-
-// =========================================================================
 //  🔎 QUERY DSL — saved views — URL share
 // =========================================================================
 
@@ -3699,7 +3633,6 @@ wireCandidatesControls();
 wireCorrModal();
 wirePortfolioModal();
 wireBuilderModal();
-wireDriftControls();
 wireQueryBar();
 wireDNAModal();
 wireCompareModal();

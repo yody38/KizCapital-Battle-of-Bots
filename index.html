@@ -375,48 +375,6 @@
     </div>
   </section>
 
-  <section class="balanced-section" id="drift-section" hidden>
-    <div class="balanced-header">
-      <div>
-        <h2 class="section-title balanced-title">🚨 Drift Watch — Page-Hinkley Alerts</h2>
-        <p class="balanced-subtitle">Bots con quiebre estructural detectado en su rentabilidad diaria. Cada fila marca el día exacto del cambio + severidad · <span id="drift-count">0</span> bots flagged</p>
-      </div>
-      <div class="balanced-legend" title="Page-Hinkley = CUSUM secuencial sobre daily_net. Lambda = factor × stdev. Severidad = excursión / lambda.">
-        🧪 Page-Hinkley · λ = 4σ · δ = 0.005
-      </div>
-    </div>
-    <div class="table-controls" style="margin-bottom:12px">
-      <div class="filter-pills" id="drift-severity-pills">
-        <button class="pill active" data-sev="all">Todos</button>
-        <button class="pill" data-sev="severe">🔴 Severo (≥2.0)</button>
-        <button class="pill" data-sev="moderate">🟠 Moderado (≥1.3)</button>
-        <button class="pill" data-sev="incipient">🟡 Incipiente</button>
-      </div>
-    </div>
-    <div class="table-wrapper compact">
-      <table id="drift-table">
-        <thead>
-          <tr>
-            <th>#</th>
-            <th>Severidad</th>
-            <th>Magic</th>
-            <th>VPS</th>
-            <th>Cuenta</th>
-            <th>Símbolo</th>
-            <th>Día del quiebre</th>
-            <th class="num">Días desde</th>
-            <th class="num">Net/día antes</th>
-            <th class="num">Net/día después</th>
-            <th class="num">Δ Net/día</th>
-            <th class="num">Score</th>
-            <th>Estado</th>
-          </tr>
-        </thead>
-        <tbody id="drift-tbody"></tbody>
-      </table>
-      <div id="drift-empty" class="empty-state" hidden>Ningún bot con drift detectado. ✅ Flota saludable.</div>
-    </div>
-  </section>
 
   <details class="demo-wrapper" id="demo-wrapper">
     <summary><span class="demo-chevron">▸</span> 📊 Cuentas Demo (laboratorio) — <span id="demo-accounts-count">0</span> cuentas · <span id="demo-bots-count">0</span> bots · click para expandir</summary>
@@ -846,6 +804,6 @@
 
 </main>
 
-<script src="app.js?v=20260607b"></script>
+<script src="app.js?v=20260607c"></script>
 </body>
 </html>
