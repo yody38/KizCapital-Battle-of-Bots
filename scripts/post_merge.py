@@ -32,7 +32,7 @@ import math
 import os
 import random
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 from _metrics import clamp01, pearson, percentile, stdev
 
@@ -81,6 +81,21 @@ STATUS_RANK_CAPS = {"READY": 5, "NEAR": 5, "WATCH": 10}
 
 MIN_CORR_TRADES = 25          # min trades to be in correlation matrix
 MAX_CORR_BOTS = 60            # cap matrix size
+NEW_BOTS_DAYS = 30           # bots with first_trade within this window live only in the Bots Nuevos view
+
+
+def _is_new_bot(b, now):
+    """True while a bot's first_trade is within the last NEW_BOTS_DAYS (moving window)."""
+    ft = b.get("first_trade")
+    if not ft:
+        return False
+    try:
+        dt = datetime.fromisoformat(str(ft).replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return False
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return (now - dt) < timedelta(days=NEW_BOTS_DAYS)
 
 # --- Monte Carlo / OOS / Portfolio config -------------------------------
 
@@ -289,12 +304,14 @@ def build_correlation_matrix(snapshot, data_dir, real_accounts=None):
     not in the demo competition views.
     """
     real_accounts = real_accounts or set()
+    now = datetime.now(timezone.utc)
     bots = snapshot.get("bots", [])
     candidates = [b for b in bots
                   if (b.get("trades") or 0) >= MIN_CORR_TRADES
                   and b.get("magic")
                   and (b.get("promotion_score") is not None)
-                  and (b.get("vps"), b.get("account_login")) not in real_accounts]
+                  and (b.get("vps"), b.get("account_login")) not in real_accounts
+                  and not _is_new_bot(b, now)]
     candidates.sort(key=lambda b: -(b.get("promotion_score") or 0))
     candidates = candidates[:MAX_CORR_BOTS]
 
@@ -954,10 +971,12 @@ def build_portfolio(snap, data_dir, real_accounts=None):
     Real-account bots are excluded — they are already promoted, not candidates.
     """
     real_accounts = real_accounts or set()
+    now = datetime.now(timezone.utc)
     bots = [b for b in snap.get("bots", [])
             if b.get("promotion_status") in PORTFOLIO_MIN_STATUS
             and b.get("magic")
-            and (b.get("vps"), b.get("account_login")) not in real_accounts]
+            and (b.get("vps"), b.get("account_login")) not in real_accounts
+            and not _is_new_bot(b, now)]
     bots.sort(key=lambda b: -(b.get("promotion_score") or 0))
     bots = bots[:PORTFOLIO_MAX_BOTS]
     if not bots:

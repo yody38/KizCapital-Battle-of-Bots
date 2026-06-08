@@ -93,6 +93,7 @@ async function loadSnapshot() {
     state.demoAccounts = state.demoAccounts.filter(a => profitableLogins.has(String(a.login)));
     state.demoBots = allDemoBots
       .filter(b => profitableLogins.has(String(b.account_login)))
+      .filter(b => !isNewBot(b))  // new bots live only in the Bots Nuevos window
       .map((b, i) => ({ ...b, _rank: i + 1, _wilson: wilsonLB(b.wins || 0, b.trades || 0) * 100 }));
     if (histRes && histRes.ok) {
       const text = await histRes.text();
@@ -621,6 +622,15 @@ function renderBalanced() {
 // --- New Bots (last 30 days) --------------------------------------------
 
 const NEW_BOTS_DAYS = 30;
+
+// A bot is "new" while its first_trade is within the last NEW_BOTS_DAYS.
+// New bots live ONLY in the Bots Nuevos window — excluded from the general
+// pool (ranking/balanced/podium/chart/count) until they age out (auto, moving window).
+function isNewBot(b) {
+  if (!b || !b.first_trade) return false;
+  const ft = new Date(b.first_trade).getTime();
+  return !!ft && ft >= (Date.now() - NEW_BOTS_DAYS * 24 * 60 * 60 * 1000);
+}
 
 function renderNewBots() {
   const tbody = document.getElementById('new-bots-tbody');
