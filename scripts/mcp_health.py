@@ -50,6 +50,7 @@ VPS_ROSTER = [
     ("vps3", "trader@100.118.159.44"),
     ("vps4", "trader@100.125.237.26"),
     ("vps5", "trader@100.70.228.19"),
+    ("vps6", "trader@100.112.112.115"),
 ]
 
 SSH_KEY = os.environ.get("SSH_KEY", str(Path.home() / ".ssh" / "id_ed25519_ci"))
