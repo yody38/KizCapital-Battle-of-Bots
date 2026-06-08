@@ -32,6 +32,7 @@ ENV_FILE = ROOT / ".env.local"
 MANIFEST_FILE = DATA_DIR / ".upload-manifest.json"
 REPORT_FILE = DATA_DIR / "integrity_report.json"
 UPLOAD_HEALTH_FILE = DATA_DIR / "upload_health.json"
+TIMING_FILE = DATA_DIR / "pipeline_timing.json"
 BUCKET = "dashboard-data"
 STUCK_TRIES = 3  # tries >= this => surfaced as UPLOAD_STUCK (actionable signal)
 
@@ -349,7 +350,23 @@ def main() -> int:
                 rep["ok"] = False
                 rep.setdefault("summary", {})["upload_not_ok"] = True
             REPORT_FILE.write_text(json.dumps(rep, indent=2), encoding="utf-8")
-            for status_obj in ("integrity_report.json", "upload_health.json"):
+            # Finalize pipeline_timing.json with the upload duration this cycle
+            # (emit_timing ran BEFORE upload, so it couldn't know it). Patch the
+            # live file + re-upload so the dashboard chip shows the full e2e.
+            status_objs = ["integrity_report.json", "upload_health.json"]
+            try:
+                if TIMING_FILE.exists():
+                    tim = json.loads(TIMING_FILE.read_text(encoding="utf-8"))
+                    cyc = tim.get("cycle") or {}
+                    upload_ms = int(round(dur * 1000))
+                    cyc["upload_ms"] = upload_ms
+                    cyc["end_to_end_ms"] = int(cyc.get("end_to_end_ms", 0)) + upload_ms
+                    tim["cycle"] = cyc
+                    TIMING_FILE.write_text(json.dumps(tim, indent=2), encoding="utf-8")
+                    status_objs.append("pipeline_timing.json")
+            except Exception as exc:  # noqa: BLE001 — telemetry must never fail upload
+                print(f"[upload]   could not patch pipeline_timing.json: {exc}", file=sys.stderr)
+            for status_obj in status_objs:
                 sp = DATA_DIR / status_obj
                 if sp.exists():
                     try:

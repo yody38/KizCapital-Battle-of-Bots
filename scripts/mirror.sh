@@ -467,23 +467,25 @@ if [ $VERIFY_RC -ne 0 ]; then
 fi
 T_VERIFY_MS=$(( $(now_ms) - _t0 ))
 
-# Push fresh data/ (including the just-generated integrity_report.json) to
+# Emit per-stage latency telemetry BEFORE upload so pipeline_timing.json +
+# pipeline_timing_history.jsonl are part of the upload set (the CI runner is
+# ephemeral — anything written after upload is lost). upload_ms is unknown here
+# (~3s, trivial); upload_to_supabase.py patches the live file's upload_ms and
+# end_to_end_ms after it measures itself, then re-uploads it. Best-effort:
+# a telemetry failure must NEVER fail a healthy cycle.
+T_E2E_MS=$(( $(now_ms) - PIPE_START_MS ))   # pre-upload; upload patches the final value
+T_MIRROR_MS="$T_MIRROR_MS" T_RECONCILE_MS="$T_RECONCILE_MS" \
+T_FETCH_LEDGER_MS="$T_FETCH_LEDGER_MS" T_POSTMERGE_MS="$T_POSTMERGE_MS" \
+T_VERIFY_MS="$T_VERIFY_MS" T_UPLOAD_MS="0" T_E2E_MS="$T_E2E_MS" \
+  python3 "$SCRIPT_DIR/emit_timing.py" >> "$LOG" 2>&1 || \
+  echo "[$(ts)] emit_timing non-fatal error (timing skipped this cycle)" >> "$LOG"
+
+# Push fresh data/ (including integrity_report.json + pipeline_timing.json) to
 # Supabase Storage. Pending-retry on transient failures.
-_t0=$(now_ms)
 UPLOAD_RC=0
 python3 "$SCRIPT_DIR/upload_to_supabase.py" >> "$LOG" 2>&1 || UPLOAD_RC=$?
 if [ $UPLOAD_RC -ne 0 ]; then
   echo "[$(ts)] supabase upload FAIL rc=$UPLOAD_RC — public dashboard data may be stale" >> "$LOG"
   exit $UPLOAD_RC
 fi
-T_UPLOAD_MS=$(( $(now_ms) - _t0 ))
 echo "[$(ts)] mirror cycle OK — verified + uploaded" >> "$LOG"
-
-# Emit per-stage latency telemetry (pipeline_timing.json + rolling p50/p95 history).
-# Best-effort: a telemetry failure must NEVER fail a healthy cycle.
-T_E2E_MS=$(( $(now_ms) - PIPE_START_MS ))
-T_MIRROR_MS="$T_MIRROR_MS" T_RECONCILE_MS="$T_RECONCILE_MS" \
-T_FETCH_LEDGER_MS="$T_FETCH_LEDGER_MS" T_POSTMERGE_MS="$T_POSTMERGE_MS" \
-T_VERIFY_MS="$T_VERIFY_MS" T_UPLOAD_MS="$T_UPLOAD_MS" T_E2E_MS="$T_E2E_MS" \
-  python3 "$SCRIPT_DIR/emit_timing.py" >> "$LOG" 2>&1 || \
-  echo "[$(ts)] emit_timing non-fatal error (timing skipped this cycle)" >> "$LOG"
