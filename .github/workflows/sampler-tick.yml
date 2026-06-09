@@ -1,0 +1,62 @@
+name: sampler-tick
+
+# Interim driver for equity_sampler.py (tribunal 2026-06-09, Fase A canary).
+# Pattern: gh-actions-ssh-tick-loop — each run loops ~27 min of one-shot SSH
+# ticks at TICK_SECS cadence; cron re-schedules with overlap so coverage
+# survives GH cron throttling. Target architecture is the Railway
+# kiz-live-bridge worker (pull SSH); migrate this loop there once Railway
+# auth is restored, then disable this workflow.
+
+on:
+  schedule:
+    - cron: "*/30 * * * *"     # UTC backup; real cadence comes from overlap + dispatch
+  workflow_dispatch: {}
+  repository_dispatch:
+    types: [sampler-tick]      # optional external trigger (VPS1 dispatcher)
+
+concurrency:
+  group: sampler-tick
+  cancel-in-progress: true     # exactly one active loop; a fresh run supersedes
+
+jobs:
+  tick:
+    runs-on: ubuntu-latest
+    timeout-minutes: 29
+    env:
+      # Canary scope: VPS3 only (48-72h + A/B observador gate before fleet rollout)
+      VPS_HOSTS: "100.118.159.44"
+      TICK_SECS: "120"
+      LOOP_MINUTES: "27"
+
+    steps:
+      - name: Setup SSH key
+        run: |
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_ed25519_ci
+          chmod 600 ~/.ssh/id_ed25519_ci
+
+      - name: Tailscale up
+        uses: tailscale/github-action@v3
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret:    ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:ci
+          version: latest
+
+      - name: Tick loop
+        run: |
+          end=$(( $(date +%s) + LOOP_MINUTES * 60 ))
+          while [ "$(date +%s)" -lt "$end" ]; do
+            t0=$(date +%s)
+            for host in $VPS_HOSTS; do
+              out=$(ssh -i ~/.ssh/id_ed25519_ci \
+                    -o StrictHostKeyChecking=accept-new \
+                    -o ConnectTimeout=10 -o ServerAliveInterval=10 \
+                    "trader@${host}" \
+                    "C:\\mt5-mcp\\venv\\Scripts\\python.exe C:\\mt5-mcp\\equity_sampler.py --once --cadence ${TICK_SECS}" \
+                    2>&1) && echo "[$host] $out" || echo "[$host] TICK-FAIL: $out"
+            done
+            elapsed=$(( $(date +%s) - t0 ))
+            sleep_for=$(( TICK_SECS - elapsed ))
+            [ "$sleep_for" -gt 0 ] && sleep "$sleep_for" || true
+          done
