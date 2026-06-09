@@ -3878,7 +3878,12 @@ async function fetchMcpHealth() {
 function classifyMcp(data) {
   if (!data || typeof data.ok_count !== 'number') return { tone: 'loading', label: '—/5' };
   const label = `${data.ok_count}/${data.total}`;
-  if (data.ok_count === data.total) return { tone: 'ok', label };
+  if (data.ok_count === data.total) {
+    // RAM under the pre-freeze floor (<40MB) is informational amber: the VPS is
+    // still 'ok' (SSH + snapshot + freshness passed) but worth a glance.
+    const ramCrit = Object.values(data.vps || {}).some(r => r && r.ram_critical_info);
+    return ramCrit ? { tone: 'warn', label } : { tone: 'ok', label };
+  }
   if (data.any_critical) return { tone: 'crit', label };
   return { tone: 'warn', label };
 }
@@ -3924,10 +3929,15 @@ function renderMcpModal(data) {
   if (sChk) sChk.textContent = data.checked_at ? new Date(data.checked_at).toLocaleString() : '—';
 
   grid.innerHTML = rows.map(r => {
-    const dot = r.status === 'ok' ? '🟢' : ((r.consecutive_fails || 0) >= 2 ? '🔴' : '🟡');
+    const ramCrit = !!r.ram_critical_info;
+    const dot = r.status === 'ok' ? (ramCrit ? '🟡' : '🟢') : ((r.consecutive_fails || 0) >= 2 ? '🔴' : '🟡');
     const age = (r.snapshot_age_sec != null) ? `${Math.round(r.snapshot_age_sec / 60)} min` : '—';
     const ssh = (r.ssh_ms != null) ? `${Math.round(r.ssh_ms)} ms` : '—';
-    const reason = r.fail_reason ? `<div class="mcp-card-reason">⚠️ ${_mcpEsc(r.fail_reason)}</div>` : '';
+    const ram = (r.free_ram_mb != null)
+      ? `${r.free_ram_mb} MB${(r.pagefile_commit_pct != null) ? ` · pf ${r.pagefile_commit_pct}%` : ''}`
+      : '—';
+    const reason = r.fail_reason ? `<div class="mcp-card-reason">⚠️ ${_mcpEsc(r.fail_reason)}</div>`
+      : (ramCrit ? `<div class="mcp-card-reason">🟡 RAM crítica (&lt;40MB libres) — informativo, VPS operativa</div>` : '');
     const fails = r.consecutive_fails || 0;
     return `
       <article class="mcp-card mcp-card--${_mcpEsc(r.status)}">
@@ -3940,6 +3950,7 @@ function renderMcpModal(data) {
           <div><span>Status</span><strong>${_mcpEsc(r.status)}</strong></div>
           <div><span>SSH</span><strong>${ssh}</strong></div>
           <div><span>Snapshot</span><strong>${age}</strong></div>
+          <div><span>RAM</span><strong class="${ramCrit ? 'negative' : ''}">${_mcpEsc(ram)}</strong></div>
           <div><span>Fails</span><strong class="${fails >= 2 ? 'negative' : ''}">${fails}</strong></div>
         </div>
         ${reason}

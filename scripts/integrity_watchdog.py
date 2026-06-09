@@ -409,10 +409,16 @@ def main() -> int:
                     if lag > cap:
                         fails.append(f"carry-forward too long: {v_id} frozen {round(lag/60)}min (>{round(cap/60)}min — VPS never recovered)")
 
-        # Step 4b — MCP-health dead-man: the monitor must itself be alive.
-        # Reads mcp_health.json (uploaded by mcp_health.py) and fails if it is
-        # absent or stale (> MCP_DEADMAN_SEC). Catches the monitor dying silently
-        # — it was un-deployed for 12 days (2026-05-26 → 2026-06-07).
+        # Step 4b — MCP-health monitor liveness. A stale checked_at means the
+        # MONITOR died (VPS1 dispatcher down + GH cron throttled), not the
+        # product: Step 4's pipeline dead-man (snapshot.generated_at > 90min)
+        # already hard-fails when the DATA stops advancing, with no dispatcher
+        # dependency. So monitor staleness is warn-only (surfaced in the issue
+        # body / health log), per kiz-tribunal verdict on c95ef57 — it must not
+        # page the inbox while the data is provably fresh. An ABSENT file is
+        # still a hard fail (monitor never deployed — the 12-day blind spot
+        # 2026-05-26 → 2026-06-07), and any_critical stays a hard fail (real
+        # VPS down/stale, already debounced by FAIL_THRESHOLD=2 upstream).
         now = datetime.now(timezone.utc)
         code, mcp = supa_get_json(url, key, "mcp_health.json")
         if code != 200 or not mcp:
@@ -430,7 +436,10 @@ def main() -> int:
             if age is None:
                 fails.append("mcp_health.json has no parseable checked_at")
             elif age > MCP_DEADMAN_SEC:
-                fails.append(f"mcp-health dead-man: monitor last ran {int(age/60)}min ago (>{MCP_DEADMAN_SEC//60}min)")
+                info["steps"]["mcp_health"]["stale_warn"] = (
+                    f"monitor last ran {int(age/60)}min ago (>{MCP_DEADMAN_SEC//60}min) — "
+                    "monitor-health warn only; data freshness is gated by Step 4"
+                )
             if mcp.get("any_critical"):
                 fails.append(f"mcp-health critical: {mcp.get('summary')} VPS(s) failing")
 

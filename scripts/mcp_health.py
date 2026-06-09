@@ -67,7 +67,11 @@ AUTO_RECOVERY = os.environ.get("AUTO_RECOVERY", "0") == "1"
 # flood). We still surface free_ram_mb + a low_ram_warn flag for the dashboard
 # chip, but genuine exhaustion (the 2h freeze) manifests as the snapshot read
 # failing above (-> degraded) — that gate, not a RAM number, catches the cascade.
+# RAM_CRITICAL_MB (kiz-tribunal on c95ef57): <40MB is unambiguously pre-freeze
+# territory — below the 70-106MB steady-state band, never seen in normal cycles.
+# Still informational (amber chip), never status-changing.
 LOW_RAM_WARN_MB = int(os.environ.get("MCP_HEALTH_LOW_RAM_MB", 120))
+RAM_CRITICAL_MB = int(os.environ.get("MCP_HEALTH_RAM_CRITICAL_MB", 40))
 
 REMOTE_SNAPSHOT = "C:/mt5-mcp/snapshot.json"
 
@@ -161,22 +165,36 @@ def probe_vps(vps_id: str, host: str) -> dict:
         result["fail_reason"] = f"snapshot age {age}s > {STALE_SEC}s"
         return result
 
-    # 3. Free-RAM telemetry (INFORMATIONAL — never sets status). The VPS3-freeze
+    # 3. Memory telemetry (INFORMATIONAL — never sets status). The VPS3-freeze
     #    failure mode is already gated above: if RAM is truly exhausted, the
-    #    snapshot read fails (-> degraded). Here we only record the number and a
-    #    soft warn flag for the dashboard chip; the VPS stays "ok" because SSH +
-    #    snapshot + freshness all passed.
+    #    snapshot read fails (-> degraded). One SSH round-trip returns both
+    #    free physical RAM and pagefile commit % (the latter is the earlier
+    #    exhaustion signal — commit charge climbs before FreePhysicalMemory
+    #    bottoms out). All flags are info for the dashboard chip; the VPS stays
+    #    "ok" because SSH + snapshot + freshness already passed.
+    # NOTE: no $variables — SSH lands in the remote PowerShell, which expands
+    # $vars inside the double-quoted -Command string before the inner powershell
+    # runs. Repeated Get-CimInstance is milliseconds; the SSH round-trip is the
+    # only real cost and there is still exactly one.
     ps_mem = (
         "powershell -NoProfile -Command "
-        "\"[int]((Get-CimInstance Win32_OperatingSystem).FreePhysicalMemory/1024)\""
+        "\"[int]((Get-CimInstance Win32_OperatingSystem).FreePhysicalMemory/1024); "
+        "[int](100*((Get-CimInstance Win32_OperatingSystem).TotalVirtualMemorySize"
+        "-(Get-CimInstance Win32_OperatingSystem).FreeVirtualMemory)"
+        "/(Get-CimInstance Win32_OperatingSystem).TotalVirtualMemorySize)\""
     )
     rc, stdout, stderr, ms = ssh_cmd(host, ps_mem, timeout=12)
     try:
-        free_mb = int(stdout.strip())
+        lines = [ln.strip() for ln in stdout.strip().splitlines() if ln.strip()]
+        free_mb = int(lines[0])
         result["free_ram_mb"] = free_mb
+        if free_mb < RAM_CRITICAL_MB:
+            result["ram_critical_info"] = True  # amber chip, does NOT degrade
         if free_mb < LOW_RAM_WARN_MB:
             result["low_ram_warn"] = True  # surfaced as info, does NOT degrade
-    except (ValueError, TypeError):
+        if len(lines) > 1:
+            result["pagefile_commit_pct"] = int(lines[1])
+    except (ValueError, TypeError, IndexError):
         pass  # could not measure; hard failures are already gated by the snapshot read
 
     result["status"] = "ok"
