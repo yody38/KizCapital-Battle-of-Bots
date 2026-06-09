@@ -35,6 +35,13 @@ from urllib import error as urlerror
 from urllib import parse as urlparse
 from urllib import request as urlrequest
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+try:
+    from alert_telegram import send as tg_send
+except Exception:  # alerting must never break health probing
+    def tg_send(text, **kw):  # type: ignore[misc]
+        return "unavailable"
+
 ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = ROOT / "data"
 HEALTH_FILE = DATA_DIR / "mcp_health.json"
@@ -267,7 +274,12 @@ def file_issue(vps_id: str, body: str) -> str:
             check=True, capture_output=True, text=True, timeout=30,
         )
         url = p.stdout.strip().splitlines()[-1]
-        return f"#{url.rstrip('/').rsplit('/', 1)[-1]} (created)"
+        num = url.rstrip('/').rsplit('/', 1)[-1]
+        # Push alert ONLY on issue creation (1/day/VPS by dedupe) — comments on
+        # the same-day issue stay silent to respect the daily alert budget.
+        tg = tg_send(f"🔴 {vps_id} unhealthy\n{body[:600]}\nIssue #{num}", source="mcp-health")
+        print(f"[mcp-health] telegram={tg}")
+        return f"#{num} (created)"
     except Exception as e:
         return f"create_failed: {e}"
 

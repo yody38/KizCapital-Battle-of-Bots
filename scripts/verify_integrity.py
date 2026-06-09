@@ -57,7 +57,8 @@ DEFAULT_TOLERANCE = 0.05  # USD
 # are both derived from the same merge and therefore tautological — actually catches
 # a real account silently dropping out. Adding a 3rd real account requires editing
 # this set (documented manual maintenance, same pattern as vps-access).
-EXPECTED_REAL = {("vps5", 25425), ("vps5", 32081)}
+EXPECTED_REAL = {("vps5", 25425), ("vps5", 32081),
+                 ("vps6", 3446)}  # real $10 ADNBrokerCFD, confirmada 2026-06-09, aún sin operar
 
 
 def load_env() -> dict[str, str]:

@@ -42,6 +42,13 @@ from pathlib import Path
 from urllib import error as urlerror
 from urllib import request as urlrequest
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+try:
+    from alert_telegram import send as tg_send
+except Exception:  # alerting must never break the watchdog
+    def tg_send(text, **kw):  # type: ignore[misc]
+        return "unavailable"
+
 ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = ROOT / "data"
 ENV_FILE = ROOT / ".env.local"
@@ -248,6 +255,11 @@ def file_issue_dedupe(title_root: str, body: str) -> str:
         # gh prints the issue URL on stdout
         url = out.stdout.strip().splitlines()[-1]
         num = url.rstrip("/").rsplit("/", 1)[-1]
+        # Push alert ONLY on creation (1/day by dedupe) — same-day comments stay
+        # silent to respect the daily alert budget.
+        tg = tg_send(f"🟠 integrity drift: {title_root}\n{body[:600]}\nIssue #{num}",
+                     source="integrity-watchdog")
+        print(f"[watchdog] telegram={tg}")
         return f"#{num} (created)"
     except Exception as e:
         return f"create_failed: {e}"
