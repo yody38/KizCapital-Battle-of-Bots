@@ -514,6 +514,14 @@ if [ $VERIFY_RC -ne 0 ]; then
 fi
 T_VERIFY_MS=$(( $(now_ms) - _t0 ))
 
+# Data manifest root (Fase D-sustituto, tribunal 2026-06-09) — computed AFTER
+# verify --strict passes (only verified data gets notarized) and BEFORE upload
+# (so data_manifest.json ships to Supabase this same cycle). Best-effort: a
+# manifest failure must never abort a verified cycle.
+MANIFEST_ROOT_LINE=$(python3 "$SCRIPT_DIR/data_manifest_root.py" "$DATA_DIR" 2>>"$LOG") \
+  && echo "[$(ts)] $MANIFEST_ROOT_LINE" >> "$LOG" \
+  || { MANIFEST_ROOT_LINE=""; echo "[$(ts)] data_manifest_root non-fatal error (root skipped this cycle)" >> "$LOG"; }
+
 # Emit per-stage latency telemetry BEFORE upload so pipeline_timing.json +
 # pipeline_timing_history.jsonl are part of the upload set (the CI runner is
 # ephemeral — anything written after upload is lost). upload_ms is unknown here
@@ -536,3 +544,25 @@ if [ $UPLOAD_RC -ne 0 ]; then
   exit $UPLOAD_RC
 fi
 echo "[$(ts)] mirror cycle OK — verified + uploaded" >> "$LOG"
+
+# Notarize the verified root in the PUBLIC repo (git history = immutable
+# timestamping). Gated by LEDGER_COMMIT=1 — set ONLY in CI (refresh.yml); local
+# runs never push. Rebase-retry absorbs races with concurrent pushes. The repo
+# stays the timestamping channel only — data/ itself remains gitignored.
+if [ "${LEDGER_COMMIT:-0}" = "1" ] && [ -n "$MANIFEST_ROOT_LINE" ]; then
+  (
+    cd "$SCRIPT_DIR/.." || exit 0
+    mkdir -p ledger
+    echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) $MANIFEST_ROOT_LINE" >> ledger/roots.log
+    git add ledger/roots.log
+    GIT_AUTHOR_NAME="bob-ci" GIT_AUTHOR_EMAIL="ci@kizcapital.local" \
+    GIT_COMMITTER_NAME="bob-ci" GIT_COMMITTER_EMAIL="ci@kizcapital.local" \
+      git commit -m "ledger: notarize data root $(echo "$MANIFEST_ROOT_LINE" | awk '{print substr($2,1,16)}')" >> "$LOG" 2>&1 || exit 0
+    for _push_try in 1 2 3; do
+      if git push origin HEAD:main >> "$LOG" 2>&1; then
+        echo "[$(ts)] ledger root pushed (try $_push_try)" >> "$LOG"; break
+      fi
+      git pull --rebase origin main >> "$LOG" 2>&1 || true
+    done
+  ) || echo "[$(ts)] ledger commit non-fatal error" >> "$LOG"
+fi

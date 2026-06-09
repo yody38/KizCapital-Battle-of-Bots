@@ -11,12 +11,16 @@ concurrency:
   group: refresh-dashboard
   cancel-in-progress: false
 
+permissions:
+  contents: write   # ledger/roots.log notarization push (Fase D-sustituto)
+
 jobs:
   refresh:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
       PYTHONHASHSEED: "0"   # deterministic str hashing across processes (Data Integrity DNA)
+      LEDGER_COMMIT: "1"    # mirror.sh notarizes the verified data root in git (CI only)
 
     steps:
       - uses: actions/checkout@v4
