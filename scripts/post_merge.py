@@ -2265,6 +2265,121 @@ def _parse_iso_safe(s):
         return None
 
 
+# --- Floating-DD shadow (Fase B, tribunal 2026-06-09) -----------------------
+# SHADOW ONLY: records would_fail flags and never touches promotion_status.
+# The flip to enforcement is a MANUAL owner decision gated on triple evidence
+# (coverage >=90% + >=30 clean days + verify_integrity green) — never a timer.
+# Percentages arrive PRE-COMPUTED from each VPS sampler against the DECLARED
+# initial balance (initial_balances.json on the VPS) — the fixed denominator;
+# post_merge never re-derives them from the live account_balance.
+FLOATING_DD_SHADOW_THRESHOLD_PCT = 20.0   # provisional: closed-DD 15% + 5pp headroom, no empirical derivation yet
+FLOATING_DD_MIN_COVERAGE_PCT = 90.0
+
+
+def apply_floating_dd_shadow(snap, data_dir):
+    """Consume data/sampler/<vps>/floating_dd_summary.json (mirrored, fail-soft)
+    and decorate bots[] + accounts[] with sampled floating-DD shadow fields.
+    The metric is a LOWER BOUND (60-120s sampling misses sub-cadence spikes)."""
+    sampler_root = os.path.join(data_dir, "sampler")
+    if not os.path.isdir(sampler_root):
+        return None
+
+    summaries = {}
+    statuses = {}
+    for vps in sorted(os.listdir(sampler_root)):
+        sdir = os.path.join(sampler_root, vps)
+        for name, store in (("floating_dd_summary.json", summaries), ("sampler_status.json", statuses)):
+            p = os.path.join(sdir, name)
+            if os.path.isfile(p):
+                try:
+                    with open(p) as f:
+                        store[vps] = json.load(f)
+                except Exception:
+                    pass
+    if not summaries:
+        return None
+
+    def _agg(days_map, cadence_secs):
+        days = sorted(days_map)
+        samples = sum(int(d.get("samples", 0)) for d in days_map.values())
+        span_days = len(days)
+        expected_per_day = 86400.0 / max(cadence_secs, 1.0)
+        coverage_pct = round(min(100.0, samples / (span_days * expected_per_day) * 100.0), 1) if span_days else 0.0
+        return days, samples, span_days, coverage_pct
+
+    bots_covered = 0
+    accounts_covered = 0
+    would_fail = 0
+    for vps, summary in summaries.items():
+        cadence = float((statuses.get(vps) or {}).get("cadence_secs") or 120.0)
+        bot_days = summary.get("bots", {})
+        acc_days = summary.get("accounts", {})
+
+        for b in snap.get("bots", []):
+            if b.get("vps") != vps:
+                continue
+            key = f"{b.get('account_login')}-{b.get('magic')}"
+            days_map = bot_days.get(key)
+            if not days_map:
+                continue
+            days, samples, span_days, coverage_pct = _agg(days_map, cadence)
+            worst = max(float(d.get("worst_floating_dd_pct", 0.0)) for d in days_map.values())
+            sufficient = coverage_pct >= FLOATING_DD_MIN_COVERAGE_PCT and span_days >= 1
+            fail = (worst > FLOATING_DD_SHADOW_THRESHOLD_PCT) if sufficient else None
+            b["floating_dd"] = {
+                "max_floating_dd_pct_sampled": round(worst, 3),
+                "time_underwater_min_total": round(sum(float(d.get("time_underwater_min", 0.0))
+                                                       for d in days_map.values()), 1),
+                "coverage_days": span_days,
+                "first_day": days[0],
+                "last_day": days[-1],
+                "samples": samples,
+                "coverage_pct": coverage_pct,
+                "cadence_secs": cadence,
+                "enforced": False,
+                "insufficient_coverage": not sufficient,
+                "note": "lower bound — sampled, not continuous",
+            }
+            b["would_fail_floating_dd"] = fail
+            bots_covered += 1
+            if fail:
+                would_fail += 1
+
+        for a in snap.get("accounts", []):
+            if a.get("vps") != vps:
+                continue
+            days_map = acc_days.get(str(a.get("login")))
+            if not days_map:
+                continue
+            days, samples, span_days, coverage_pct = _agg(days_map, cadence)
+            a["floating_dd"] = {
+                "worst_simultaneous_floating_dd_pct": round(max(
+                    float(d.get("worst_floating_dd_pct", 0.0)) for d in days_map.values()), 3),
+                "max_floating_deficit": round(max(
+                    float(d.get("max_floating_deficit", 0.0)) for d in days_map.values()), 2),
+                "min_equity": min(float(d.get("min_equity")) for d in days_map.values()
+                                  if d.get("min_equity") is not None),
+                "coverage_days": span_days,
+                "samples": samples,
+                "coverage_pct": coverage_pct,
+            }
+            accounts_covered += 1
+
+    meta = {
+        "shadow": True,
+        "threshold_pct": FLOATING_DD_SHADOW_THRESHOLD_PCT,
+        "threshold_provenance": "closed-DD 15% + 5pp headroom — provisional, no empirical derivation vs real ruin tolerance",
+        "min_coverage_pct": FLOATING_DD_MIN_COVERAGE_PCT,
+        "vps_with_sampler": sorted(summaries),
+        "bots_covered": bots_covered,
+        "accounts_covered": accounts_covered,
+        "would_fail_floating_dd_count": would_fail,
+        "unit_of_failure_note": "MT5 stop-out is per ACCOUNT — account-level series is the gating-relevant one",
+    }
+    snap["floating_dd_meta"] = meta
+    return meta
+
+
 def compute_vps_freshness(data_dir, vps_ids=None):
     """For each snapshot_vpsN.json present, compute lag from now() vs its
     generated_at. Returns ({vps_id: {lag_sec, stale, generated_at}}, partial)."""
@@ -2721,6 +2836,14 @@ def main():
                     b["frozen_downgraded"] = True
                     n_degraded += 1
         print(f"[provenance-guard] carried_vps={sorted(carried_vps)} READY/NEAR_degraded_to_WATCH={n_degraded}")
+
+    # Floating-DD shadow (Fase B) — decorates bots/accounts from mirrored sampler
+    # summaries; never mutates promotion_status (flip is manual, evidence-gated).
+    fdd_meta = apply_floating_dd_shadow(snap, data_dir)
+    if fdd_meta:
+        print(f"[floating-dd-shadow] vps={fdd_meta['vps_with_sampler']} "
+              f"bots={fdd_meta['bots_covered']} accounts={fdd_meta['accounts_covered']} "
+              f"would_fail={fdd_meta['would_fail_floating_dd_count']}")
 
     # Forward Tracker — append today's status of READY/NEAR bots, decorate with verdict
     today_iso = datetime.now(timezone.utc).isoformat()

@@ -115,6 +115,7 @@ fetch_vps() {
   local attempt snap_scp_ok age expected_bots
   local ready_local snap_ts ready_valid ready_ts ready_bots
   local bots_target bots_staging bots_attempt_ok staged bots_backup bot_count
+  local sampler_dir sampler_f
 
   fail() { echo "FAIL:$1" > "${status_file}.tmp" && mv "${status_file}.tmp" "$status_file"; return 1; }
 
@@ -214,6 +215,23 @@ fetch_vps() {
   rm -rf "$bots_backup"
   bot_count=$(find "$bots_target" -maxdepth 1 -name '*.json' 2>/dev/null | wc -l | tr -d ' ')
   echo "[$(ts)] $id bots OK $bot_count files (atomic swap, expected=$expected_bots)"
+
+  # --- equity sampler artifacts (Fase A, tribunal 2026-06-09) ---
+  # Fail-soft by design: the sampler rolls out VPS-by-VPS (canary first), so a
+  # missing summary is normal, never aborts the cycle, and the raw series stays
+  # on the VPS — only the KB-sized daily aggregates travel.
+  sampler_dir="$DATA_DIR/sampler/$id"
+  mkdir -p "$sampler_dir"
+  for sampler_f in floating_dd_summary.json sampler_status.json; do
+    if scp "${SCP_OPTS[@]}" "$host:C:/mt5-mcp/$sampler_f" "$sampler_dir/.${sampler_f}.tmp" 2>/dev/null \
+       && [ -s "$sampler_dir/.${sampler_f}.tmp" ] && head -c 1 "$sampler_dir/.${sampler_f}.tmp" | grep -q '{'; then
+      mv "$sampler_dir/.${sampler_f}.tmp" "$sampler_dir/$sampler_f"
+      echo "[$(ts)] $id sampler $sampler_f OK ($(wc -c < "$sampler_dir/$sampler_f") bytes)"
+    else
+      rm -f "$sampler_dir/.${sampler_f}.tmp"
+      echo "[$(ts)] $id sampler $sampler_f not present (fail-soft)"
+    fi
+  done
   echo "OK:$local_file" > "${status_file}.tmp" && mv "${status_file}.tmp" "$status_file"
   return 0
 }
