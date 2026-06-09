@@ -56,7 +56,10 @@ VERCEL_URL = "https://kiz-capital-bots-kiz-capital-battle-of-bots-projects.verce
 # CI run finish → upload completes within ~30s. We allow up to 15 min just
 # in case the watchdog catches a moment when CI is mid-cycle.
 STALE_TOLERANCE_SEC = 15 * 60
-MCP_DEADMAN_SEC = 20 * 60  # mcp-health runs */5 → >20min stale = 4 missed cycles = monitor dead
+MCP_DEADMAN_SEC = 90 * 60  # mcp-health is dispatched ~every 30min (VPS1 dispatch_ci.ps1, like
+                           # refresh/watchdog). GH free-tier cron */5 is throttled to ~2h and is
+                           # only a backstop, so 20min was a guaranteed false positive. 90min =
+                           # tolerate 2 missed dispatch cycles, still catch a dead monitor in <1.5h.
 LIVE_DEADMAN_SEC = 90      # live stream pushes every ~3s → >90s stale = worker/tailnet/MT5 dead
 LIVE_REAL_LOGINS = {25425, 32081}  # the 2 real accounts on VPS5
 
@@ -406,10 +409,10 @@ def main() -> int:
                     if lag > cap:
                         fails.append(f"carry-forward too long: {v_id} frozen {round(lag/60)}min (>{round(cap/60)}min — VPS never recovered)")
 
-        # Step 4b — MCP-health dead-man: the */5 monitor must itself be alive.
+        # Step 4b — MCP-health dead-man: the monitor must itself be alive.
         # Reads mcp_health.json (uploaded by mcp_health.py) and fails if it is
-        # absent or stale (>20min = 4 missed cycles). Catches the monitor dying
-        # silently — it was un-deployed for 12 days (2026-05-26 → 2026-06-07).
+        # absent or stale (> MCP_DEADMAN_SEC). Catches the monitor dying silently
+        # — it was un-deployed for 12 days (2026-05-26 → 2026-06-07).
         now = datetime.now(timezone.utc)
         code, mcp = supa_get_json(url, key, "mcp_health.json")
         if code != 200 or not mcp:
@@ -427,7 +430,7 @@ def main() -> int:
             if age is None:
                 fails.append("mcp_health.json has no parseable checked_at")
             elif age > MCP_DEADMAN_SEC:
-                fails.append(f"mcp-health dead-man: monitor last ran {int(age/60)}min ago (>20min)")
+                fails.append(f"mcp-health dead-man: monitor last ran {int(age/60)}min ago (>{MCP_DEADMAN_SEC//60}min)")
             if mcp.get("any_critical"):
                 fails.append(f"mcp-health critical: {mcp.get('summary')} VPS(s) failing")
 

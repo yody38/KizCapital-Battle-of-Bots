@@ -58,12 +58,16 @@ SSH_TIMEOUT = 8
 STALE_SEC = int(os.environ.get("MCP_HEALTH_STALE_SEC", 2700))
 FAIL_THRESHOLD = 2
 AUTO_RECOVERY = os.environ.get("AUTO_RECOVERY", "0") == "1"
-# Free-RAM early warning. The failure that froze the dashboard for 2h was a
-# low-RAM VPS (1-1.5GB / 11 MT5 terminals) exhausting its pagefile → sshd could
-# no longer fork scp/the builder. We probe free RAM each cycle so a VPS trending
-# toward exhaustion alerts BEFORE it cascades. Below CRIT → degraded (alerts).
-LOW_RAM_WARN_MB = int(os.environ.get("MCP_HEALTH_LOW_RAM_MB", 250))
-CRIT_RAM_MB = int(os.environ.get("MCP_HEALTH_CRIT_RAM_MB", 120))
+# Free-RAM early warning — INFORMATIONAL ONLY (never changes status).
+# The 5 production VPS run at a steady state of 70-106MB free RAM (1-1.5GB total,
+# 10-13 MT5 terminals each); that is their NORMAL operating point, and at that
+# level SSH + the builder + mirror are all proven healthy every cycle. So free
+# physical RAM is NOT a reliable down/degraded signal — an absolute threshold
+# above the steady state just fires 24/7 (the integrity-watchdog false-positive
+# flood). We still surface free_ram_mb + a low_ram_warn flag for the dashboard
+# chip, but genuine exhaustion (the 2h freeze) manifests as the snapshot read
+# failing above (-> degraded) — that gate, not a RAM number, catches the cascade.
+LOW_RAM_WARN_MB = int(os.environ.get("MCP_HEALTH_LOW_RAM_MB", 120))
 
 REMOTE_SNAPSHOT = "C:/mt5-mcp/snapshot.json"
 
@@ -157,9 +161,11 @@ def probe_vps(vps_id: str, host: str) -> dict:
         result["fail_reason"] = f"snapshot age {age}s > {STALE_SEC}s"
         return result
 
-    # 3. Free-RAM early warning (the VPS3-freeze failure mode). Cheap PS query;
-    #    when RAM is already exhausted the snapshot read above would have failed,
-    #    so reaching here means we can usually measure it.
+    # 3. Free-RAM telemetry (INFORMATIONAL — never sets status). The VPS3-freeze
+    #    failure mode is already gated above: if RAM is truly exhausted, the
+    #    snapshot read fails (-> degraded). Here we only record the number and a
+    #    soft warn flag for the dashboard chip; the VPS stays "ok" because SSH +
+    #    snapshot + freshness all passed.
     ps_mem = (
         "powershell -NoProfile -Command "
         "\"[int]((Get-CimInstance Win32_OperatingSystem).FreePhysicalMemory/1024)\""
@@ -168,12 +174,8 @@ def probe_vps(vps_id: str, host: str) -> dict:
     try:
         free_mb = int(stdout.strip())
         result["free_ram_mb"] = free_mb
-        if free_mb < CRIT_RAM_MB:
-            result["status"] = "degraded"
-            result["fail_reason"] = f"free RAM {free_mb}MB < {CRIT_RAM_MB}MB (pagefile-exhaustion risk)"
-            return result
         if free_mb < LOW_RAM_WARN_MB:
-            result["low_ram_warn"] = True
+            result["low_ram_warn"] = True  # surfaced as info, does NOT degrade
     except (ValueError, TypeError):
         pass  # could not measure; hard failures are already gated by the snapshot read
 
