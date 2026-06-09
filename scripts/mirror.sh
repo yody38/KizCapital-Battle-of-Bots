@@ -553,8 +553,9 @@ if [ "${LEDGER_COMMIT:-0}" = "1" ] && [ -n "$MANIFEST_ROOT_LINE" ]; then
   (
     cd "$SCRIPT_DIR/.." || exit 0
     mkdir -p ledger
-    echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) $MANIFEST_ROOT_LINE" >> ledger/roots.log
-    git add ledger/roots.log
+    # .txt, NOT .log — .gitignore's *.log would silently no-op the git add
+    echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) $MANIFEST_ROOT_LINE" >> ledger/roots.txt
+    git add ledger/roots.txt
     GIT_AUTHOR_NAME="bob-ci" GIT_AUTHOR_EMAIL="ci@kizcapital.local" \
     GIT_COMMITTER_NAME="bob-ci" GIT_COMMITTER_EMAIL="ci@kizcapital.local" \
       git commit -m "ledger: notarize data root $(echo "$MANIFEST_ROOT_LINE" | awk '{print substr($2,1,16)}')" >> "$LOG" 2>&1 || exit 0
