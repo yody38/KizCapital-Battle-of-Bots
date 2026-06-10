@@ -185,6 +185,36 @@ class Uploader:
         return {o["name"] for o in data if o.get("name")}
 
 
+# ----------------------- R2 dual-write (Fase C, tribunal 2026-06-09) -----------------------
+# Second storage origin so the dashboard survives a full Supabase outage.
+# Two concrete uploaders, NO StorageTarget abstraction until a 3rd target
+# exists (Rule of Three). R2 failures mark pending-retry exactly like
+# Supabase ones but never abort the cycle — Supabase remains canonical.
+
+def make_r2():
+    """Returns (boto3_client, bucket) or (None, None) when unconfigured.
+    Env: R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY / R2_ACCOUNT_ID [/ R2_BUCKET]."""
+    ak = os.environ.get("R2_ACCESS_KEY_ID")
+    sk = os.environ.get("R2_SECRET_ACCESS_KEY")
+    acct = os.environ.get("R2_ACCOUNT_ID")
+    bucket = os.environ.get("R2_BUCKET", "bob-failover")
+    if not (ak and sk and acct):
+        return None, None
+    try:
+        import boto3  # provided by the workflow (pip install boto3); absent locally is fine
+    except ImportError:
+        print("[upload] R2 configured but boto3 missing — dual-write skipped", file=sys.stderr)
+        return None, None
+    client = boto3.client(
+        "s3",
+        endpoint_url=f"https://{acct}.r2.cloudflarestorage.com",
+        aws_access_key_id=ak,
+        aws_secret_access_key=sk,
+        region_name="auto",
+    )
+    return client, bucket
+
+
 # ----------------------- main -----------------------
 
 def should_skip(path: Path) -> bool:
@@ -216,6 +246,7 @@ def main() -> int:
         die("SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY must be set in .env.local")
 
     uploader = Uploader(url, key)
+    r2, r2_bucket = make_r2()
     manifest = load_manifest()
     new_manifest: dict[str, str] = {}
     files = iter_data_files()
@@ -223,8 +254,35 @@ def main() -> int:
     started = time.time()
     uploaded = 0
     skipped = 0
+    r2_uploaded = 0
+    r2_failed = 0
     failed: list[str] = []
     fail_by_class: dict[str, int] = {}  # instrumentation: real root cause by exc class
+
+    def r2_put(obj_path: str, abs_path: Path) -> None:
+        """Dual-write to R2; failure marks pending-retry (re-tried next cycle on
+        BOTH stores) but never aborts — Supabase is the canonical origin."""
+        nonlocal r2_uploaded, r2_failed
+        if r2 is None:
+            return
+        try:
+            r2.upload_file(str(abs_path), r2_bucket, obj_path)
+            r2_uploaded += 1
+        except Exception as exc:  # noqa: BLE001
+            r2_failed += 1
+            record_fail("r2:", obj_path, exc)
+            mark_pending(obj_path)
+
+    # One-time backfill: if R2 has no data_manifest.json yet (fresh/just-created
+    # bucket), mirror the FULL dataset this cycle — manifest-skipped files would
+    # otherwise never reach R2 until they happen to change.
+    r2_backfill = False
+    if r2 is not None:
+        try:
+            r2.head_object(Bucket=r2_bucket, Key="data_manifest.json")
+        except Exception:  # noqa: BLE001 — missing object/bucket → backfill
+            r2_backfill = True
+            print("[upload] R2 backfill mode: replicating full dataset")
 
     def record_fail(stage: str, obj_path: str, exc: BaseException) -> None:
         cls = classify_exc(exc)
@@ -251,6 +309,8 @@ def main() -> int:
         new_manifest[obj_path] = digest
         if manifest_get(obj_path) == digest:
             skipped += 1
+            if r2_backfill:
+                r2_put(obj_path, abs_path)
             continue
         try:
             uploader.upload(obj_path, abs_path)
@@ -260,6 +320,8 @@ def main() -> int:
         except Exception as exc:  # noqa: BLE001
             record_fail("", obj_path, exc)
             mark_pending(obj_path)  # force retry next run; do NOT drop silently
+            continue
+        r2_put(obj_path, abs_path)
 
     # ------------------------------------------------------------------
     # Audit: list every folder used + verify nothing is silently missing.
@@ -299,6 +361,22 @@ def main() -> int:
         except Exception as exc:  # noqa: BLE001
             record_fail("audit:", obj_path, exc)
             mark_pending(obj_path)  # force retry next run
+            continue
+        r2_put(obj_path, abs_path)
+
+    # Capa 6 día-1: write-then-read parity. Pull data_manifest.json back from R2
+    # and compare against the local bytes — proves the dual-write actually landed
+    # (not just HTTP 200). Watchdog reads this via upload_health next cycle.
+    r2_verify_ok = None
+    if r2 is not None:
+        try:
+            local_mf = DATA_DIR / "data_manifest.json"
+            if local_mf.exists():
+                got = r2.get_object(Bucket=r2_bucket, Key="data_manifest.json")["Body"].read()
+                r2_verify_ok = (hashlib.sha256(got).hexdigest() == file_sha256(local_mf))
+        except Exception as exc:  # noqa: BLE001
+            r2_verify_ok = False
+            print(f"[upload]   R2 parity check failed: {exc}", file=sys.stderr)
 
     save_manifest(new_manifest)
     dur = time.time() - started
@@ -328,6 +406,12 @@ def main() -> int:
         "stuck_count": len(stuck),
         "stuck_files": stuck[:50],
         "duration_sec": round(dur, 1),
+        "r2": {
+            "enabled": r2 is not None,
+            "uploaded": r2_uploaded,
+            "failed": r2_failed,
+            "parity_ok": r2_verify_ok,
+        },
     }
 
     # Own health file (read by watchdog next cycle as redundancy).
