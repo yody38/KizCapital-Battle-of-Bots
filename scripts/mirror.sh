@@ -522,6 +522,16 @@ MANIFEST_ROOT_LINE=$(python3 "$SCRIPT_DIR/data_manifest_root.py" "$DATA_DIR" 2>>
   && echo "[$(ts)] $MANIFEST_ROOT_LINE" >> "$LOG" \
   || { MANIFEST_ROOT_LINE=""; echo "[$(ts)] data_manifest_root non-fatal error (root skipped this cycle)" >> "$LOG"; }
 
+# Si este ciclo va a notarizar el root del día (aún no hay entrada de hoy en el
+# ledger), preservar el manifest EXACTO en path fechado ANTES del upload — el
+# runner es efímero y el data_manifest.json vivo se sobrescribe cada ciclo,
+# dejando el root notarizado inverificable (hallazgo restore-drill 2026-06-10).
+if [ -n "$MANIFEST_ROOT_LINE" ] && ! grep -q "^$(date -u +%Y-%m-%d)" "$SCRIPT_DIR/../ledger/roots.txt" 2>/dev/null; then
+  mkdir -p "$DATA_DIR/ledger_manifests"
+  cp "$DATA_DIR/data_manifest.json" "$DATA_DIR/ledger_manifests/$(date -u +%Y-%m-%d).json"
+  echo "[$(ts)] ledger manifest preservado: ledger_manifests/$(date -u +%Y-%m-%d).json" >> "$LOG"
+fi
+
 # Emit per-stage latency telemetry BEFORE upload so pipeline_timing.json +
 # pipeline_timing_history.jsonl are part of the upload set (the CI runner is
 # ephemeral — anything written after upload is lost). upload_ms is unknown here

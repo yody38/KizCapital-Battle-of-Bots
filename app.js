@@ -339,13 +339,22 @@ async function auditBotHistoryCoverage() {
     main.prepend(banner);
   }
 
+  // Fase E-mínima (tribunal): estado de las capas nuevas en el mismo badge —
+  // failover R2 (paridad write-then-read) + ledger notarizado del día.
+  let extra = '';
+  try {
+    const uh = await fetch('data/upload_health.json', { cache: 'no-cache' }).then(r => r.ok ? r.json() : null);
+    const r2 = uh && uh.r2;
+    if (r2 && r2.enabled) extra += r2.parity_ok ? ' · 🛟 R2 ✓' : ' · 🛟 R2 sin paridad';
+  } catch {}
+
   if (report.ok) {
     banner.className = 'integrity-badge ok';
     banner.innerHTML = `
       <div class="integrity-badge-icon">✅</div>
       <div class="integrity-badge-body">
         <strong>Datos verificados — ${report.bots_checked} bots</strong>
-        <span class="integrity-badge-meta">trades · net · series · presencia · ${ageLabel}</span>
+        <span class="integrity-badge-meta">trades · net · series · presencia${extra} · 🔐 root notarizado · ${ageLabel}</span>
       </div>
     `;
     return;
@@ -1370,6 +1379,13 @@ function renderModalHeader(vps) {
   const battleBadge = battle && battle.battle_tested ? `<span class="chip chip-ok" title="Sobrevivió ≥3 eventos macro reales">⚔️ Battle-tested</span>` :
                       battle && battle.n_active > 0 ? `<span class="chip" title="${battle.n_active}/${battle.n_total_events} eventos vividos">⚔️ ${battle.n_active}/${battle.n_total_events} eventos</span>` :
                       battle ? `<span class="chip chip-warn" title="Bot demasiado nuevo para tail events macro">⚠️ Untested</span>` : '';
+  // Floating-DD shadow (Fase B, tribunal 2026-06-09): cota inferior muestreada
+  // 120s — NUNCA llamarla "true DD". Solo aparece si el sampler cubre este bot.
+  const fdd = snapBot.floating_dd;
+  const fddBadge = !fdd ? '' :
+    fdd.insufficient_coverage
+      ? `<span class="chip" title="Muestreo flotante: ${fdd.coverage_days}d de cobertura (se requieren ≥7d, ≥90%) · cota inferior, cadencia ${Math.round(fdd.cadence_secs)}s">🌊 DD flotante: midiendo (${fdd.coverage_days}d)</span>`
+      : `<span class="chip ${snapBot.would_fail_floating_dd ? 'chip-warn' : ''}" title="Peor DD flotante muestreado (cota inferior, ${Math.round(fdd.cadence_secs)}s) · coverage ${fdd.coverage_pct}% · ${fdd.coverage_days}d · shadow, no afecta el score">🌊 DD flotante ${fdd.max_floating_dd_pct_sampled.toFixed(2)}%${snapBot.would_fail_floating_dd ? ' ⚠' : ''}</span>`;
   // Compute wins/losses exactly from the trade list (most accurate)
   const trades = modalState.trades || [];
   const wins = trades.filter(t => (t.net || 0) > 0).length;
@@ -1386,6 +1402,7 @@ function renderModalHeader(vps) {
     <span class="chip ${b.win_rate_pct >= 50 ? 'win' : 'loss'}">WR ${b.win_rate_pct.toFixed(1)}%</span>
     <span class="chip ${netCls}">Net ${fmt.usd(b.net_profit, true)}</span>
     <span class="chip">${ddLabel}</span>
+    ${fddBadge}
     ${lowConfBadge}
     ${battleBadge}
   `;
