@@ -62,6 +62,13 @@ def utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _parse_prev_ts(s: str):
+    try:
+        return datetime.fromisoformat(s)
+    except Exception:
+        return None
+
+
 def atomic_write(path: Path, payload: dict[str, Any]) -> None:
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(json.dumps(payload, separators=(",", ":")), encoding="utf-8")
@@ -79,12 +86,23 @@ def load_json(path: Path, default: Any) -> Any:
 # builder is already proven safe by live_publisher on VPS5) -----------------
 
 def acquire_lock() -> bool:
-    if LOCK_PATH.exists():
-        prev = load_json(LOCK_PATH, {})
-        if time.time() - float(prev.get("ts", 0)) < LOCK_STALE_SECS:
-            return False
-    atomic_write(LOCK_PATH, {"pid": os.getpid(), "ts": time.time()})
-    return True
+    # O_CREAT|O_EXCL = atómico (tribunal post-impl): dos one-shots simultáneos
+    # no pueden ganar ambos el check-then-write anterior.
+    for _ in range(2):
+        try:
+            fd = os.open(LOCK_PATH, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.write(fd, json.dumps({"pid": os.getpid(), "ts": time.time()}).encode())
+            os.close(fd)
+            return True
+        except FileExistsError:
+            prev = load_json(LOCK_PATH, {})
+            if time.time() - float(prev.get("ts", 0)) < LOCK_STALE_SECS:
+                return False
+            try:
+                LOCK_PATH.unlink()   # stale: retry the atomic create once
+            except OSError:
+                return False
+    return False
 
 
 def release_lock() -> None:
@@ -268,6 +286,15 @@ def run_cycle(cadence_secs: float) -> dict[str, Any]:
     if last_ts and ts <= last_ts:
         return {"ok": False, "reason": f"non-monotonic ts {ts} <= {last_ts}"}
 
+    # time_underwater determinista (tribunal post-impl): dt = gap real desde la
+    # muestra anterior, capado a 2*cadencia — huecos largos no inflan el tiempo
+    # bajo agua y multi-driver denso no lo duplica (clamp inferior = 0).
+    dt_min = cadence_secs / 60.0
+    prev_dt = _parse_prev_ts(last_ts)
+    if prev_dt is not None:
+        gap = (now - prev_dt).total_seconds()
+        dt_min = max(0.0, min(gap, 2 * cadence_secs)) / 60.0
+
     sampled_accounts = 0
     sampled_magics = 0
     unknown_magics = 0
@@ -283,15 +310,16 @@ def run_cycle(cadence_secs: float) -> dict[str, Any]:
             continue
         login = row["login"]
         active = active_by_login.get(login, set())
-        known = {m: s for m, s in row["by_magic"].items() if int(m) in active or int(m) == 0}
-        unknown_magics += len(row["by_magic"]) - len({m: s for m, s in row["by_magic"].items() if int(m) in active})
+        # unknown = magics con posición que NO están en el snapshot, excluyendo
+        # magic=0 (trades manuales/pseudo-bot conocido, no es anomalía).
+        unknown_magics += sum(1 for m in row["by_magic"] if int(m) not in active and int(m) != 0)
         ib = initial_balances.get(login, DEFAULT_INITIAL_BALANCE)
         lines.append(json.dumps({
             "ts": ts, "login": login, "balance": row["balance"], "equity": row["equity"],
             "margin_level": row["margin_level"], "floating": row["floating"],
             "by_magic": {str(m): s for m, s in row["by_magic"].items()},
         }, separators=(",", ":")))
-        update_summary(summary, ts, day, row, active, ib, cadence_secs / 60.0)
+        update_summary(summary, ts, day, row, active, ib, dt_min)
         sampled_accounts += 1
         sampled_magics += sum(1 for m in row["by_magic"] if int(m) in active)
 
@@ -332,7 +360,12 @@ def main() -> None:
         sys.exit(0)   # benign overlap: skip, don't error
     try:
         result = run_cycle(args.cadence)
-        print(json.dumps({k: v for k, v in result.items() if k != "recent_ts"}))
+        # stdout llega a logs PÚBLICOS (GH Actions en repo público): redactar
+        # detalle de skipped (contiene logins); el sampler_status.json local
+        # conserva el detalle completo.
+        out = {k: v for k, v in result.items() if k not in ("recent_ts", "skipped")}
+        out["skipped_count"] = len(result.get("skipped", []) or [])
+        print(json.dumps(out))
         sys.exit(0 if result.get("ok") else 1)
     finally:
         release_lock()

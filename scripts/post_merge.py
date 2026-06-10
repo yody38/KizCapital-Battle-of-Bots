@@ -2294,24 +2294,41 @@ def apply_floating_dd_shadow(snap, data_dir):
                 try:
                     with open(p) as f:
                         store[vps] = json.load(f)
-                except Exception:
-                    pass
+                except Exception as exc:
+                    print(f"[floating-dd-shadow] WARN: unreadable {vps}/{name}: {exc}")
     if not summaries:
         return None
 
     def _agg(days_map, cadence_secs):
+        """Coverage metrológico (tribunal post-impl): span CALENDARIO (no nº de
+        días con datos — eso oculta huecos), y clamp por-día al máximo esperado
+        ANTES de sumar (multi-driver duplicado no puede inflar coverage)."""
         days = sorted(days_map)
-        samples = sum(int(d.get("samples", 0)) for d in days_map.values())
-        span_days = len(days)
         expected_per_day = 86400.0 / max(cadence_secs, 1.0)
-        coverage_pct = round(min(100.0, samples / (span_days * expected_per_day) * 100.0), 1) if span_days else 0.0
+        samples = sum(int(d.get("samples", 0)) for d in days_map.values())
+        clamped = sum(min(int(d.get("samples", 0)), expected_per_day) for d in days_map.values())
+        try:
+            d0 = datetime.strptime(days[0], "%Y-%m-%d")
+            d1 = datetime.strptime(days[-1], "%Y-%m-%d")
+            span_days = (d1 - d0).days + 1
+        except Exception:
+            span_days = len(days)
+        coverage_pct = round(min(100.0, clamped / (span_days * expected_per_day) * 100.0), 1) if span_days else 0.0
         return days, samples, span_days, coverage_pct
 
     bots_covered = 0
     accounts_covered = 0
     would_fail = 0
+    now_utc = datetime.now(timezone.utc)
     for vps, summary in summaries.items():
-        cadence = float((statuses.get(vps) or {}).get("cadence_secs") or 120.0)
+        st = statuses.get(vps) or {}
+        cadence = float(st.get("cadence_secs") or 120.0)
+        # Staleness gate (tribunal post-impl): a dead sampler must read as
+        # insufficient data, never as a silently-frozen "healthy" metric.
+        last_ts = _parse_iso_safe(st.get("last_sample_ts"))
+        vps_stale = (last_ts is None) or ((now_utc - last_ts).total_seconds() > 6 * 3600)
+        if vps_stale:
+            print(f"[floating-dd-shadow] WARN: {vps} sampler stale (last={st.get('last_sample_ts')}) — flagged insufficient")
         bot_days = summary.get("bots", {})
         acc_days = summary.get("accounts", {})
 
@@ -2324,9 +2341,13 @@ def apply_floating_dd_shadow(snap, data_dir):
                 continue
             days, samples, span_days, coverage_pct = _agg(days_map, cadence)
             worst = max(float(d.get("worst_floating_dd_pct", 0.0)) for d in days_map.values())
-            sufficient = coverage_pct >= FLOATING_DD_MIN_COVERAGE_PCT and span_days >= 1
+            # Precondición tribunal: span>=7d calendario Y >=5 días con datos Y
+            # sampler vivo — sin eso la métrica no es elegible ni para shadow-fail.
+            sufficient = (coverage_pct >= FLOATING_DD_MIN_COVERAGE_PCT
+                          and span_days >= 7 and len(days) >= 5 and not vps_stale)
             fail = (worst > FLOATING_DD_SHADOW_THRESHOLD_PCT) if sufficient else None
             b["floating_dd"] = {
+                "stale": vps_stale,
                 "max_floating_dd_pct_sampled": round(worst, 3),
                 "time_underwater_min_total": round(sum(float(d.get("time_underwater_min", 0.0))
                                                        for d in days_map.values()), 1),

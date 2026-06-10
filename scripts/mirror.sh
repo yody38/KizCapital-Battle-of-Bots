@@ -553,6 +553,11 @@ if [ "${LEDGER_COMMIT:-0}" = "1" ] && [ -n "$MANIFEST_ROOT_LINE" ]; then
   (
     cd "$SCRIPT_DIR/.." || exit 0
     mkdir -p ledger
+    # 1 notarización por DÍA UTC (tribunal post-impl): ~48 commits/día solo
+    # añaden ruido a la historia; el primer root del día ancla la jornada.
+    if grep -q "^$(date -u +%Y-%m-%d)" ledger/roots.txt 2>/dev/null; then
+      echo "[$(ts)] ledger: root de hoy ya notarizado — skip" >> "$LOG"; exit 0
+    fi
     # .txt, NOT .log — .gitignore's *.log would silently no-op the git add
     echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) $MANIFEST_ROOT_LINE" >> ledger/roots.txt
     git add ledger/roots.txt

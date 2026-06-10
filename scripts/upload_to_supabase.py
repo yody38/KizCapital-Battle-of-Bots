@@ -280,9 +280,17 @@ def main() -> int:
     # otherwise never reach R2 until they happen to change.
     r2_backfill = False
     if r2 is not None:
+        # Preflight: bucket ausente => desactivar R2 este ciclo con 1 línea de
+        # log (no 278 fails de ruido). Bucket presente sin manifest => backfill.
+        try:
+            r2.head_bucket(Bucket=r2_bucket)
+        except Exception:  # noqa: BLE001
+            print(f"[upload] R2 bucket '{r2_bucket}' unreachable — dual-write off this cycle", file=sys.stderr)
+            r2 = None
+    if r2 is not None:
         try:
             r2.head_object(Bucket=r2_bucket, Key="data_manifest.json")
-        except Exception:  # noqa: BLE001 — missing object/bucket → backfill
+        except Exception:  # noqa: BLE001 — missing object → backfill
             r2_backfill = True
             print("[upload] R2 backfill mode: replicating full dataset")
 

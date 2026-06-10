@@ -7,12 +7,14 @@ name: sampler-tick
 # kiz-live-bridge worker (pull SSH); migrate this loop there once Railway
 # auth is restored, then disable this workflow.
 
+# SINGLE-WRITER (tribunal post-impl): Railway sampler-bridge es el ÚNICO driver
+# primario. Este workflow queda como respaldo MANUAL (workflow_dispatch) o por
+# repository_dispatch puntual — el cron */30 se eliminó porque su
+# cancel-in-progress mataba el loop activo y duplicaba muestras.
 on:
-  schedule:
-    - cron: "*/30 * * * *"     # UTC backup; real cadence comes from overlap + dispatch
   workflow_dispatch: {}
   repository_dispatch:
-    types: [sampler-tick]      # optional external trigger (VPS1 dispatcher)
+    types: [sampler-tick]
 
 concurrency:
   group: sampler-tick
