@@ -260,8 +260,10 @@ def main() -> int:
     fail_by_class: dict[str, int] = {}  # instrumentation: real root cause by exc class
 
     def r2_put(obj_path: str, abs_path: Path) -> None:
-        """Dual-write to R2; failure marks pending-retry (re-tried next cycle on
-        BOTH stores) but never aborts — Supabase is the canonical origin."""
+        """Dual-write to R2. R2 failures are telemetry ONLY (upload_health.r2):
+        they never touch the canonical failed[] list, never mark pending-retry
+        and never abort the cycle — Supabase is the canonical origin, and the
+        backfill-on-missing-manifest pass guarantees R2 convergence next cycle."""
         nonlocal r2_uploaded, r2_failed
         if r2 is None:
             return
@@ -270,8 +272,8 @@ def main() -> int:
             r2_uploaded += 1
         except Exception as exc:  # noqa: BLE001
             r2_failed += 1
-            record_fail("r2:", obj_path, exc)
-            mark_pending(obj_path)
+            if r2_failed <= 3:
+                print(f"[upload]   r2 dual-write fail ({obj_path}): {exc}", file=sys.stderr)
 
     # One-time backfill: if R2 has no data_manifest.json yet (fresh/just-created
     # bucket), mirror the FULL dataset this cycle — manifest-skipped files would
