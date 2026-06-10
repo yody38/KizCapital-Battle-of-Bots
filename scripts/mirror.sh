@@ -496,6 +496,11 @@ T_FETCH_LEDGER_MS=$(( $(now_ms) - _t0 ))
 # Fail-closed: if this breaks, scores/correlations/portfolio.json go stale and
 # the dashboard would mix fresh raw data with old derived data — abort.
 _t0=$(now_ms)
+# Test de transferencia demo→real (tribunal P1) — ANTES de post_merge, que
+# preserva bots[].transfer al re-escribir. Best-effort: nunca aborta el ciclo.
+python3 "$SCRIPT_DIR/demo_real_transfer.py" "$DATA_DIR" >> "$LOG" 2>&1 \
+  || echo "[$(ts)] demo_real_transfer non-fatal error (transfer skipped this cycle)" >> "$LOG"
+
 if ! python3 "$SCRIPT_DIR/post_merge.py" "$DATA_DIR" >> "$LOG" 2>&1; then
   echo "[$(ts)] post_merge FAIL — aborting cycle (promotion scores and correlations stale)" >> "$LOG"
   exit 3

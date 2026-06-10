@@ -1379,6 +1379,10 @@ function renderModalHeader(vps) {
   const battleBadge = battle && battle.battle_tested ? `<span class="chip chip-ok" title="Sobrevivió ≥3 eventos macro reales">⚔️ Battle-tested</span>` :
                       battle && battle.n_active > 0 ? `<span class="chip" title="${battle.n_active}/${battle.n_total_events} eventos vividos">⚔️ ${battle.n_active}/${battle.n_total_events} eventos</span>` :
                       battle ? `<span class="chip chip-warn" title="Bot demasiado nuevo para tail events macro">⚠️ Untested</span>` : '';
+  // Transferencia demo→real (tribunal P1): ¿el gemelo demo predice al real?
+  const tr = snapBot.transfer;
+  const trBadge = !(tr && tr.status === 'ok') ? '' :
+    `<span class="chip ${tr.match_rate_pct >= 70 ? 'chip-ok' : 'chip-warn'}" title="Gemelo demo ${tr.demo_twin} · ${tr.n_pairs} trades emparejados (±120s) · Δnet medio $${tr.mean_delta_net} · tracking error $${tr.tracking_error} · ${tr.real_only} solo-real / ${tr.demo_only} solo-demo">🔁 Transfer ${tr.match_rate_pct}%${tr.match_rate_pct < 70 ? ' ⚠' : ''}</span>`;
   // Floating-DD shadow (Fase B, tribunal 2026-06-09): cota inferior muestreada
   // 120s — NUNCA llamarla "true DD". Solo aparece si el sampler cubre este bot.
   const fdd = snapBot.floating_dd;
@@ -1403,6 +1407,7 @@ function renderModalHeader(vps) {
     <span class="chip ${netCls}">Net ${fmt.usd(b.net_profit, true)}</span>
     <span class="chip">${ddLabel}</span>
     ${fddBadge}
+    ${trBadge}
     ${lowConfBadge}
     ${battleBadge}
   `;
