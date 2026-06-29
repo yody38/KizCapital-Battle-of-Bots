@@ -90,6 +90,11 @@ function writeSnapCache(data) {
   try { localStorage.setItem(SNAP_CACHE_KEY, JSON.stringify(data)); } catch { /* quota — non-fatal */ }
 }
 
+// Una cuenta real "vacía" (balance 0 y equity 0) no se muestra en la sección Cuentas Reales.
+function isFundedRealAccount(a) {
+  return !(Number(a.balance) === 0 && Number(a.equity) === 0);
+}
+
 // Pure processing of a snapshot object into app state + render. Shared by the
 // instant cache paint and the live network load so both go through one path.
 function applySnapshot(data) {
@@ -268,7 +273,10 @@ function render() {
   const accCountEl = document.getElementById('account-count');
   if (accCountEl) accCountEl.textContent = state.demoAccounts.length;
   const realCountEl = document.getElementById('real-account-count');
-  if (realCountEl) realCountEl.textContent = state.realLogins ? state.realLogins.size : 0;
+  if (realCountEl) {
+    const accts = (s.real_portfolio && s.real_portfolio.accounts) || [];
+    realCountEl.textContent = accts.filter(isFundedRealAccount).length;
+  }
   const totalBotsEl = document.getElementById('total-bots-count');
   if (totalBotsEl) {
     const totalBots = (s.bots || []).filter(b => (b.magic || 0) !== 0).length;
@@ -630,13 +638,14 @@ function renderRealAccounts() {
   const s = state.snapshot;
   const section = document.getElementById('real-accounts');
   const rp = s.real_portfolio || { accounts: [], open_positions: [], total_balance: 0, total_equity: 0, total_unrealised_pnl: 0, account_count: 0 };
-  if (!rp.accounts.length) {
+  const visible = rp.accounts.filter(isFundedRealAccount);
+  if (!visible.length) {
     section.hidden = true;
     return;
   }
   section.hidden = false;
 
-  document.getElementById('real-count').textContent = rp.account_count;
+  document.getElementById('real-count').textContent = visible.length;
   document.getElementById('real-balance').textContent = fmt.usd(rp.total_balance);
   document.getElementById('real-equity').textContent = fmt.usd(rp.total_equity);
   const floatEl = document.getElementById('real-floating');
@@ -647,7 +656,7 @@ function renderRealAccounts() {
 
   // Cards per real account with sparkline
   const cards = document.getElementById('real-cards');
-  cards.innerHTML = rp.accounts.map(a => {
+  cards.innerHTML = visible.map(a => {
     const pnlCls = signedClass(a.profit);
     return `
       <div class="real-card account-card" data-vps="${a.vps}" data-login="${a.login}" data-real-login="${a.login}" title="Click para ver los bots de esta cuenta">
@@ -669,7 +678,7 @@ function renderRealAccounts() {
 
   // Draw sparklines after DOM update
   requestAnimationFrame(() => {
-    rp.accounts.forEach(a => {
+    visible.forEach(a => {
       const points = historyForLogin(a.login);
       const canvas = document.getElementById(`spark-${a.login}`);
       const color = a.profit >= 0 ? '#e8c547' : '#ff6b8b';
