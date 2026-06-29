@@ -57,8 +57,11 @@ DEFAULT_TOLERANCE = 0.05  # USD
 # are both derived from the same merge and therefore tautological — actually catches
 # a real account silently dropping out. Adding a 3rd real account requires editing
 # this set (documented manual maintenance, same pattern as vps-access).
+# Roster de cuentas reales activas (mantener en sync con live_publisher.REAL_LOGINS
+# y post_merge.detect_real_accounts). #3446 (vps6, $0) retirada 2026-06-29; #43306
+# (vps5) incorporada como 3ª real con fondos.
 EXPECTED_REAL = {("vps5", 25425), ("vps5", 32081),
-                 ("vps6", 3446)}  # real $10 ADNBrokerCFD, confirmada 2026-06-09, aún sin operar
+                 ("vps5", 43306)}
 
 
 def load_env() -> dict[str, str]:

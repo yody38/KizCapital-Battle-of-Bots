@@ -1397,8 +1397,9 @@ def detect_real_accounts(snap):
         if "real" in kind or a.get("is_real"):
             real.add((a.get("vps"), a.get("login")))
             continue
-        # Project-known real accounts (VPS5).
-        if a.get("vps") == "vps5" and a.get("login") in (25425, 32081):
+        # Project-known real accounts (VPS5). Sync con verify_integrity.EXPECTED_REAL
+        # y live_publisher.REAL_LOGINS. #43306 añadida 2026-06-29; #3446 retirada.
+        if a.get("vps") == "vps5" and a.get("login") in (25425, 32081, 43306):
             real.add((a.get("vps"), a.get("login")))
     return real
 

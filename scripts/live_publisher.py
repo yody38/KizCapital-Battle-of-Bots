@@ -55,7 +55,9 @@ LIVE_VPS_TAG = os.environ.get("LIVE_VPS_TAG", "vps5")
 PUBLISHER_ID = f"{LIVE_VPS_TAG}-{socket.gethostname()}"
 HTTP_TIMEOUT = 5
 
-REAL_LOGINS: set[int] = {25425, 32081}
+# Roster de cuentas reales (sync con verify_integrity.EXPECTED_REAL y
+# post_merge.detect_real_accounts). #43306 añadida 2026-06-29; #3446 retirada.
+REAL_LOGINS: set[int] = {25425, 32081, 43306}
 TERMINAL_GLOB = r"C:\Program Files\MetaTrader 5 *\terminal64.exe"
 
 # Exit (so Railway restarts the SSH session) after a login is missing this many
