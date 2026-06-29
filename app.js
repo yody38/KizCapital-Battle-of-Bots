@@ -576,12 +576,26 @@ function applyLivePatch(row, opts) {
     _setTextWithFlash(marginEl, fmt.usd(row.margin), flash);
   }
 
-  // Update header totals — aggregate across all known logins.
+  // Update header totals — aggregate across ALL funded real accounts (snapshot roster),
+  // using the live row where the stream has it and the snapshot value otherwise. This
+  // keeps the total correct for a real account that isn't in the live stream (e.g. one
+  // not in the publisher's REAL_LOGINS) instead of silently dropping it from the sum.
   let totBal = 0, totEq = 0, totFloat = 0;
-  for (const r of liveState.byLogin.values()) {
-    totBal += Number(r.balance) || 0;
-    totEq += Number(r.equity) || 0;
-    totFloat += Number(r.profit) || 0;
+  const snapReals = ((state.snapshot && state.snapshot.real_portfolio && state.snapshot.real_portfolio.accounts) || [])
+    .filter(isFundedRealAccount);
+  if (snapReals.length) {
+    for (const a of snapReals) {
+      const r = liveState.byLogin.get(a.login);
+      totBal += Number(r ? r.balance : a.balance) || 0;
+      totEq += Number(r ? r.equity : a.equity) || 0;
+      totFloat += Number(r ? r.profit : a.profit) || 0;
+    }
+  } else {
+    for (const r of liveState.byLogin.values()) {
+      totBal += Number(r.balance) || 0;
+      totEq += Number(r.equity) || 0;
+      totFloat += Number(r.profit) || 0;
+    }
   }
   _setTextWithFlash(document.getElementById('real-balance'), fmt.usd(totBal), flash);
   _setTextWithFlash(document.getElementById('real-equity'), fmt.usd(totEq), flash);
