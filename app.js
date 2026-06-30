@@ -118,7 +118,9 @@ function applySnapshot(data) {
   state.demoAccounts = (data.accounts || []).filter(a => !a.is_real);
   // Only show demo accounts where balance > $10,000 (initial deposit for all demo accounts)
   const DEMO_INITIAL_DEPOSIT = 10000;
-  const allDemoBots = (data.bots || []).filter(b => !state.realLogins.has(b.account_login));
+  // Exclude bots already running on a real account — by login AND by magic (an EA
+  // deployed to real must not compete in any section, even its demo twin).
+  const allDemoBots = (data.bots || []).filter(b => !state.realLogins.has(b.account_login) && !state.realMagics.has(b.magic));
   const profitableLogins = new Set(
     state.demoAccounts
       .filter(a => (a.balance || 0) > DEMO_INITIAL_DEPOSIT)
@@ -1819,6 +1821,7 @@ function renderCandidates() {
         <td class="num"><strong style="color:var(--accent)">${b.promotion_score.toFixed(1)}</strong> ${confChip}</td>
         <td>${statusBadge(b.promotion_status)}</td>
         <td class="mono">${b.magic}</td>
+        <td>${(b.symbols || []).map(s => `<span class="symbol-tag">${s}</span>`).join('') || '—'}</td>
         <td>${vpsBadge(b.vps)}</td>
         <td class="mono">${b.account_login}</td>
         <td class="num">${b.calmar != null ? b.calmar.toFixed(2) : '—'}</td>
