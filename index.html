@@ -309,8 +309,8 @@
         <h2 class="section-title balanced-title">🎯 Candidatos a Cuenta Real</h2>
         <p class="balanced-subtitle">Top bots por <strong>Promotion Score</strong> híbrido (<strong>dinero</strong> + Calmar/DD + consistencia + estabilidad). Los <strong>READY</strong> son los candidatos directos a cuenta real · <span id="candidates-count">0</span> bots evaluados · <strong>100% dinámico</strong>: se recalcula cada 30 min, el que sube de score entra y el más débil sale.</p>
       </div>
-      <div class="balanced-legend" title="Cómo se elige (todo re-derivable, sin fijación):&#10;&#10;1) GATING duro — falla uno y queda fuera: trades≥30 · meses activo≥3 · DD≤10% del balance · net>0 · sin decay · magic≠0.&#10;&#10;2) SCORE 0-100 = suma ponderada: Calmar .22 · Dinero (return mensual neto honesto) .20 · % Meses+ .18 · Sortino .12 · Decay .12 · Profit Factor .08 · Edad .05 · Trades .03.&#10;&#10;3) DOMINANCIA (insignia, no filtro): ✅ Caballo = top-25% (≥P75) en dinero, riesgo, consistencia y estabilidad, y ningún otro bot lo supera en TODOS los ejes. ⚠ Discutible = no cumple.&#10;&#10;Los 3 READY = los 3 de mayor score (siempre 3). Escalabilidad fuera (cuentas $5-10K).">
-        🚦 Gating: trades≥30 · meses≥3 · DD≤10% · sin decay · net&gt;0 — score híbrido + dominancia (ⓘ)
+      <div class="balanced-legend" title="Cómo se elige (todo re-derivable, sin fijación, SIEMPRE 3):&#10;&#10;1) GATING duro — falla uno y queda fuera: trades≥30 · meses activo≥3 · DD≤10% del balance · net>0 · sin decay · magic≠0.&#10;&#10;2) SCORE 0-100 = suma ponderada (dinero + bajo DD + consistencia + CALIDAD): Calmar .17 · Dinero (return mens. neto) .17 · % Meses+ .13 · Sortino .09 · Decay .09 · Robustez OOS .08 · Seguridad (1−prob.negativo) .08 · Cola/CVaR .06 · Profit Factor .06 · Significancia .04 · Edad .02 · Trades .01.&#10;&#10;3) DIVERSIFICACIÓN: entre bots de score parecido se prefiere distinto par, para que los 3 (que suben juntos a una cuenta) no sean clones.&#10;&#10;4) Insignias (no filtran): DOMINANCIA ✅ Caballo = top-25% (≥P75) en dinero/riesgo/consistencia/estabilidad y nadie lo supera en todo. CALIDAD 🟢/🟡/🔴 = media de robustez OOS, seguridad, cola y significancia.&#10;&#10;Los 3 READY = los 3 mejores por score (siempre 3). Escalabilidad fuera ($5-10K).">
+        🚦 Gating: trades≥30 · meses≥3 · DD≤10% · net&gt;0 — score híbrido + calidad + dominancia + diversificación (ⓘ)
       </div>
     </div>
     <div class="table-controls" style="margin-bottom:12px">
@@ -329,6 +329,7 @@
             <th class="num">Score</th>
             <th>Estado</th>
             <th title="✅ Caballo = top-25% (≥P75) en dinero, riesgo, consistencia y estabilidad, y nadie lo supera en todo · ⚠ Discutible = no cumple (ver tooltip)">Dominancia</th>
+            <th title="Calidad media de los 4 factores nuevos: robustez fuera de muestra (OOS), seguridad (riesgo de quedar negativo), cola/CVaR y significancia estadística. 🟢 sólido · 🟡 medio · 🔴 flojo (ver tooltip)">Calidad</th>
             <th>Magic</th>
             <th>Par</th>
             <th>VPS</th>
@@ -816,6 +817,6 @@
 
 </main>
 
-<script src="app.js?v=20260630b"></script>
+<script src="app.js?v=20260630c"></script>
 </body>
 </html>

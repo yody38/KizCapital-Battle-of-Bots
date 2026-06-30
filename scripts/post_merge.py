@@ -44,14 +44,21 @@ from _metrics import clamp01, pearson, percentile, stdev
 # ($5K/$10K, leveraged — 10% own capital), so capital preservation (Calmar/DD) and
 # raw profit lead; scalability/capacity is irrelevant at this size → not weighted.
 WEIGHTS = {
-    "calmar": 0.22,           # net / maxDD — núcleo "gana con bajo DD"
-    "net_return": 0.20,       # rentabilidad mensual neta honesta — "ganar dinero"
-    "months_positive_pct": 0.18,
-    "sortino": 0.12,
-    "decay": 0.12,            # 1.0 - decay penalty
-    "profit_factor": 0.08,
-    "age": 0.05,              # months_active vs 12
-    "trade_count": 0.03,      # trades vs 200
+    "calmar": 0.17,           # net / maxDD — núcleo "gana con bajo DD"
+    "net_return": 0.17,       # rentabilidad mensual neta honesta — "ganar dinero"
+    "months_positive_pct": 0.13,
+    "sortino": 0.09,
+    "decay": 0.09,            # 1.0 - decay penalty
+    # --- Quality factors (2026-06-30b): ya se calculaban (oos/stress/institutional/CI)
+    # pero NO entraban en la selección. Entran como SCORE (nunca gates → la sección
+    # SIEMPRE muestra los 3 mejores) + insignias. Suben a los robustos/seguros.
+    "oos_robustness": 0.08,   # Walk-Forward: edge sobrevive datos no vistos (anti curve-fit)
+    "safety": 0.08,           # 1 - prob_negative (Monte Carlo) — preservación de capital
+    "tail_quality": 0.06,     # tail_ratio / CVaR — sin cola de pérdidas que mata cuentas
+    "significance": 0.04,     # robustez estadística (permutation p / CI) — no es suerte
+    "profit_factor": 0.06,
+    "age": 0.02,              # months_active vs 12
+    "trade_count": 0.01,      # trades vs 200
 }
 
 # Normalization caps (bot at cap = 1.0; above = 1.0; negative = 0.0).
@@ -240,6 +247,66 @@ def norm_net_return(net_after_commission, balance, months_active):
     return clamp01(monthly_pct / CAPS["net_monthly_return_pct"])
 
 
+# --- Quality-factor norms (consume Pass-2 enrichments; filled in re-scoring pass) ---
+# All return 0..1; missing data → a neutral-low default so a bot is not over-rewarded
+# for an UNKNOWN, yet the section still fills 3 (these are score factors, never gates).
+
+def norm_oos(oos):
+    """Out-of-sample robustness from walk-forward. Blends fraction of test folds
+    profitable, oos_score, and (1 - permutation p-value). Missing OOS → 0.3."""
+    if not oos:
+        return 0.3
+    parts = []
+    if oos.get("oos_score") is not None:
+        parts.append(clamp01(oos["oos_score"]))
+    if oos.get("pct_folds_test_profitable") is not None:
+        parts.append(clamp01(oos["pct_folds_test_profitable"]))
+    p = oos.get("permutation_p_value")
+    if p is not None:
+        parts.append(clamp01(1.0 - (p / 0.5)))  # p=0 →1.0, p≥0.5 →0
+    return sum(parts) / len(parts) if parts else 0.3
+
+
+def norm_safety(stress):
+    """Capital preservation = 1 - prob_negative (Monte Carlo bootstrap probability the
+    bot ends net-negative). prob_ruin is ~0 for all demo bots, so prob_negative is the
+    discriminating safety signal. Missing → 0.5."""
+    if not stress or stress.get("prob_negative") is None:
+        return 0.5
+    return clamp01(1.0 - stress["prob_negative"])
+
+
+def norm_tail(inst):
+    """Downside-tail quality. tail_ratio≥1 = upside ≥ downside extremes; map 0.5→0,
+    1.5→1.0. Penalize a very negative CVaR (worse than -15% per-trade). Missing → 0.5."""
+    if not inst:
+        return 0.5
+    parts = []
+    tr = inst.get("tail_ratio")
+    if tr is not None:
+        parts.append(clamp01((tr - 0.5) / 1.0))
+    cvar = inst.get("cvar_95_pct")  # negative; closer to 0 = better
+    if cvar is not None:
+        parts.append(clamp01(1.0 + (cvar / 0.15)))  # cvar 0→1.0, -0.15→0
+    return sum(parts) / len(parts) if parts else 0.5
+
+
+def norm_significance(oos, ci):
+    """Is the edge statistically real (not small-sample luck)? Uses OOS permutation
+    p-value (primary) and the bootstrap-CI stability of Sharpe. Missing → 0.3."""
+    parts = []
+    p = (oos or {}).get("permutation_p_value")
+    if p is not None:
+        parts.append(clamp01(1.0 - (p / 0.5)))
+    sh = (ci or {}).get("sharpe") or {}
+    if sh.get("lo") is not None:
+        # reward a CI lower bound that is >0 (stable edge); scale around 0
+        parts.append(clamp01(0.5 + sh["lo"]))
+    elif ci is not None and ci.get("low_confidence") is not None:
+        parts.append(0.2 if ci.get("low_confidence") else 0.8)
+    return sum(parts) / len(parts) if parts else 0.3
+
+
 def compute_score(bot, account_balance):
     """Returns (score_0_100, components_dict, gating_pass_dict, fails_list)."""
     components = {
@@ -250,9 +317,14 @@ def compute_score(bot, account_balance):
         "profit_factor": norm_pf(bot.get("profit_factor")),
         "age": norm_age(bot.get("months_active")),
         "trade_count": norm_trades(bot.get("trades")),
-        # Placeholder: net_after_commission isn't computed yet at this stage; the
-        # money factor is filled in the re-scoring pass (see "5b)" in the pipeline).
+        # Placeholders: net_after_commission + the quality enrichments (oos/stress/
+        # institutional/CI) aren't available at this stage; all are filled in the
+        # re-scoring pass (see "5b)" in the pipeline) once Pass 2 has run.
         "net_return": 0.0,
+        "oos_robustness": 0.0,
+        "safety": 0.0,
+        "tail_quality": 0.0,
+        "significance": 0.0,
     }
     raw = sum(components[k] * WEIGHTS[k] for k in WEIGHTS)
     score = round(raw * 100, 1)
@@ -2874,11 +2946,12 @@ def main():
             b["trade_distribution"] = td
             trade_dist_count += 1
 
-    # 5b) Re-score with the commission-honest MONEY factor. compute_score ran before
-    # net_after_commission existed (its net_return was a 0.0 placeholder); now that the
-    # per-bot pass has filled net_after_commission, recompute promotion_score =
-    # Σ(components·WEIGHTS) with the real money term. Stateless: pure function of THIS
-    # snapshot — introduces no state between runs, so dynamism is fully preserved.
+    # 5b) Re-score with the MONEY + QUALITY factors. compute_score ran before the
+    # per-bot enrichments existed (net_after_commission, oos, stress, institutional,
+    # confidence_intervals → placeholders 0.0). Now that Pass 2 has filled them,
+    # recompute promotion_score = Σ(components·WEIGHTS) with the real values. These are
+    # SCORE factors, never gates → the section ALWAYS seats the 3 best (never empties).
+    # Stateless: pure function of THIS snapshot, so dynamism is fully preserved.
     for b in snap.get("bots", []):
         comp = b.get("promotion_components")
         if not comp:
@@ -2887,6 +2960,10 @@ def main():
         bal = (acc or {}).get("balance", 0)
         comp["net_return"] = round(
             norm_net_return(b.get("net_after_commission"), bal, b.get("months_active")), 3)
+        comp["oos_robustness"] = round(norm_oos(b.get("oos")), 3)
+        comp["safety"] = round(norm_safety(b.get("stress")), 3)
+        comp["tail_quality"] = round(norm_tail(b.get("institutional")), 3)
+        comp["significance"] = round(norm_significance(b.get("oos"), b.get("confidence_intervals")), 3)
         raw = sum(comp.get(k, 0.0) * w for k, w in WEIGHTS.items())
         b["promotion_score"] = round(raw * 100, 1)
 
@@ -2943,6 +3020,37 @@ def main():
     cap_ready = STATUS_RANK_CAPS["READY"]
     cap_near = STATUS_RANK_CAPS["NEAR"]
     cap_watch = STATUS_RANK_CAPS["WATCH"]
+
+    # Diversification of the READY seats: the owner promotes the 3 together to ONE real
+    # account, so 3 bots sharing the same edge would draw down in lock-step. Among bots
+    # within a small score band, prefer DISTINCT primary symbols. Bounded by
+    # DIVERSITY_BAND so a clearly-better bot is NEVER displaced — only near-ties are
+    # reordered. Still exactly 3 READY seats; pure function of this snapshot.
+    DIVERSITY_BAND = 4.0
+    # Base symbol = strip broker suffix so USDJPY and USDJPY.b count as the SAME pair.
+    def _base_sym(b):
+        return (_primary_symbol(b) or "?").split(".")[0].upper()
+    ready_n = min(cap_ready, len(eligible))
+    if ready_n >= 2:
+        ordered, used_syms, pool = [], set(), list(eligible)
+        for _slot in range(ready_n):
+            if not pool:
+                break
+            best_score = pool[0].get("promotion_score") or 0
+            pick = None
+            for cand in pool:
+                if (best_score - (cand.get("promotion_score") or 0)) > DIVERSITY_BAND:
+                    break  # outside band — never reach past a clearly-better bot
+                if _base_sym(cand) not in used_syms:
+                    pick = cand
+                    break
+            if pick is None:
+                pick = pool[0]  # no distinct pair within band → keep best by score
+            ordered.append(pick)
+            used_syms.add(_base_sym(pick))
+            pool.remove(pick)
+        eligible = ordered + pool
+
     # Reset everyone to NO first so excluded / duplicate / already-real bots cannot
     # keep a stale threshold-status from compute_score; rank is authoritative.
     for b in snap.get("bots", []):

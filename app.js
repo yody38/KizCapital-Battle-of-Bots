@@ -1796,6 +1796,23 @@ function dominanceBadge(dom) {
   return `<span style="color:#f0a020;font-weight:600;white-space:nowrap" title="${title}">⚠ Discutible</span>`;
 }
 
+// Quality badge: resume of the 4 quality score-factors (robustez OOS, seguridad/riesgo
+// de ruina, cola/CVaR, significancia estadística). 🟢 sólido / 🟡 medio / 🔴 flojo,
+// con el desglose en el tooltip. Son factores del score (no gates) → la sección
+// siempre muestra 3; el badge avisa si alguno cojea en calidad.
+function qualityBadge(b) {
+  const c = b.promotion_components || {};
+  const keys = ['oos_robustness', 'safety', 'tail_quality', 'significance'];
+  const vals = keys.map(k => (typeof c[k] === 'number' ? c[k] : null)).filter(v => v != null);
+  if (!vals.length) return '<span style="color:var(--text-dim)">—</span>';
+  const avg = vals.reduce((a, v) => a + v, 0) / vals.length;
+  const worst = Math.min(...vals);
+  const lbl = { oos_robustness: 'OOS', safety: 'Seguridad', tail_quality: 'Cola', significance: 'Signif' };
+  const tip = keys.map(k => `${lbl[k]}: ${c[k] != null ? Math.round(c[k] * 100) : '—'}`).join(' · ');
+  const icon = (avg >= 0.6 && worst >= 0.4) ? '🟢' : (avg >= 0.45 ? '🟡' : '🔴');
+  return `<span style="white-space:nowrap" title="${tip}">${icon} ${Math.round(avg * 100)}</span>`;
+}
+
 function fmtSigned(n, digits = 2) {
   if (n == null) return '—';
   const v = Number(n);
@@ -1845,6 +1862,7 @@ function renderCandidates() {
         <td class="num"><strong style="color:var(--accent)">${b.promotion_score.toFixed(1)}</strong> ${confChip}</td>
         <td>${statusBadge(b.promotion_status)}</td>
         <td>${domCell}</td>
+        <td>${qualityBadge(b)}</td>
         <td class="mono">${b.magic}</td>
         <td>${(b.symbols || []).map(s => `<span class="symbol-tag">${s}</span>`).join('') || '—'}</td>
         <td>${vpsBadge(b.vps)}</td>
@@ -2741,6 +2759,10 @@ function renderScorePanel(b) {
     age: 'Edad',
     trade_count: 'Trades',
     net_return: 'Dinero (return mens.)',
+    oos_robustness: 'Robustez OOS (walk-forward)',
+    safety: 'Seguridad (1−prob. negativo)',
+    tail_quality: 'Cola/CVaR (riesgo extremo)',
+    significance: 'Significancia estadística',
   };
   const rows = Object.keys(weights).map(k => {
     const w = weights[k] || 0;
