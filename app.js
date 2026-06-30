@@ -1774,6 +1774,28 @@ function statusBadge(status) {
   return `<span class="status-pill ${m.cls}">${m.label}</span>`;
 }
 
+// Dominance badge: ✅ Caballo = top-25% (≥P75) en los 4 ejes núcleo (dinero, riesgo,
+// consistencia, estabilidad) Y ningún otro bot lo supera en todos a la vez. ⚠ Discutible
+// = no cumple; el tooltip dice por qué (quién lo domina y/o en qué eje queda bajo P75) +
+// los 4 percentiles. Diagnóstico puro del snapshot actual (sin estado → 100% dinámico).
+function dominanceBadge(dom) {
+  if (!dom || !dom.axes) return '<span style="color:var(--text-dim)" title="Fuera de la cohorte elegible (no pasa gating)">—</span>';
+  const pctList = Object.values(dom.axes)
+    .map(v => `${v.label}: P${v.pct != null ? Math.round(v.pct) : '—'}`).join(' · ');
+  if (dom.is_thoroughbred) {
+    return `<span style="color:#16c784;font-weight:600;white-space:nowrap" title="Caballo: top-25% (≥P75) en TODOS los ejes y ningún bot lo supera en todo · ${pctList}">✅ Caballo</span>`;
+  }
+  const reasons = [];
+  if (dom.dominated_by != null) reasons.push(`Superado por #${dom.dominated_by} en todos los ejes`);
+  if (!dom.all_ge_p75) {
+    const weak = Object.values(dom.axes)
+      .filter(v => v.pct == null || v.pct < 75).map(v => v.label).join(', ');
+    if (weak) reasons.push(`Bajo P75 en: ${weak}`);
+  }
+  const title = [...reasons, pctList].join(' · ').replace(/"/g, "'");
+  return `<span style="color:#f0a020;font-weight:600;white-space:nowrap" title="${title}">⚠ Discutible</span>`;
+}
+
 function fmtSigned(n, digits = 2) {
   if (n == null) return '—';
   const v = Number(n);
@@ -1814,17 +1836,21 @@ function renderCandidates() {
     const confChip = sm
       ? `<span class="shr-conf shr-conf-${(sm.confidence || 'MEDIUM').toLowerCase()}" title="Score shrunk ${b.promotion_score_shrunk?.toFixed(1)} · Δ ${sm.delta > 0 ? '+' : ''}${(sm.delta||0).toFixed(1)} · ${sm.cohort_prior_used ? 'cohort' : 'global'} prior n=${sm.cohort_n}">${sm.confidence === 'HIGH' ? '◉' : sm.confidence === 'MEDIUM' ? '◐' : '◯'}</span>`
       : '';
+    const domCell = dominanceBadge(b.dominance);
+    const ddPct = b.dd_pct_of_balance;
     return `
       <tr class="bot-row" data-vps="${b.vps}" data-login="${b.account_login}" data-magic="${b.magic}">
         ${buildCompareCheckboxCell(b.vps, b.account_login, b.magic)}
         <td><span class="rank-badge">${i + 1}</span></td>
         <td class="num"><strong style="color:var(--accent)">${b.promotion_score.toFixed(1)}</strong> ${confChip}</td>
         <td>${statusBadge(b.promotion_status)}</td>
+        <td>${domCell}</td>
         <td class="mono">${b.magic}</td>
         <td>${(b.symbols || []).map(s => `<span class="symbol-tag">${s}</span>`).join('') || '—'}</td>
         <td>${vpsBadge(b.vps)}</td>
         <td class="mono">${b.account_login}</td>
         <td class="num">${b.calmar != null ? b.calmar.toFixed(2) : '—'}</td>
+        <td class="num ${ddPct != null && ddPct > 10 ? 'profit-negative' : ''}">${ddPct != null ? ddPct.toFixed(1) + '%' : '—'}</td>
         <td class="num">${b.sortino != null ? b.sortino.toFixed(2) : '—'}</td>
         <td class="num">${fmt.pf(b.profit_factor)}</td>
         <td class="num">${b.months_positive_pct != null ? fmt.pct(b.months_positive_pct) : '—'}</td>
@@ -1834,6 +1860,7 @@ function renderCandidates() {
         <td class="num profit-negative">${fmt.int((b.trades || 0) - (b.wins || 0))}</td>
         <td class="num">${fmt.pct(b.win_rate_pct)}</td>
         <td class="num ${b.net_profit >= 0 ? 'profit-positive' : 'profit-negative'}">${fmt.usd(b.net_profit, true)}</td>
+        <td class="num ${(b.net_after_commission ?? 0) >= 0 ? 'profit-positive' : 'profit-negative'}">${b.net_after_commission != null ? fmt.usd(b.net_after_commission, true) : '—'}</td>
       </tr>
     `;
   }).join('');
@@ -2713,6 +2740,7 @@ function renderScorePanel(b) {
     profit_factor: 'Profit Factor',
     age: 'Edad',
     trade_count: 'Trades',
+    net_return: 'Dinero (return mens.)',
   };
   const rows = Object.keys(weights).map(k => {
     const w = weights[k] || 0;
@@ -2739,6 +2767,28 @@ function renderScorePanel(b) {
     : b.promotion_status === 'WATCH'
     ? `<div class="score-verdict status-watch"><strong>👀 WATCH</strong> — observar, score ${b.promotion_score.toFixed(1)}</div>`
     : `<div class="score-verdict status-no"><strong>❌ NO</strong> — no califica${fails.length ? ': ' + fails.join(', ') : ''}</div>`;
+  // Dominance block — ¿es uno de los caballos? (top-25% en cada eje + no dominado).
+  const dom = b.dominance || null;
+  let dominanceBlock = '';
+  if (dom && dom.axes) {
+    const axHtml = Object.values(dom.axes).map(a => {
+      const pct = a.pct;
+      const cls = pct == null ? '' : pct >= 75 ? 'profit-positive' : pct < 50 ? 'profit-negative' : '';
+      return `
+        <div class="score-row">
+          <div class="score-label">${a.label}</div>
+          <div class="score-bar"><span style="width:${pct != null ? Math.round(pct) : 0}%"></span></div>
+          <div class="score-value ${cls}">P${pct != null ? Math.round(pct) : '—'}</div>
+        </div>`;
+    }).join('');
+    const verdictDom = dom.is_thoroughbred
+      ? `<div class="score-verdict status-ready"><strong>✅ Caballo</strong> — top-25% (≥P75) en los 4 ejes y ningún bot lo supera en todo. Candidato indiscutible.</div>`
+      : `<div class="score-verdict status-watch"><strong>⚠ Discutible</strong> — ${dom.dominated_by != null ? `el bot #${dom.dominated_by} lo supera en TODOS los ejes. ` : ''}${!dom.all_ge_p75 ? `No está en el top-25% en: ${Object.values(dom.axes).filter(a => a.pct == null || a.pct < 75).map(a => a.label).join(', ')}.` : ''}</div>`;
+    dominanceBlock = `
+      <h4 class="panel-title" style="margin-top:18px">🐎 Dominancia <small style="font-weight:400;color:var(--muted)">(percentil vs cohorte elegible)</small></h4>
+      ${verdictDom}
+      <div class="score-breakdown">${axHtml}</div>`;
+  }
   // Shrinkage block — bayesian cohort-adjusted view.
   const shr = b.shrinkage_meta || null;
   const raw = b.promotion_score_raw;
@@ -2796,8 +2846,9 @@ function renderScorePanel(b) {
       <div class="score-big">${(b.promotion_score ?? 0).toFixed(1)}<span class="score-big-suffix">/100</span></div>
       ${verdict}
     </div>
+    ${dominanceBlock}
     ${shrinkageBlock}
-    <h4 class="panel-title">Composición del score</h4>
+    <h4 class="panel-title" style="margin-top:18px">Composición del score</h4>
     <div class="score-breakdown">${rows}</div>
     <h4 class="panel-title" style="margin-top:18px">Filtros gating</h4>
     <ul class="gating-list">${gatingHtml}</ul>`;

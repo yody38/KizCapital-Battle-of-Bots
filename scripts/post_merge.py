@@ -39,14 +39,19 @@ from _metrics import clamp01, pearson, percentile, stdev
 
 # --- Configuration -------------------------------------------------------
 
+# Hybrid weights (2026-06-30): "gana dinero CON bajo drawdown". net_return makes
+# money an EXPLICIT factor (was only implicit via Calmar). Real accounts are tiny
+# ($5K/$10K, leveraged — 10% own capital), so capital preservation (Calmar/DD) and
+# raw profit lead; scalability/capacity is irrelevant at this size → not weighted.
 WEIGHTS = {
-    "calmar": 0.25,
-    "months_positive_pct": 0.20,
-    "sortino": 0.15,
-    "decay": 0.15,            # 1.0 - decay penalty
-    "profit_factor": 0.10,
-    "age": 0.10,              # months_active vs 12
-    "trade_count": 0.05,      # trades vs 200
+    "calmar": 0.22,           # net / maxDD — núcleo "gana con bajo DD"
+    "net_return": 0.20,       # rentabilidad mensual neta honesta — "ganar dinero"
+    "months_positive_pct": 0.18,
+    "sortino": 0.12,
+    "decay": 0.12,            # 1.0 - decay penalty
+    "profit_factor": 0.08,
+    "age": 0.05,              # months_active vs 12
+    "trade_count": 0.03,      # trades vs 200
 }
 
 # Normalization caps (bot at cap = 1.0; above = 1.0; negative = 0.0).
@@ -56,13 +61,16 @@ CAPS = {
     "profit_factor": 3.0,     # PF 3 = perfect
     "age_months": 12.0,
     "trades_target": 200.0,
+    "net_monthly_return_pct": 5.0,  # 5%/mes neto sobre balance = perfecto
 }
 
 # Hard gating filters: failing any one => promotion_status = "NO".
+# DD cap tightened 15→10 (2026-06-30): real accounts are leveraged $5-10K where the
+# owner's own money is ~10% — a 10% account DD already threatens the funded arrangement.
 GATING = {
     "min_trades": 30,
     "min_months_active": 3,
-    "max_drawdown_pct_of_balance": 15.0,
+    "max_drawdown_pct_of_balance": 10.0,
     "min_net_profit": 0.0,    # must be net profitable
     "exclude_decay_flag": True,
     "exclude_magic_zero": True,
@@ -216,6 +224,21 @@ def norm_decay(decay_ratio, decay_flag):
     return clamp01(decay_ratio)
 
 
+def norm_net_return(net_after_commission, balance, months_active):
+    """Money factor: commission-honest MONTHLY net return on the account balance,
+    normalized to CAPS['net_monthly_return_pct']. Monthly (not lifetime) so age is
+    not double-counted (age has its own weighted term). None/invalid/≤0 → 0.0."""
+    if net_after_commission is None or not balance or balance <= 0:
+        return 0.0
+    m = months_active or 0
+    if m < 1:
+        m = 1  # gating already requires ≥3 months; guard sub-month edge cases
+    monthly_pct = (net_after_commission / balance) / m * 100.0
+    if monthly_pct <= 0:
+        return 0.0
+    return clamp01(monthly_pct / CAPS["net_monthly_return_pct"])
+
+
 def compute_score(bot, account_balance):
     """Returns (score_0_100, components_dict, gating_pass_dict, fails_list)."""
     components = {
@@ -226,6 +249,9 @@ def compute_score(bot, account_balance):
         "profit_factor": norm_pf(bot.get("profit_factor")),
         "age": norm_age(bot.get("months_active")),
         "trade_count": norm_trades(bot.get("trades")),
+        # Placeholder: net_after_commission isn't computed yet at this stage; the
+        # money factor is filled in the re-scoring pass (see "5b)" in the pipeline).
+        "net_return": 0.0,
     }
     raw = sum(components[k] * WEIGHTS[k] for k in WEIGHTS)
     score = round(raw * 100, 1)
@@ -1782,6 +1808,123 @@ def _percentile_rank(value, sorted_pop):
     return (rank / n) * 100.0
 
 
+DOMINANCE_AXES = ("money", "risk", "consistency", "stability")
+DOMINANCE_AXIS_LABELS = {
+    "money": "Dinero (return mensual neto)",
+    "risk": "Riesgo (Calmar)",
+    "consistency": "Consistencia (% meses+)",
+    "stability": "Estabilidad (Sortino)",
+}
+DOMINANCE_P75 = 75.0
+
+
+def _dominance_axis_value(b, accounts_by_login, axis):
+    """Commission-honest core-axis values for the dominance/thoroughbred check."""
+    if axis == "money":
+        bal = (accounts_by_login.get(b.get("account_login")) or {}).get("balance", 0)
+        m = b.get("months_active") or 0
+        nac = b.get("net_after_commission")
+        if nac is None or not bal or bal <= 0 or m < 1:
+            return None
+        return (nac / bal) / m * 100.0
+    if axis == "risk":
+        return b.get("calmar")
+    if axis == "consistency":
+        return b.get("months_positive_pct")
+    if axis == "stability":
+        return b.get("sortino")
+    return None
+
+
+def compute_dominance(snap, accounts_by_login):
+    """Per-bot dominance diagnostic over the gating-eligible cohort on 4 core axes
+    (money / risk / consistency / stability). Answers the owner's question "are these
+    the 3 thoroughbreds, better than the whole demo book in every sense?":
+      - per-axis percentile-rank (0–100) vs the cohort,
+      - all_ge_p75: top-25% on EVERY axis,
+      - dominated_by: magic of any other eligible bot that Pareto-dominates it
+        (≥ on all 4 axes and > on ≥1), else None,
+      - is_thoroughbred: all_ge_p75 AND not dominated.
+    These are DIAGNOSTIC badges only — they never change promotion_status (always-3
+    by score). STATELESS: pure function of the current snapshot (no pinning)."""
+    bots = snap.get("bots", [])
+    eligible = [b for b in bots
+                if all((b.get("promotion_gating") or {}).values())
+                and b.get("magic")
+                and b.get("net_after_commission") is not None]
+    if len(eligible) < 3:
+        for b in bots:
+            b.pop("dominance", None)
+        return None
+
+    pop = {ax: [] for ax in DOMINANCE_AXES}
+    raws = {}
+    for b in eligible:
+        rv = {}
+        for ax in DOMINANCE_AXES:
+            v = _dominance_axis_value(b, accounts_by_login, ax)
+            rv[ax] = v
+            if v is not None:
+                pop[ax].append(v)
+        raws[id(b)] = rv
+    for ax in DOMINANCE_AXES:
+        pop[ax].sort()
+    p75 = {ax: (percentile(pop[ax], 0.75) if pop[ax] else None) for ax in DOMINANCE_AXES}
+
+    pcts = {}
+    for b in eligible:
+        rv = raws[id(b)]
+        ax_out, all_ge = {}, True
+        for ax in DOMINANCE_AXES:
+            pr = _percentile_rank(rv[ax], pop[ax])
+            ax_out[ax] = {
+                "raw": (round(rv[ax], 4) if rv[ax] is not None else None),
+                "pct": (round(pr, 1) if pr is not None else None),
+                "label": DOMINANCE_AXIS_LABELS[ax],
+            }
+            if pr is None or pr < DOMINANCE_P75:
+                all_ge = False
+        pcts[id(b)] = (ax_out, all_ge)
+
+    def _vec(b):
+        ax_out = pcts[id(b)][0]
+        return [(ax_out[ax]["pct"] if ax_out[ax]["pct"] is not None else -1.0)
+                for ax in DOMINANCE_AXES]
+
+    for a in eligible:
+        va = _vec(a)
+        dominated_by = None
+        for c in eligible:
+            if c is a:
+                continue
+            vc = _vec(c)
+            if all(vc[i] >= va[i] for i in range(len(DOMINANCE_AXES))) and \
+               any(vc[i] > va[i] for i in range(len(DOMINANCE_AXES))):
+                dominated_by = c.get("magic")
+                break
+        ax_out, all_ge = pcts[id(a)]
+        a["dominance"] = {
+            "axes": ax_out,
+            "all_ge_p75": all_ge,
+            "dominated_by": dominated_by,
+            "is_thoroughbred": all_ge and dominated_by is None,
+        }
+
+    elig_ids = {id(b) for b in eligible}
+    for b in bots:
+        if id(b) not in elig_ids:
+            b.pop("dominance", None)
+
+    return {
+        "axes": list(DOMINANCE_AXES),
+        "axis_labels": DOMINANCE_AXIS_LABELS,
+        "p75_threshold_pct": DOMINANCE_P75,
+        "p75_raw": {ax: (round(p75[ax], 4) if p75[ax] is not None else None)
+                    for ax in DOMINANCE_AXES},
+        "n_eligible": len(eligible),
+    }
+
+
 def compute_promotion_radar(snap, accounts_by_login):
     """Per-bot 8-axis radar with percentile-rank normalization on the
     gating-eligible cohort. Median bot ≈ 50 on every axis. Returns
@@ -2730,6 +2873,22 @@ def main():
             b["trade_distribution"] = td
             trade_dist_count += 1
 
+    # 5b) Re-score with the commission-honest MONEY factor. compute_score ran before
+    # net_after_commission existed (its net_return was a 0.0 placeholder); now that the
+    # per-bot pass has filled net_after_commission, recompute promotion_score =
+    # Σ(components·WEIGHTS) with the real money term. Stateless: pure function of THIS
+    # snapshot — introduces no state between runs, so dynamism is fully preserved.
+    for b in snap.get("bots", []):
+        comp = b.get("promotion_components")
+        if not comp:
+            continue
+        acc = accounts_by_login.get(b.get("account_login"))
+        bal = (acc or {}).get("balance", 0)
+        comp["net_return"] = round(
+            norm_net_return(b.get("net_after_commission"), bal, b.get("months_active")), 3)
+        raw = sum(comp.get(k, 0.0) * w for k, w in WEIGHTS.items())
+        b["promotion_score"] = round(raw * 100, 1)
+
     # 6) Bayesian shrinkage of promotion_score (must run AFTER initial scoring,
     # BEFORE forward tracker / portfolio so they consume the shrunk values).
     shrinkage_meta = compute_shrunk_scores(snap)
@@ -2882,6 +3041,9 @@ def main():
     # Promotion Radar — 8-axis percentile-rank normalized cohort view (mutates bots).
     radar_meta = compute_promotion_radar(snap, accounts_by_login)
 
+    # Dominance — "are the top-3 the thoroughbreds?" 4 core axes, P75 + Pareto (mutates bots).
+    dominance_meta = compute_dominance(snap, accounts_by_login)
+
     # Adversarial Pair Finder — top-3 portfolio partners per READY/NEAR.
     pair_count = compute_pair_recommendations(snap, data_dir)
 
@@ -2905,6 +3067,7 @@ def main():
         "real_magics_excluded": sorted(real_magics),
         "shadow_cola_gates_would_fail": shadow_cola,
         "shadow_pending": ["demo_real_gap"],
+        "dominance": dominance_meta,  # P75/Pareto thoroughbred diagnostic (badges only)
     }
     snap["enrichment_meta"] = {
         "stress_runs": MC_RUNS,

@@ -307,10 +307,10 @@
     <div class="balanced-header">
       <div>
         <h2 class="section-title balanced-title">🎯 Candidatos a Cuenta Real</h2>
-        <p class="balanced-subtitle">Top bots por <strong>Promotion Score</strong> (riesgo + consistencia + decay + edad). Los <strong>READY</strong> son candidatos serios para promoción a real · <span id="candidates-count">0</span> bots evaluados</p>
+        <p class="balanced-subtitle">Top bots por <strong>Promotion Score</strong> híbrido (<strong>dinero</strong> + Calmar/DD + consistencia + estabilidad). Los <strong>READY</strong> son los candidatos directos a cuenta real · <span id="candidates-count">0</span> bots evaluados · <strong>100% dinámico</strong>: se recalcula cada 30 min, el que sube de score entra y el más débil sale.</p>
       </div>
-      <div class="balanced-legend" title="Score 0-100 con gating duro: trades≥30, meses≥3, DD≤15%, net>0, sin decay, magic≠0">
-        🚦 Gating: trades≥30 · meses≥3 · DD≤15% · sin decay
+      <div class="balanced-legend" title="Cómo se elige (todo re-derivable, sin fijación):&#10;&#10;1) GATING duro — falla uno y queda fuera: trades≥30 · meses activo≥3 · DD≤10% del balance · net>0 · sin decay · magic≠0.&#10;&#10;2) SCORE 0-100 = suma ponderada: Calmar .22 · Dinero (return mensual neto honesto) .20 · % Meses+ .18 · Sortino .12 · Decay .12 · Profit Factor .08 · Edad .05 · Trades .03.&#10;&#10;3) DOMINANCIA (insignia, no filtro): ✅ Caballo = top-25% (≥P75) en dinero, riesgo, consistencia y estabilidad, y ningún otro bot lo supera en TODOS los ejes. ⚠ Discutible = no cumple.&#10;&#10;Los 3 READY = los 3 de mayor score (siempre 3). Escalabilidad fuera (cuentas $5-10K).">
+        🚦 Gating: trades≥30 · meses≥3 · DD≤10% · sin decay · net&gt;0 — score híbrido + dominancia (ⓘ)
       </div>
     </div>
     <div class="table-controls" style="margin-bottom:12px">
@@ -328,11 +328,13 @@
             <th>#</th>
             <th class="num">Score</th>
             <th>Estado</th>
+            <th title="✅ Caballo = top-25% (≥P75) en dinero, riesgo, consistencia y estabilidad, y nadie lo supera en todo · ⚠ Discutible = no cumple (ver tooltip)">Dominancia</th>
             <th>Magic</th>
             <th>Par</th>
             <th>VPS</th>
             <th>Cuenta</th>
             <th class="num" title="Calmar = Net Profit / Max DD">Calmar</th>
+            <th class="num" title="Drawdown máximo como % del balance (gate ≤10%)">DD %</th>
             <th class="num" title="Sortino anualizado">Sortino</th>
             <th class="num" title="Profit Factor">PF</th>
             <th class="num" title="% meses con net positivo">% Meses+</th>
@@ -342,6 +344,7 @@
             <th class="num" title="Operaciones perdedoras">Perd.</th>
             <th class="num" title="Win rate %">Win %</th>
             <th class="num">Net 365d</th>
+            <th class="num" title="Net neto honesto (post-comisión) — el dinero real que ganaría en una cuenta del mismo tamaño">Net neto</th>
           </tr>
         </thead>
         <tbody id="candidates-tbody"></tbody>
@@ -813,6 +816,6 @@
 
 </main>
 
-<script src="app.js?v=20260630a"></script>
+<script src="app.js?v=20260630b"></script>
 </body>
 </html>
