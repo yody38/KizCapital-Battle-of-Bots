@@ -60,8 +60,8 @@ DEFAULT_TOLERANCE = 0.05  # USD
 # Roster de cuentas reales activas (mantener en sync con live_publisher.REAL_LOGINS
 # y post_merge.detect_real_accounts). #3446 (vps6, $0) retirada 2026-06-29; #43306
 # (vps5) incorporada como 3ª real con fondos.
-EXPECTED_REAL = {("vps5", 25425), ("vps5", 32081),
-                 ("vps5", 43306)}
+EXPECTED_REAL = {("vps6", 25425), ("vps5", 32081),
+                 ("vps5", 43306)}  # #25425 movida a vps6 (slot limpio 40848) 2026-06-30
 
 
 def load_env() -> dict[str, str]:

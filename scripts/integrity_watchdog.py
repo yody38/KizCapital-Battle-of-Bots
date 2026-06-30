@@ -68,7 +68,7 @@ MCP_DEADMAN_SEC = 90 * 60  # mcp-health is dispatched ~every 30min (VPS1 dispatc
                            # only a backstop, so 20min was a guaranteed false positive. 90min =
                            # tolerate 2 missed dispatch cycles, still catch a dead monitor in <1.5h.
 LIVE_DEADMAN_SEC = 90      # live stream pushes every ~3s → >90s stale = worker/tailnet/MT5 dead
-LIVE_REAL_LOGINS = {25425, 32081}  # the 2 real accounts on VPS5
+LIVE_REAL_LOGINS = {32081, 43306}  # reales con live stream (VPS5). #25425 vive en VPS6 sin publisher → se monitorea vía snapshot, no por deadman live
 
 
 # ---------- env / helpers ----------
