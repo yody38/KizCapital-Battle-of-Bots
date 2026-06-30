@@ -61,7 +61,8 @@ CAPS = {
     "profit_factor": 3.0,     # PF 3 = perfect
     "age_months": 12.0,
     "trades_target": 200.0,
-    "net_monthly_return_pct": 5.0,  # 5%/mes neto sobre balance = perfecto
+    "net_monthly_return_pct": 0.5,  # 0.5%/mes neto = perfecto (calibrado a la cohorte real:
+                                    # max≈1.0%/mo, P90≈0.31%; a 5.0 el dinero no diferenciaba)
 }
 
 # Hard gating filters: failing any one => promotion_status = "NO".
