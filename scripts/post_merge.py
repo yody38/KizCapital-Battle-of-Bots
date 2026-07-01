@@ -44,22 +44,25 @@ from _metrics import clamp01, pearson, percentile, stdev
 # ($5K/$10K, leveraged — 10% own capital), so capital preservation (Calmar/DD) and
 # raw profit lead; scalability/capacity is irrelevant at this size → not weighted.
 WEIGHTS = {
-    "calmar": 0.17,           # net / maxDD — núcleo "gana con bajo DD"
-    "net_return": 0.17,       # rentabilidad mensual neta honesta — "ganar dinero"
-    "months_positive_pct": 0.13,
-    "sortino": 0.09,
-    "decay": 0.09,            # 1.0 - decay penalty
+    "calmar": 0.15,           # net / maxDD — núcleo "gana con bajo DD"
+    "net_return": 0.15,       # rentabilidad mensual neta honesta — "ganar dinero"
+    "months_positive_pct": 0.11,
+    "win_rate": 0.10,         # perfil del owner (2026-07-01): alto win rate — subordinado a DD/SQN/PF
+    "sortino": 0.08,
+    "decay": 0.08,            # 1.0 - decay penalty
+    "cadence": 0.06,          # perfil del owner: opera CONSTANTEMENTE (trades/mes reciente)
     # --- Quality factors (2026-06-30b): ya se calculaban (oos/stress/institutional/CI)
     # pero NO entraban en la selección. Entran como SCORE (nunca gates → la sección
     # SIEMPRE muestra los 3 mejores) + insignias. Suben a los robustos/seguros.
-    "oos_robustness": 0.08,   # Walk-Forward: edge sobrevive datos no vistos (anti curve-fit)
-    "safety": 0.08,           # 1 - prob_negative (Monte Carlo) — preservación de capital
-    "tail_quality": 0.06,     # tail_ratio / CVaR — sin cola de pérdidas que mata cuentas
-    "significance": 0.04,     # robustez estadística (permutation p / CI) — no es suerte
-    "profit_factor": 0.06,
+    "oos_robustness": 0.06,   # Walk-Forward: edge sobrevive datos no vistos (anti curve-fit)
+    "safety": 0.06,           # 1 - prob_negative (Monte Carlo) — preservación de capital
+    "profit_factor": 0.05,
+    "tail_quality": 0.04,     # tail_ratio / CVaR — sin cola de pérdidas que mata cuentas
+    "significance": 0.03,     # robustez estadística (permutation p / CI) — no es suerte
     "age": 0.02,              # months_active vs 12
-    "trade_count": 0.01,      # trades vs 200
+    "trade_count": 0.01,      # trades vs 200 (volumen total; cadence mide el ritmo reciente)
 }
+assert abs(sum(WEIGHTS.values()) - 1.0) < 1e-9, "WEIGHTS must sum to 1.0"
 
 # Normalization caps (bot at cap = 1.0; above = 1.0; negative = 0.0).
 CAPS = {
@@ -70,6 +73,9 @@ CAPS = {
     "trades_target": 200.0,
     "net_monthly_return_pct": 0.5,  # 0.5%/mes neto = perfecto (calibrado a la cohorte real:
                                     # max≈1.0%/mo, P90≈0.31%; a 5.0 el dinero no diferenciaba)
+    "win_rate_floor": 50.0,         # WR ≤ floor → 0 en el eje; escala floor→target = 0→1
+    "win_rate_target": 90.0,
+    "cadence_trades_per_month": 20.0,  # ≈1 trade/día hábil = "opera constante" perfecto
 }
 
 # Hard gating filters: failing any one => promotion_status = "NO".
@@ -99,6 +105,29 @@ STATUS = [
 # An empty slot costs $0; a badly-filled one can cost a real account. WATCH wide for discovery.
 STATUS_RANK_CAPS = {"READY": 3, "NEAR": 5, "WATCH": 15}
 
+# Trust-eligibility for a REAL-money seat (READY/NEAR) — owner decisions 2026-07-01.
+# READY must be "los 3 mejores Y de suma confianza, siempre". The seat ranking uses the
+# CONFIDENCE-ADJUSTED score (promotion_score_shrunk), and a bot only holds a READY/NEAR
+# seat if it clears absolute-evidence + freshness + profile + hard-safety checks.
+# Two tiers:
+#   · HARD  (never seat in READY/NEAR): dormant, clones a real bot (corr>0.7), SQN "MALO".
+#   · SOFT  (seatable only as flagged provisional backfill when the field is thin):
+#           low shrunk score, no evidence, luck-inflated score, low win rate.
+# ALWAYS 3 seats: if fewer than 3 fully-trusted bots exist, the remaining seats are
+# backfilled by shrunk score and flagged provisional_low_confidence for the UI.
+# NOTE: confidence here = ABSOLUTE evidence, NOT the cohort-relative LOW/MEDIUM/HIGH label
+# (that label would expel genuine grinders whose only "fault" is a small peer cohort).
+TRUST = {
+    "min_shrunk": 60.0,          # confidence-adjusted score floor (= NEAR threshold)   [SOFT]
+    "min_cohort_n": 3,           # peer support OR ...                                   [SOFT]
+    "min_months_evidence": 4,    #   ... enough live history (alternative to cohort)     [SOFT]
+    "max_shrink_delta": 12.0,    # |raw-shrunk|: reject scores heavily inflated by luck  [SOFT]
+    "min_win_rate": 50.0,        # owner profile: high win rate (subordinate to gates)   [SOFT]
+    "max_dormant_days": 14,      # freshness: no trade in > N days → not competing        [HARD]
+    "max_corr_vs_real": 0.7,     # do not clone what already runs in real                 [HARD]
+    "enforce_sqn_malo": True,    # exclude SQN == "MALO"                                   [HARD]
+}
+
 MIN_CORR_TRADES = 25          # min trades to be in correlation matrix
 MAX_CORR_BOTS = 60            # cap matrix size
 NEW_BOTS_DAYS = 30           # bots with first_trade within this window live only in the Bots Nuevos view
@@ -116,6 +145,21 @@ def _is_new_bot(b, now):
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
     return (now - dt) < timedelta(days=NEW_BOTS_DAYS)
+
+
+def _days_since_last_trade(b, now):
+    """Days since the bot's last CLOSED trade. None if unknown. Freshness signal for the
+    'competencia siempre activa' gate — a dormant bot does not compete for READY/NEAR."""
+    lt = b.get("last_trade")
+    if not lt:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(lt).replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return (now - dt).days
 
 # --- Monte Carlo / OOS / Portfolio config -------------------------------
 
@@ -219,6 +263,34 @@ def norm_months_pos(pct):
     return clamp01(pct / 100.0)
 
 
+def norm_win_rate(pct):
+    """Owner profile: high win rate. WR ≤ floor → 0; scales floor→target = 0→1.
+    Subordinate to DD/SQN/PF gates (a high WR bot with hidden tail risk still fails those)."""
+    if pct is None:
+        return 0.0
+    floor, target = CAPS["win_rate_floor"], CAPS["win_rate_target"]
+    if pct <= floor:
+        return 0.0
+    return clamp01((pct - floor) / (target - floor))
+
+
+def norm_cadence(bot):
+    """Owner profile: 'opera constantemente'. Rewards RECENT trade cadence (trades/month).
+    Prefers trades_90d (continuous & recent) if snapshot_builder emits it; else falls back
+    to lifetime trades / months_active."""
+    t90 = bot.get("trades_90d")
+    if t90 is not None:
+        tpm = t90 / 3.0
+    else:
+        m = bot.get("months_active") or 0
+        if m < 1:
+            return 0.0
+        tpm = (bot.get("trades") or 0) / m
+    if tpm <= 0:
+        return 0.0
+    return clamp01(tpm / CAPS["cadence_trades_per_month"])
+
+
 def norm_decay(decay_ratio, decay_flag):
     """1.0 = healthy (recent ≈ lifetime). 0 = dead. Flag forces 0."""
     if decay_flag:
@@ -312,8 +384,10 @@ def compute_score(bot, account_balance):
     components = {
         "calmar": norm_calmar(bot.get("calmar")),
         "months_positive_pct": norm_months_pos(bot.get("months_positive_pct")),
+        "win_rate": norm_win_rate(bot.get("win_rate_pct")),
         "sortino": norm_sortino(bot.get("sortino")),
         "decay": norm_decay(bot.get("decay_ratio"), bot.get("decay_flag")),
+        "cadence": norm_cadence(bot),
         "profit_factor": norm_pf(bot.get("profit_factor")),
         "age": norm_age(bot.get("months_active")),
         "trade_count": norm_trades(bot.get("trades")),
@@ -2909,6 +2983,13 @@ def main():
         # cannot rank or gate as promotable.
         b["net_after_commission"] = round(sum(t.get("net", 0.0) for t in trades), 2)
 
+        # Recent cadence (owner profile "opera constantemente"): closed-trade counts in
+        # the last 30/90 days from close_time (epoch s). Feeds norm_cadence in the re-score.
+        _now_ts = datetime.now(timezone.utc).timestamp()
+        _cts = [t.get("close_time") for t in trades if t.get("close_time")]
+        b["trades_30d"] = sum(1 for c in _cts if (_now_ts - c) <= 30 * 86400)
+        b["trades_90d"] = sum(1 for c in _cts if (_now_ts - c) <= 90 * 86400)
+
         inst = institutional_metrics(daily_series, trades, bal)
         # Solo guardar si al menos una métrica se calculó
         if any(inst.get(k) is not None for k in
@@ -2956,6 +3037,7 @@ def main():
         bal = (acc or {}).get("balance", 0)
         comp["net_return"] = round(
             norm_net_return(b.get("net_after_commission"), bal, b.get("months_active")), 3)
+        comp["cadence"] = round(norm_cadence(b), 3)  # now that trades_90d exists (Pass 2)
         comp["oos_robustness"] = round(norm_oos(b.get("oos")), 3)
         comp["safety"] = round(norm_safety(b.get("stress")), 3)
         comp["tail_quality"] = round(norm_tail(b.get("institutional")), 3)
@@ -2995,8 +3077,13 @@ def main():
     commission_filter_dropped = [_tag(b) for b in with_net if b["net_after_commission"] <= 0]
     # Deterministic ordering (no float-tie ambiguity): score desc, commission-honest
     # net desc, trades desc, then vps asc, login asc.
+    # CONFIDENCE-ADJUSTED ordering (owner decision 2026-07-01): rank by the SHRUNK score,
+    # so a small-sample fluke can never outrank a proven bot. Deterministic tiebreaks.
+    def _shrunk(b):
+        v = b.get("promotion_score_shrunk")
+        return v if v is not None else (b.get("promotion_score") or 0)
     elig_all.sort(key=lambda b: (
-        -(b.get("promotion_score") or 0),
+        -_shrunk(b),
         -(b.get("net_after_commission") or 0),
         -(b.get("trades") or 0),
         str(b.get("vps") or ""),
@@ -3017,43 +3104,10 @@ def main():
     cap_near = STATUS_RANK_CAPS["NEAR"]
     cap_watch = STATUS_RANK_CAPS["WATCH"]
 
-    # Diversification of the READY seats: the owner promotes the 3 together to ONE real
-    # account, so 3 bots sharing the same edge would draw down in lock-step. Among bots
-    # within a small score band, prefer DISTINCT primary symbols. Bounded by
-    # DIVERSITY_BAND so a clearly-better bot is NEVER displaced — only near-ties are
-    # reordered. Still exactly 3 READY seats; pure function of this snapshot.
-    DIVERSITY_BAND = 4.0
-    # Base symbol = strip broker suffix so USDJPY and USDJPY.b count as the SAME pair.
-    def _base_sym(b):
-        return (_primary_symbol(b) or "?").split(".")[0].upper()
-    ready_n = min(cap_ready, len(eligible))
-    if ready_n >= 2:
-        ordered, used_syms, pool = [], set(), list(eligible)
-        for _slot in range(ready_n):
-            if not pool:
-                break
-            best_score = pool[0].get("promotion_score") or 0
-            pick = None
-            for cand in pool:
-                if (best_score - (cand.get("promotion_score") or 0)) > DIVERSITY_BAND:
-                    break  # outside band — never reach past a clearly-better bot
-                if _base_sym(cand) not in used_syms:
-                    pick = cand
-                    break
-            if pick is None:
-                pick = pool[0]  # no distinct pair within band → keep best by score
-            ordered.append(pick)
-            used_syms.add(_base_sym(pick))
-            pool.remove(pick)
-        eligible = ordered + pool
+    now = datetime.now(timezone.utc)
 
-    # Reset everyone to NO first so excluded / duplicate / already-real bots cannot
-    # keep a stale threshold-status from compute_score; rank is authoritative.
-    for b in snap.get("bots", []):
-        b["promotion_status"] = "NO"
-    # Preload daily-return series of the bots ALREADY in real (corr shadow): a
-    # candidate that just clones the deployed real portfolio adds no diversification.
-    # build_correlation_matrix excludes reals, so this is a dedicated pass.
+    # Preload daily-return series of the bots ALREADY in real: a candidate that just
+    # clones the deployed real portfolio adds no diversification (HARD corr gate now).
     real_series = []
     for rb in snap.get("bots", []):
         if rb.get("account_login") in real_logins and rb.get("magic"):
@@ -3081,6 +3135,85 @@ def main():
                 best = rho
         return round(best, 3) if best is not None else None
 
+    # Trust classification: HARD fails can NEVER hold a READY/NEAR seat; SOFT fails can
+    # only backfill (flagged provisional). See TRUST config. Returns (hard_ok, soft_ok, reasons).
+    def _seat_block(b):
+        hard, soft = [], []
+        dsl = b.get("days_since_last_trade")
+        if dsl is not None and dsl > TRUST["max_dormant_days"]:
+            hard.append("dormant")
+        cmax = b.get("corr_max_vs_real")
+        if cmax is not None and cmax > TRUST["max_corr_vs_real"]:
+            hard.append("clones_real")
+        band = (b.get("institutional") or {}).get("sqn_band")
+        if TRUST["enforce_sqn_malo"] and band == "MALO":
+            hard.append("sqn_malo")
+        if _shrunk(b) < TRUST["min_shrunk"]:
+            soft.append("shrunk<min")
+        sm = b.get("shrinkage_meta") or {}
+        if not (((sm.get("cohort_n") or 0) >= TRUST["min_cohort_n"])
+                or ((b.get("months_active") or 0) >= TRUST["min_months_evidence"])):
+            soft.append("no_evidence")
+        if abs(sm.get("delta") or 0) > TRUST["max_shrink_delta"]:
+            soft.append("inflated")
+        wr = b.get("win_rate_pct")
+        if wr is None or wr < TRUST["min_win_rate"]:
+            soft.append("wr<min")
+        return (len(hard) == 0), (len(hard) == 0 and len(soft) == 0), hard + soft
+
+    # Annotate freshness + corr + trust on every deduped candidate (surfaced to the UI).
+    for b in eligible:
+        dsl = _days_since_last_trade(b, now)
+        b["days_since_last_trade"] = dsl
+        b["dormant"] = (dsl is not None and dsl > TRUST["max_dormant_days"])
+        b["corr_max_vs_real"] = _corr_vs_real(b)
+        hard_ok, soft_ok, reasons = _seat_block(b)
+        b["trust_eligible"] = soft_ok
+        b["trust_fails"] = reasons
+        b["_seat_hard_ok"] = hard_ok
+
+    # Diversification (owner promotes the 3 together to ONE account → avoid shared edge):
+    # within a shrunk-score band, prefer DISTINCT base symbols. Applied to the TRUSTED
+    # pool for the READY seats; a clearly-better bot is never displaced (bounded by band).
+    DIVERSITY_BAND = 4.0
+    def _base_sym(b):
+        return (_primary_symbol(b) or "?").split(".")[0].upper()
+
+    def _diversify(pool, n_seats):
+        ordered, used_syms, pool = [], set(), list(pool)
+        for _slot in range(min(n_seats, len(pool))):
+            if not pool:
+                break
+            best = _shrunk(pool[0])
+            pick = None
+            for cand in pool:
+                if (best - _shrunk(cand)) > DIVERSITY_BAND:
+                    break
+                if _base_sym(cand) not in used_syms:
+                    pick = cand
+                    break
+            if pick is None:
+                pick = pool[0]
+            ordered.append(pick)
+            used_syms.add(_base_sym(pick))
+            pool.remove(pick)
+        return ordered + pool
+
+    seatable = [b for b in eligible if b.get("_seat_hard_ok")]      # may hold READY/NEAR
+    blocked = [b for b in eligible if not b.get("_seat_hard_ok")]   # WATCH/NO only
+    trusted = [b for b in seatable if b.get("trust_eligible")]
+    provisional = [b for b in seatable if not b.get("trust_eligible")]
+    for b in eligible:
+        b.pop("_seat_hard_ok", None)
+
+    # ALWAYS fill the 3 READY seats: trusted first (diversified), then provisional backfill,
+    # then hard-blocked (which can still land in WATCH — a watchlist, not a real-money seat).
+    eligible = _diversify(trusted, cap_ready) + provisional + blocked
+
+    # Reset everyone to NO first; rank is authoritative.
+    for b in snap.get("bots", []):
+        b["promotion_status"] = "NO"
+
     shadow_cola = {"cvar_fail": 0, "tail_fail": 0, "sqn_fail": 0, "corr_fail": 0}
     for idx, b in enumerate(eligible):
         if idx < cap_ready:
@@ -3091,10 +3224,14 @@ def main():
             b["promotion_status"] = "WATCH"
         else:
             b["promotion_status"] = "NO"
-        # SHADOW gates — RECORD only, do NOT change status (calibrate first).
+        # A READY/NEAR seat filled by a NON-trusted bot (thin field) is flagged so the UI warns.
+        if b["promotion_status"] in ("READY", "NEAR"):
+            b["provisional_low_confidence"] = not b.get("trust_eligible", False)
+        # Shadow gates: corr + SQN are ENFORCED via trust-eligibility above; cvar/tail stay
+        # RECORD-only (owner decision — calibrate before enforcing).
         inst = b.get("institutional") or {}
         cvar, tail, band = inst.get("cvar_95_pct"), inst.get("tail_ratio"), inst.get("sqn_band")
-        corr_max = _corr_vs_real(b)
+        corr_max = b.get("corr_max_vs_real")
         b["shadow_gates"] = {
             "cvar_fail": cvar is not None and cvar < -5.0,
             "tail_fail": tail is not None and tail < 0.7,
@@ -3180,11 +3317,18 @@ def main():
         "computed_at": today_iso,
         # Candidate-pool transparency (Data Integrity DNA — every figure re-derivable).
         "rank_caps": dict(STATUS_RANK_CAPS),
-        "ranker": "promotion_score desc, net_after_commission desc, trades desc, vps asc, login asc",
+        "trust": dict(TRUST),
+        "ranker": ("promotion_score_shrunk desc (confidence-adjusted), net_after_commission desc, "
+                   "trades desc, vps asc, login asc — READY/NEAR require trust-eligibility "
+                   "(freshness + evidence + win_rate; HARD-exclude dormant/clones-real/SQN-MALO); "
+                   "always 3 seats, thin field backfills flagged provisional_low_confidence"),
         "human_veto_required": True,  # charter SOLO-LECTURA: READY is a proposal, never auto-promote
         "pool_pre_commission": len(pool_pre_commission),
         "eligible_count": len(elig_all),  # after commission filter (true promotable pool)
         "pool_post_dedup": len(eligible),
+        "trusted_count": len(trusted),          # fully trust-eligible (no soft/hard fails)
+        "provisional_count": len(provisional),  # seatable but soft-failing (backfill)
+        "hard_blocked_count": len(blocked),     # dormant / clones-real / SQN-MALO
         "dedup_dropped": dedup_dropped,
         "commission_filter_dropped": commission_filter_dropped,
         "commission_unknown": commission_unknown,  # fail-closed: excluded, gated by verify_integrity

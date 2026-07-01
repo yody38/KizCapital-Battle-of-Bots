@@ -282,6 +282,7 @@ def main() -> int:
     started = time.time()
     fails: list[str] = []
     info: dict = {"ts": now_iso(), "steps": {}}
+    dormant_eas: list[dict] = []  # "competencia siempre activa" monitor (separate alert)
 
     # Step 1
     try:
@@ -421,6 +422,27 @@ def main() -> int:
                     if lag > cap:
                         fails.append(f"carry-forward too long: {v_id} frozen {round(lag/60)}min (>{round(cap/60)}min — VPS never recovered)")
 
+            # Step 4c — "competencia siempre activa" monitor. A demo EA that WAS an
+            # established competitor (trades ≥ 30) but stopped trading (post_merge flags
+            # dormant / days_since_last_trade) has detached/crashed on its VPS. Not data
+            # corruption → does NOT hard-fail integrity; raises its OWN deduped issue so
+            # the competition field stays full & live.
+            real_magics = set(snap.get("real_magics") or [])
+            for b in snap.get("bots", []):
+                if (b.get("magic", 0) != 0
+                        and b.get("magic") not in real_magics
+                        and (b.get("trades") or 0) >= 30
+                        and b.get("dormant")):
+                    dormant_eas.append({
+                        "magic": b.get("magic"),
+                        "vps": b.get("vps"),
+                        "account": b.get("account_login"),
+                        "symbol": (b.get("symbols") or [None])[0],
+                        "days_since_last_trade": b.get("days_since_last_trade"),
+                    })
+            dormant_eas.sort(key=lambda d: -(d.get("days_since_last_trade") or 0))
+            info["steps"]["dormant_eas"] = {"count": len(dormant_eas), "samples": dormant_eas[:8]}
+
         # Step 4b — MCP-health monitor liveness. A stale checked_at means the
         # MONITOR died (VPS1 dispatcher down + GH cron throttled), not the
         # product: Step 4's pipeline dead-man (snapshot.generated_at > 90min)
@@ -495,6 +517,24 @@ def main() -> int:
     info["fails"] = fails
 
     append_log(info)
+
+    # "Competencia siempre activa" — separate deduped alert (independent of integrity fails).
+    if dormant_eas and not args.no_issue:
+        d_body = [
+            f"**{len(dormant_eas)} EA(s) demo establecidos dejaron de operar** (dormidos > umbral)",
+            "",
+            "Un EA con historial (≥30 trades) que dejó de operar = probablemente se despegó o "
+            "crasheó en su VPS. La competencia debe estar siempre llena y viva.",
+            "",
+            "| magic | símbolo | VPS | cuenta | días sin operar |",
+            "|---|---|---|---|---|",
+            *[f"| `{d['magic']}` | {d['symbol']} | {d['vps']} | {d['account']} | {d['days_since_last_trade']} |"
+              for d in dormant_eas],
+            "",
+            "_Acción:_ revisar el terminal MT5 de esas cuentas (EA adjunto/AutoTrading) en el VPS.",
+        ]
+        ref = file_issue_dedupe("dormant EAs", "\n".join(d_body))
+        print(f"[watchdog] dormant EAs={len(dormant_eas)} issue={ref}", file=sys.stderr)
 
     if not fails:
         if not args.quiet:

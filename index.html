@@ -7,7 +7,7 @@
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
 <title>Battle of Bots — MT5 Portfolio</title>
-<link rel="stylesheet" href="styles.css?v=20260608e">
+<link rel="stylesheet" href="styles.css?v=20260701a">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500;700&display=swap" rel="stylesheet">
@@ -307,10 +307,10 @@
     <div class="balanced-header">
       <div>
         <h2 class="section-title balanced-title">🎯 Candidatos a Cuenta Real</h2>
-        <p class="balanced-subtitle">Top bots por <strong>Promotion Score</strong> híbrido (<strong>dinero</strong> + Calmar/DD + consistencia + estabilidad). Los <strong>READY</strong> son los candidatos directos a cuenta real · <span id="candidates-count">0</span> bots evaluados · <strong>100% dinámico</strong>: se recalcula cada 30 min, el que sube de score entra y el más débil sale.</p>
+        <p class="balanced-subtitle">Top bots por <strong>Promotion Score ajustado por confianza</strong> (<strong>dinero</strong> + bajo DD + consistencia + <strong>win rate</strong> + <strong>cadencia</strong>). Los <strong>READY</strong> son los 3 candidatos directos a cuenta real: además del score deben ser de <strong>suma confianza</strong> (evidencia real, no muestra chica), estar <strong>operando</strong> (frescos ≤14 días) y <strong>no clonar</strong> lo que ya corre en real · <span id="candidates-count">0</span> bots evaluados · <strong>siempre 3</strong>, <strong>100% dinámico</strong>: se recalcula cada 30 min, el que sube entra y el más débil sale.</p>
       </div>
-      <div class="balanced-legend" title="Cómo se elige (todo re-derivable, sin fijación, SIEMPRE 3):&#10;&#10;1) GATING duro — falla uno y queda fuera: trades≥30 · meses activo≥3 · DD≤10% del balance · net>0 · sin decay · magic≠0.&#10;&#10;2) SCORE 0-100 = suma ponderada (dinero + bajo DD + consistencia + CALIDAD): Calmar .17 · Dinero (return mens. neto) .17 · % Meses+ .13 · Sortino .09 · Decay .09 · Robustez OOS .08 · Seguridad (1−prob.negativo) .08 · Cola/CVaR .06 · Profit Factor .06 · Significancia .04 · Edad .02 · Trades .01.&#10;&#10;3) DIVERSIFICACIÓN: entre bots de score parecido se prefiere distinto par, para que los 3 (que suben juntos a una cuenta) no sean clones.&#10;&#10;4) Insignias (no filtran): DOMINANCIA ✅ Caballo = top-25% (≥P75) en dinero/riesgo/consistencia/estabilidad y nadie lo supera en todo. CALIDAD 🟢/🟡/🔴 = media de robustez OOS, seguridad, cola y significancia.&#10;&#10;Los 3 READY = los 3 mejores por score (siempre 3). Escalabilidad fuera ($5-10K).">
-        🚦 Gating: trades≥30 · meses≥3 · DD≤10% · net&gt;0 — score híbrido + calidad + dominancia + diversificación (ⓘ)
+      <div class="balanced-legend" title="Cómo se elige (todo re-derivable, sin fijación, SIEMPRE 3):&#10;&#10;1) GATING duro — falla uno y queda fuera: trades≥30 · meses activo≥3 · DD≤10% del balance · net>0 · sin decay · magic≠0.&#10;&#10;2) SCORE 0-100 = suma ponderada (dinero + bajo DD + consistencia + calidad + PERFIL): Calmar .15 · Dinero (return mens. neto) .15 · % Meses+ .11 · Win Rate .10 · Sortino .08 · Decay .08 · Cadencia (opera constante) .06 · Robustez OOS .06 · Seguridad .06 · Profit Factor .05 · Cola/CVaR .04 · Significancia .03 · Edad .02 · Trades .01.&#10;&#10;3) ORDEN por SCORE AJUSTADO POR CONFIANZA (shrunk): una muestra chica con suerte no puede superar a un bot probado.&#10;&#10;4) CONFIANZA para ocupar cupo READY/NEAR: evidencia real (cohorte o ≥4 meses) · sin score inflado · win rate ≥50% · FRESCO ≤14 días (dormido = fuera) · NO clona un bot ya en real (corr ≤0.7) · SQN ≠ malo. Si el campo no tiene 3 de plena confianza, se llena el cupo marcado ⚠ provisional.&#10;&#10;5) Insignias: DOMINANCIA ✅ Caballo = top-25% en todos los ejes. CALIDAD 🟢/🟡/🔴.&#10;&#10;Los 3 READY = los 3 mejores Y de suma confianza (siempre 3). Escalabilidad fuera ($5-10K).">
+        🚦 Gating: trades≥30 · meses≥3 · DD≤10% · net&gt;0 · WR≥50% · fresco≤14d · no clona real · SQN≠malo — orden por score ajustado por confianza (ⓘ)
       </div>
     </div>
     <div class="table-controls" style="margin-bottom:12px">
@@ -817,6 +817,6 @@
 
 </main>
 
-<script src="app.js?v=20260630c"></script>
+<script src="app.js?v=20260701a"></script>
 </body>
 </html>

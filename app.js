@@ -1855,12 +1855,19 @@ function renderCandidates() {
       : '';
     const domCell = dominanceBadge(b.dominance);
     const ddPct = b.dd_pct_of_balance;
+    const provChip = b.provisional_low_confidence
+      ? `<span class="chip chip-warn" title="Cupo de respaldo: no hay suficientes bots de PLENA confianza en el campo — subido provisionalmente. Fallas de confianza: ${(b.trust_fails || []).join(', ') || '—'}">⚠ provisional</span>`
+      : '';
+    const dsl = b.days_since_last_trade;
+    const freshChip = dsl == null ? ''
+      : b.dormant ? `<span class="chip chip-danger" title="Sin operar hace ${dsl} días — fuera de READY/NEAR por frescura (competencia siempre activa)">💤 ${dsl}d</span>`
+      : dsl > 7 ? `<span class="chip" title="Último trade hace ${dsl} días">🕒 ${dsl}d</span>` : '';
     return `
       <tr class="bot-row" data-vps="${b.vps}" data-login="${b.account_login}" data-magic="${b.magic}">
         ${buildCompareCheckboxCell(b.vps, b.account_login, b.magic)}
         <td><span class="rank-badge">${i + 1}</span></td>
         <td class="num"><strong style="color:var(--accent)">${b.promotion_score.toFixed(1)}</strong> ${confChip}</td>
-        <td>${statusBadge(b.promotion_status)}</td>
+        <td>${statusBadge(b.promotion_status)} ${provChip} ${freshChip}</td>
         <td>${domCell}</td>
         <td>${qualityBadge(b)}</td>
         <td class="mono">${b.magic}</td>

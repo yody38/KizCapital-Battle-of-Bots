@@ -3039,6 +3039,22 @@ tr.bot-row:hover { background: rgba(124, 156, 255, 0.06); }
 
 .chip.chip-warn { color: #ffb86b; border-color: rgba(255, 184, 107, 0.4); }
 .chip.chip-ok { color: #3ddc97; border-color: rgba(61, 220, 151, 0.4); }
+.chip.chip-danger { color: #ff6b8b; border-color: rgba(255, 107, 139, 0.4); }
+
+/* Self-contained chips for the Candidatos table (provisional / freshness) — the
+   base .chip only has styling inside modal/podium contexts, so scope it here. */
+#candidates-tbody .chip {
+  display: inline-block;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 999px;
+  padding: 1px 7px;
+  margin-left: 4px;
+  font-size: 10px;
+  font-weight: 700;
+  white-space: nowrap;
+  vertical-align: middle;
+  color: var(--muted);
+}
 
 /* =====================================================================
    🌊 Underwater panel (tab nueva)
