@@ -1491,15 +1491,11 @@ def detect_real_accounts(snap):
     """Return set of (vps, login) tuples for accounts flagged as real."""
     real = set()
     for a in snap.get("accounts", []):
-        # Heuristic: balance_kind, account_type, is_real, or explicit known reals.
+        # Single source of truth: the VPS snapshot_builder flags is_real = (trade_mode==2)
+        # (ACCOUNT_TRADE_MODE_REAL). No hardcoded login list — a new real is picked up
+        # automatically. `account_kind`/`type` kept as a defensive fallback.
         kind = (a.get("account_kind") or a.get("type") or "").lower()
-        if "real" in kind or a.get("is_real"):
-            real.add((a.get("vps"), a.get("login")))
-            continue
-        # Project-known real accounts. Sync con verify_integrity.EXPECTED_REAL.
-        # #25425 vive en vps6 (slot 40848); #32081 y #43306 en vps5. #3446 retirada.
-        if (a.get("vps") == "vps5" and a.get("login") in (32081, 43306)) or \
-           (a.get("vps") == "vps6" and a.get("login") == 25425):
+        if a.get("is_real") or "real" in kind:
             real.add((a.get("vps"), a.get("login")))
     return real
 
@@ -3127,6 +3123,25 @@ def main():
                     b["frozen_downgraded"] = True
                     n_degraded += 1
         print(f"[provenance-guard] carried_vps={sorted(carried_vps)} READY/NEAR_degraded_to_WATCH={n_degraded}")
+
+    # Re-enforce the WATCH cap after the provenance downgrades. Seating (above) already
+    # respects the caps, but the provenance guard pushes stale READY/NEAR bots INTO WATCH
+    # and can overflow it (WATCH=cap+1), which the disjointness/cap tribunal in
+    # verify_integrity (--strict) would then abort on — freezing the whole dashboard.
+    # A stale (frozen) bot must not hold a WATCH seat over a fresh one, so demote the
+    # excess to NO, dropping frozen-downgraded bots first, then lowest score.
+    watch_bots = [b for b in snap.get("bots", []) if b.get("promotion_status") == "WATCH"]
+    overflow = len(watch_bots) - cap_watch
+    if overflow > 0:
+        to_demote = sorted(
+            watch_bots,
+            key=lambda b: (0 if b.get("frozen_downgraded") else 1, b.get("promotion_score") or 0),
+        )[:overflow]
+        for b in to_demote:
+            b["promotion_status"] = "NO"
+            b["watch_cap_demoted"] = True
+        print(f"[watch-cap] WATCH overflow={overflow} demoted_to_NO="
+              f"{[b.get('magic') for b in to_demote]}")
 
     # Floating-DD shadow (Fase B) — decorates bots/accounts from mirrored sampler
     # summaries; never mutates promotion_status (flip is manual, evidence-gated).

@@ -52,14 +52,12 @@ BUCKET = "dashboard-data"
 
 DEFAULT_TOLERANCE = 0.05  # USD
 
-# Known real-money accounts (single-owner charter). Anchoring the freshness check
-# to this constant — rather than len(is_real) vs real_portfolio.account_count, which
-# are both derived from the same merge and therefore tautological — actually catches
-# a real account silently dropping out. Adding a 3rd real account requires editing
-# this set (documented manual maintenance, same pattern as vps-access).
-# Roster de cuentas reales activas (mantener en sync con live_publisher.REAL_LOGINS
-# y post_merge.detect_real_accounts). #3446 (vps6, $0) retirada 2026-06-29; #43306
-# (vps5) incorporada como 3ª real con fondos.
+# Real-money account FLOOR (single-owner charter). This is the minimal always-gated set;
+# the live roster (persisted `real_roster.json` in Supabase) AUTO-ENROLLS any new real
+# with balance>0 on the first cycle it appears — so adding a real needs NO code edit.
+# This constant is only the seed/fallback used when the persisted roster is unreachable,
+# guaranteeing these never silently drop even during a Supabase outage. Keyed by (vps,
+# login) for readability; the gate itself compares by login (survives VPS moves).
 EXPECTED_REAL = {("vps6", 25425), ("vps5", 32081),
                  ("vps5", 43306)}  # #25425 movida a vps6 (slot limpio 40848) 2026-06-30
 
@@ -99,6 +97,93 @@ def fetch_remote(url: str, key: str, obj_path: str) -> bytes:
     )
     with urlrequest.urlopen(req, timeout=30) as resp:
         return resp.read()
+
+
+ROSTER_OBJECT = "real_roster.json"  # persisted auto-onboarding registry in `dashboard-data`
+
+
+def put_remote(url: str, key: str, obj_path: str, body: bytes) -> None:
+    endpoint = f"{url.rstrip('/')}/storage/v1/object/{BUCKET}/{obj_path}"
+    req = urlrequest.Request(
+        endpoint,
+        data=body,
+        headers={
+            "Authorization": f"Bearer {key}",
+            "apikey": key,
+            "Content-Type": "application/json",
+            "x-upsert": "true",
+            "cache-control": "no-cache, max-age=0",
+        },
+        method="POST",
+    )
+    with urlrequest.urlopen(req, timeout=30) as resp:
+        if resp.status >= 300:
+            raise RuntimeError(f"http {resp.status}")
+
+
+def load_real_roster(env: dict[str, str]) -> dict | None:
+    """Load the persisted real-account roster from Supabase Storage. Returns the roster
+    dict {str(login): {vps, first_seen, last_balance, active}} or None if credentials are
+    absent / fetch fails (caller then falls back to the EXPECTED_REAL constant floor)."""
+    url, keyv = env.get("SUPABASE_URL"), env.get("SUPABASE_SERVICE_ROLE_KEY")
+    if not url or not keyv:
+        return None
+    try:
+        raw = fetch_remote(url, keyv, ROSTER_OBJECT)
+        data = json.loads(raw)
+        return data.get("reals", {}) if isinstance(data, dict) else {}
+    except urlerror.HTTPError as exc:
+        if exc.code == 404:
+            return {}  # first run — no roster object yet
+        return None
+    except Exception:
+        return None
+
+
+def save_real_roster(env: dict[str, str], roster: dict) -> bool:
+    url, keyv = env.get("SUPABASE_URL"), env.get("SUPABASE_SERVICE_ROLE_KEY")
+    if not url or not keyv:
+        return False
+    payload = json.dumps(
+        {"generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "reals": roster},
+        indent=2,
+    ).encode("utf-8")
+    try:
+        put_remote(url, keyv, ROSTER_OBJECT, payload)
+        return True
+    except Exception as exc:
+        print(f"[verify] WARN: could not persist real_roster.json ({exc})", file=sys.stderr)
+        return False
+
+
+def reconcile_roster(snap: dict, roster: dict) -> tuple[set[int], bool]:
+    """Auto-onboard: enroll any present real (is_real, balance>0) not yet in the roster,
+    seed the EXPECTED_REAL floor, refresh last_balance/vps. Returns (expected_logins, changed).
+    expected_logins = active rostered logins ∪ EXPECTED_REAL floor (the absence hard-gate set)."""
+    now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    changed = False
+    floor = {login for (_vps, login) in EXPECTED_REAL}
+    for lg in floor:
+        if str(lg) not in roster:
+            roster[str(lg)] = {"vps": None, "first_seen": now, "last_balance": None, "active": True}
+            changed = True
+    for a in snap.get("accounts") or []:
+        if not a.get("is_real"):
+            continue
+        login, bal, vps = a.get("login"), (a.get("balance") or 0), a.get("vps")
+        if bal <= 0:
+            continue  # $0 real is not onboarded (retired/empty); floor reals stay gated
+        k = str(login)
+        rec = roster.get(k)
+        if rec is None:
+            roster[k] = {"vps": vps, "first_seen": now, "last_balance": bal, "active": True}
+            changed = True
+            print(f"[verify] AUTO-ONBOARD real account {login} on {vps} (bal={bal}) → roster")
+        elif not rec.get("active") or rec.get("vps") != vps or rec.get("last_balance") != bal:
+            rec.update(vps=vps, last_balance=bal, active=True)
+            changed = True
+    expected = {int(k) for k, v in roster.items() if v.get("active")} | floor
+    return expected, changed
 
 
 def check_bot(bot: dict, tolerance: float) -> list[str]:
@@ -159,7 +244,7 @@ def check_bot(bot: dict, tolerance: float) -> list[str]:
     return fails
 
 
-def check_freshness(snap: dict) -> tuple[list[str], list[str], dict]:
+def check_freshness(snap: dict, expected_logins: set[int]) -> tuple[list[str], list[str], dict]:
     """5th check — real-account data authenticity (HARD gate) + demo staleness (WARN).
 
     Re-derivable from the snapshot itself (uses the `vps_freshness` block baked in
@@ -177,21 +262,22 @@ def check_freshness(snap: dict) -> tuple[list[str], list[str], dict]:
     real_accts = [a for a in accounts if a.get("is_real")]
     detail: dict = {"real_accounts": [], "demo_on_stale_vps": 0}
 
-    # (a) Each EXPECTED real account must be present (anchored to a constant, not a
-    #     same-source count — see EXPECTED_REAL). Missing = a real silently dropped.
-    present_real = {(a.get("vps"), a.get("login")) for a in real_accts}
-    missing_real = EXPECTED_REAL - present_real
+    # (a) Each EXPECTED real account (login) must be present. `expected_logins` is the
+    #     auto-onboarding roster (persisted in Supabase, seeded by EXPECTED_REAL floor) —
+    #     keyed by login so a real surviving a VPS move is not seen as dropped. Missing =
+    #     a real silently dropped → hard gate. New reals are auto-enrolled in main().
+    present_logins = {a.get("login") for a in real_accts}
+    missing_real = expected_logins - present_logins
     if missing_real:
         hard.append(
             f"freshness: expected real account(s) ABSENT from snapshot: "
-            f"{sorted(missing_real)} (present reals: {sorted(present_real)})"
+            f"{sorted(missing_real)} (present reals: {sorted(present_logins)})"
         )
-    extra_real = present_real - EXPECTED_REAL
-    if extra_real:
-        warn.append(
-            f"freshness: unexpected real account(s) {sorted(extra_real)} — "
-            f"add to EXPECTED_REAL in verify_integrity.py to gate them"
-        )
+    # A rostered real that is present but drained to $0 is a retirement, not a drop —
+    # surface it (dashboard hides $0 reals) without gating.
+    for a in real_accts:
+        if a.get("login") in expected_logins and not (a.get("balance") or 0) > 0:
+            warn.append(f"freshness: rostered real {a.get('login')} present at $0 balance (retired?)")
 
     # (b) Each real account's hosting VPS must be fresh and present.
     for a in real_accts:
@@ -300,8 +386,21 @@ def main() -> int:
                 if "daily_equity_series" in f:
                     series_missing += 1
 
+    # Real-account roster (auto-onboarding + safety net). Persisted in Supabase so a
+    # newly-added real enrolls itself on the first cycle and is thereafter gated against
+    # a silent drop-out. Falls back to the EXPECTED_REAL constant floor if unreachable.
+    env = load_env()
+    roster = load_real_roster(env)
+    if roster is None:
+        expected_logins = {login for (_vps, login) in EXPECTED_REAL}
+        print("[verify] roster unavailable — falling back to EXPECTED_REAL floor", file=sys.stderr)
+    else:
+        expected_logins, roster_changed = reconcile_roster(snap, roster)
+        if roster_changed:
+            save_real_roster(env, roster)
+
     # 5th check — real-account freshness/authenticity (hard) + demo staleness (warn).
-    freshness_hard, freshness_warn, freshness_detail = check_freshness(snap)
+    freshness_hard, freshness_warn, freshness_detail = check_freshness(snap, expected_logins)
     all_fails.extend(freshness_hard)
 
     # Forward-tracker ledger health (post_merge surfaces tracker_health):
