@@ -127,16 +127,22 @@ def load_real_roster(env: dict[str, str]) -> dict | None:
     absent / fetch fails (caller then falls back to the EXPECTED_REAL constant floor)."""
     url, keyv = env.get("SUPABASE_URL"), env.get("SUPABASE_SERVICE_ROLE_KEY")
     if not url or not keyv:
+        print("[verify] roster: SUPABASE creds absent in .env.local", file=sys.stderr)
         return None
     try:
         raw = fetch_remote(url, keyv, ROSTER_OBJECT)
         data = json.loads(raw)
         return data.get("reals", {}) if isinstance(data, dict) else {}
     except urlerror.HTTPError as exc:
-        if exc.code == 404:
-            return {}  # first run — no roster object yet
+        # Supabase Storage returns 400 ("Object not found") or 404 for a missing object
+        # on the first run — treat both as an empty roster so we create it. Other codes
+        # (auth / server) → None so we fall back to the floor without clobbering.
+        if exc.code in (400, 404):
+            return {}
+        print(f"[verify] roster: fetch HTTP {exc.code} — using floor fallback", file=sys.stderr)
         return None
-    except Exception:
+    except Exception as exc:
+        print(f"[verify] roster: fetch error {exc} — using floor fallback", file=sys.stderr)
         return None
 
 
