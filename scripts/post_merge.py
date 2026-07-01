@@ -118,7 +118,10 @@ STATUS_RANK_CAPS = {"READY": 3, "NEAR": 5, "WATCH": 15}
 # NOTE: confidence here = ABSOLUTE evidence, NOT the cohort-relative LOW/MEDIUM/HIGH label
 # (that label would expel genuine grinders whose only "fault" is a small peer cohort).
 TRUST = {
-    "min_shrunk": 60.0,          # confidence-adjusted score floor (= NEAR threshold)   [SOFT]
+    "min_shrunk": 58.0,          # confidence-adjusted score floor [SOFT]. Calibrado 2026-07-01
+                                 # tras añadir win_rate+cadence a WEIGHTS (comprimió la escala
+                                 # ~10pts): 58 ≈ +3 sobre global_prior, separa el top-3 genuino
+                                 # (59-62) del pack; el fluke igual cae por 'inflated' (delta>12).
     "min_cohort_n": 3,           # peer support OR ...                                   [SOFT]
     "min_months_evidence": 4,    #   ... enough live history (alternative to cohort)     [SOFT]
     "max_shrink_delta": 12.0,    # |raw-shrunk|: reject scores heavily inflated by luck  [SOFT]
