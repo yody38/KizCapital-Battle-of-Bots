@@ -336,6 +336,33 @@ def main() -> int:
             f"(per-bot file missing) — {commission_unknown[:5]}"
         )
 
+    # 6th check — candidate-bucket DISJOINTNESS invariant (owner rule, al pie de la letra):
+    # a bot may appear in AT MOST ONE of READY/NEAR/WATCH, no magic repeats within a
+    # bucket, and each bucket respects its cap. Guaranteed today by post_merge's
+    # dedup + single-status seating; this is the permanent tribunal that ABORTS the
+    # cycle (in --strict) if a future change ever lets the buckets overlap.
+    bucket_fail_start = len(all_fails)
+    buckets: dict[str, list] = {"READY": [], "NEAR": [], "WATCH": []}
+    for b in snap.get("bots", []):
+        st = b.get("promotion_status")
+        if st in buckets and b.get("magic"):
+            buckets[st].append(b["magic"])
+    caps = (snap.get("promotion_meta") or {}).get("rank_caps") or {"READY": 3, "NEAR": 5, "WATCH": 15}
+    for st, magics in buckets.items():
+        if len(magics) != len(set(magics)):
+            dups = sorted({m for m in magics if magics.count(m) > 1})
+            all_fails.append(f"promotion buckets: magic duplicado dentro de {st}: {dups}")
+        cap = caps.get(st)
+        if cap is not None and len(magics) > cap:
+            all_fails.append(f"promotion buckets: {st} tiene {len(magics)} bots (cap {cap})")
+    rset, nset, wset = (set(buckets[k]) for k in ("READY", "NEAR", "WATCH"))
+    for an, bn, inter in (("READY", "NEAR", rset & nset),
+                          ("READY", "WATCH", rset & wset),
+                          ("NEAR", "WATCH", nset & wset)):
+        if inter:
+            all_fails.append(f"promotion buckets: solapamiento {an}∩{bn}: {sorted(inter)}")
+    bucket_fails = len(all_fails) - bucket_fail_start
+
     remote_fails: list[str] = []
     if args.check_remote:
         env = load_env()
@@ -365,6 +392,7 @@ def main() -> int:
             "net_profit_mismatches": net_mismatches,
             "series_missing": series_missing,
             "freshness_hard_fails": len(freshness_hard),
+            "candidate_bucket_fails": bucket_fails,
             "tracker_corrupt_lines": tracker_corrupt,
             "remote_check_run": args.check_remote,
             "remote_failures": len(remote_fails),
