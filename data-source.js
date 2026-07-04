@@ -68,10 +68,12 @@
 })();
 
 // ---------------------------------------------------------------------------
-// Live equity stream for REAL accounts (#25425, #32081 on VPS5).
+// Live equity stream for the 5 active REAL accounts
+// (#32081/#43306 on VPS5 · #25425/#43411/#43414 on VPS6).
 // Reads from public.live_real_state via Supabase Realtime + REST.
-// Published every ~3s by C:\mt5-mcp\live_publisher.py, held alive by the
-// Railway "kiz-live-bridge" worker (see Battle of Bots/railway/live-bridge/).
+// Published every ~3s by C:\mt5-mcp\live_publisher.py on each VPS (roster in
+// C:\mt5-mcp\.live_publisher.env), held alive by the Railway "kiz-live-bridge"
+// worker (see Battle of Bots/railway/live-bridge/).
 // ---------------------------------------------------------------------------
 (function () {
   if (window.kizLiveReal) return;

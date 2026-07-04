@@ -68,7 +68,7 @@ MCP_DEADMAN_SEC = 90 * 60  # mcp-health is dispatched ~every 30min (VPS1 dispatc
                            # only a backstop, so 20min was a guaranteed false positive. 90min =
                            # tolerate 2 missed dispatch cycles, still catch a dead monitor in <1.5h.
 LIVE_DEADMAN_SEC = 90      # live stream pushes every ~3s → >90s stale = worker/tailnet/MT5 dead
-LIVE_REAL_LOGINS = {25425, 32081, 43306}  # 3 reales en vivo: 32081/43306 (VPS5) + 25425 (VPS6, publisher propio tras upgrade de RAM 2026-06-30)
+LIVE_REAL_LOGINS = {25425, 32081, 43306, 43411, 43414}  # 5 reales en vivo: 32081/43306 (VPS5) + 25425/43411/43414 (VPS6); roster por VPS en C:\mt5-mcp\.live_publisher.env
 
 
 # ---------- env / helpers ----------
@@ -107,13 +107,13 @@ def parse_iso(s: str | None) -> datetime | None:
 
 # ---------- step 1: latest CI run ----------
 
-def latest_ci_run() -> dict:
+def latest_ci_runs() -> list[dict]:
     out = subprocess.run(
         [
             "gh", "run", "list",
             "--workflow", WORKFLOW,
             "--repo", GH_REPO,
-            "--limit", "1",
+            "--limit", "5",
             "--json", "databaseId,status,conclusion,createdAt,updatedAt",
         ],
         check=True, capture_output=True, text=True, timeout=30,
@@ -121,7 +121,7 @@ def latest_ci_run() -> dict:
     runs = json.loads(out.stdout)
     if not runs:
         raise RuntimeError("no CI runs found")
-    return runs[0]
+    return runs
 
 
 # ---------- step 2: artifact ----------
@@ -285,8 +285,10 @@ def main() -> int:
     dormant_eas: list[dict] = []  # "competencia siempre activa" monitor (separate alert)
 
     # Step 1
+    completed_run = None
     try:
-        run = latest_ci_run()
+        runs = latest_ci_runs()
+        run = runs[0]
         info["steps"]["ci"] = {
             "id": run["databaseId"],
             "status": run["status"],
@@ -296,15 +298,24 @@ def main() -> int:
         if run["status"] == "in_progress" or run["status"] == "queued":
             # Race: watchdog fired while CI is mid-cycle. Not a real drift —
             # the previous successful cycle's data is still serving the dashboard.
-            info["steps"]["ci"]["note"] = "pending — skipped (race)"
+            # Steps 2/3 audit the newest COMPLETED run instead of the in-flight one.
+            info["steps"]["ci"]["note"] = "pending — auditing previous completed run (race)"
         elif run["status"] != "completed" or run.get("conclusion") != "success":
             fails.append(f"CI run #{run['databaseId']} status={run['status']} conclusion={run.get('conclusion')}")
+        completed_run = next(
+            (r for r in runs if r["status"] == "completed" and r.get("conclusion") == "success"),
+            None,
+        )
+        if completed_run and completed_run["databaseId"] != run["databaseId"]:
+            info["steps"]["ci"]["audited_run"] = completed_run["databaseId"]
     except Exception as e:
         info["steps"]["ci"] = {"error": str(e)}
         fails.append(f"ci_list_failed: {e}")
 
     ci_ok = not fails
-    ci_run = info["steps"].get("ci", {}) if ci_ok else None
+    ci_run = None
+    if ci_ok and completed_run:
+        ci_run = {"id": completed_run["databaseId"], "updated_at": completed_run.get("updatedAt")}
 
     # Step 2 — artifact (skip if no CI run id)
     artifact_report = None
@@ -475,7 +486,13 @@ def main() -> int:
                     "monitor-health warn only; data freshness is gated by Step 4"
                 )
             if mcp.get("any_critical"):
-                fails.append(f"mcp-health critical: {mcp.get('summary')} VPS(s) failing")
+                # summary is "<ok>/<total>" — name the DOWN ones, not the OK count.
+                down = sorted(
+                    v for v, d in (mcp.get("vps") or {}).items()
+                    if isinstance(d, dict) and d.get("status") not in ("ok", "warn")
+                )
+                total = mcp.get("total") or len(mcp.get("vps") or {}) or "?"
+                fails.append(f"mcp-health critical: {len(down)}/{total} VPS down ({', '.join(down) or 'unknown'})")
 
         # Step 4b — Live equity stream freshness (the 2 REAL accounts). This is the
         # only pipeline without its own watchdog; if it dies (Railway down, TS

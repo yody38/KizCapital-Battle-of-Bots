@@ -55,8 +55,10 @@ LIVE_VPS_TAG = os.environ.get("LIVE_VPS_TAG", "vps5")
 PUBLISHER_ID = f"{LIVE_VPS_TAG}-{socket.gethostname()}"
 HTTP_TIMEOUT = 5
 
-# Roster de cuentas reales (sync con verify_integrity.EXPECTED_REAL y
-# post_merge.detect_real_accounts). #43306 añadida 2026-06-29; #3446 retirada.
+# Roster de cuentas reales por VPS — se define en .live_publisher.env de cada
+# VPS (REAL_LOGINS=comma-list, LIVE_VPS_TAG=vpsN, LOGIN_TERMINAL_MAP=
+# login=path;login=path). Este default solo aplica si el env file no lo trae.
+# Sync con verify_integrity.EXPECTED_REAL y post_merge.detect_real_accounts.
 REAL_LOGINS: set[int] = {25425, 32081, 43306}
 TERMINAL_GLOB = r"C:\Program Files\MetaTrader 5 *\terminal64.exe"
 
@@ -81,7 +83,7 @@ log = logging.getLogger("live_publisher")
 def load_env() -> dict[str, str]:
     env: dict[str, str] = {}
     if ENV_PATH.exists():
-        for raw in ENV_PATH.read_text(encoding="utf-8").splitlines():
+        for raw in ENV_PATH.read_text(encoding="utf-8-sig").splitlines():
             line = raw.strip()
             if not line or line.startswith("#") or "=" not in line:
                 continue
@@ -93,6 +95,36 @@ def load_env() -> dict[str, str]:
         if k not in env or not env[k]:
             raise SystemExit(f"missing required env var: {k}")
     return env
+
+
+def configure(env: dict[str, str]) -> None:
+    """Apply per-VPS roster/tag/terminal-map from env (process env wins over
+    the env file, file wins over module defaults)."""
+    global LIVE_VPS_TAG, PUBLISHER_ID, REAL_LOGINS
+
+    def _val(key: str) -> str:
+        return os.environ.get(key) or env.get(key) or ""
+
+    tag = _val("LIVE_VPS_TAG")
+    if tag:
+        LIVE_VPS_TAG = tag
+        PUBLISHER_ID = f"{LIVE_VPS_TAG}-{socket.gethostname()}"
+
+    logins_raw = _val("REAL_LOGINS")
+    if logins_raw:
+        REAL_LOGINS = {int(x) for x in logins_raw.replace(";", ",").split(",") if x.strip()}
+
+    # Seed the login->terminal cache so the first cycle skips the full scan
+    # (a cold scan of ~14 terminals overruns the cycle timeout).
+    map_raw = _val("LOGIN_TERMINAL_MAP")
+    for pair in map_raw.split(";"):
+        if "=" not in pair:
+            continue
+        login_s, path = pair.split("=", 1)
+        try:
+            _login_path_cache[int(login_s.strip())] = path.strip()
+        except ValueError:
+            log.warning("LOGIN_TERMINAL_MAP: bad login %r", login_s)
 
 
 # --- MT5 helpers ---------------------------------------------------------
@@ -272,6 +304,7 @@ def main() -> None:
 
     interval = max(1.0, float(args.interval))
     env = load_env()
+    configure(env)
     log.info(
         "live_publisher starting · interval=%ss · target_logins=%s · publisher=%s",
         interval, sorted(REAL_LOGINS), PUBLISHER_ID,

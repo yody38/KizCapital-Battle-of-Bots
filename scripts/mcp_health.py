@@ -79,6 +79,9 @@ AUTO_RECOVERY = os.environ.get("AUTO_RECOVERY", "0") == "1"
 # Still informational (amber chip), never status-changing.
 LOW_RAM_WARN_MB = int(os.environ.get("MCP_HEALTH_LOW_RAM_MB", 120))
 RAM_CRITICAL_MB = int(os.environ.get("MCP_HEALTH_RAM_CRITICAL_MB", 40))
+# Pagefile commit % — the earlier exhaustion signal (climbs before free RAM
+# bottoms out). Info-only flag, same policy as the RAM flags.
+PAGEFILE_WARN_PCT = int(os.environ.get("MCP_HEALTH_PAGEFILE_WARN_PCT", 90))
 
 REMOTE_SNAPSHOT = "C:/mt5-mcp/snapshot.json"
 
@@ -201,6 +204,8 @@ def probe_vps(vps_id: str, host: str) -> dict:
             result["low_ram_warn"] = True  # surfaced as info, does NOT degrade
         if len(lines) > 1:
             result["pagefile_commit_pct"] = int(lines[1])
+            if result["pagefile_commit_pct"] >= PAGEFILE_WARN_PCT:
+                result["pagefile_warn"] = True  # info only, does NOT degrade
     except (ValueError, TypeError, IndexError):
         pass  # could not measure; hard failures are already gated by the snapshot read
 
