@@ -2556,6 +2556,86 @@ def _parse_iso_safe(s):
         return None
 
 
+# --- Real daily performance (panel "¿Quién ganó HOY?" + consistencia) -------
+# Computed ONLY for bots running on real accounts. Pure function of the per-bot
+# trade list (close_time epoch s) + daily_equity_series; informational for the
+# dashboard — never touches promotion scoring/gating.
+
+def compute_real_daily(trades, daily_series):
+    now = datetime.now(timezone.utc)
+    today = now.date().isoformat()
+    yesterday = (now - timedelta(days=1)).date().isoformat()
+    week_cut = (now - timedelta(days=7)).date().isoformat()
+
+    def day_of(t):
+        c = t.get("close_time")
+        return datetime.fromtimestamp(c, tz=timezone.utc).date().isoformat() if c else None
+
+    t_today = [t for t in trades if day_of(t) == today]
+    t_yest = [t for t in trades if day_of(t) == yesterday]
+    net = lambda ts: round(sum(t.get("net", t.get("profit", 0.0)) or 0.0 for t in ts), 2)
+
+    # Rolling stats over ACTIVE days (daily_equity_series only has days with trades).
+    cut30 = (now - timedelta(days=30)).date().isoformat()
+    cut7 = week_cut
+    d30 = [d for d in daily_series if d.get("date", "") >= cut30]
+    d7 = [d for d in d30 if d.get("date", "") >= cut7]
+    pos30 = sum(1 for d in d30 if (d.get("daily_net") or 0) > 0)
+    pos7 = sum(1 for d in d7 if (d.get("daily_net") or 0) > 0)
+    nets30 = [d.get("daily_net") or 0.0 for d in d30]
+    exp30 = round(sum(nets30) / len(nets30), 2) if nets30 else None
+    sd30 = round(stdev(nets30), 2) if len(nets30) >= 2 else None
+
+    # Streak: consecutive positive ACTIVE days counting back from the last one.
+    streak = 0
+    for d in reversed(daily_series):
+        if (d.get("daily_net") or 0) > 0:
+            streak += 1
+        else:
+            break
+
+    pos_rate30 = round(pos30 / len(d30), 3) if d30 else None
+    if pos_rate30 is not None and len(d30) >= 8 and pos_rate30 >= 0.6:
+        badge = "constante"
+    elif streak >= 3:
+        badge = "racha"
+    elif pos_rate30 is not None and len(d30) >= 5 and pos_rate30 < 0.45:
+        badge = "volatil"
+    else:
+        badge = "neutro"
+
+    week_net = net([t for t in trades if (day_of(t) or "") >= week_cut])
+
+    # Out-of-form alert (C4): losing week with mostly red active days.
+    out_of_form = bool(d7) and len(d7) >= 3 and week_net < 0 and pos7 / len(d7) <= 0.4
+    form_reason = None
+    if out_of_form:
+        form_reason = f"semana {week_net:+.2f} USD con {pos7}/{len(d7)} días verdes"
+
+    return {
+        "today_net": net(t_today),
+        "today_trades": len(t_today),
+        "today_wins": sum(1 for t in t_today if (t.get("net", t.get("profit", 0)) or 0) > 0),
+        "yesterday_net": net(t_yest),
+        "yesterday_trades": len(t_yest),
+        "week_net": week_net,
+        "active_days_30": len(d30),
+        "pos_days_30": pos30,
+        "pos_rate_30": pos_rate30,
+        "pos_days_7": pos7,
+        "active_days_7": len(d7),
+        "expectancy_daily_30": exp30,
+        "stdev_daily_30": sd30,
+        "streak_days": streak,
+        "badge": badge,
+        "out_of_form": out_of_form,
+        "form_reason": form_reason,
+        "series_90d": [[d.get("date"), round(d.get("daily_net") or 0.0, 2)]
+                       for d in daily_series
+                       if d.get("date", "") >= (now - timedelta(days=90)).date().isoformat()],
+    }
+
+
 # --- Floating-DD shadow (Fase B, tribunal 2026-06-09) -----------------------
 # SHADOW ONLY: records would_fail flags and never touches promotion_status.
 # The flip to enforcement is a MANUAL owner decision gated on triple evidence
@@ -2926,7 +3006,9 @@ def main():
     event_count = 0
     battle_tested_count = 0
     trade_dist_count = 0
+    real_daily_count = 0
     real_accounts = detect_real_accounts(snap)
+    real_logins_p2 = {login for (_v, login) in real_accounts}
     real_magics = detect_real_magics(snap)
     # Single source of truth: the frontend consumes this instead of recomputing in
     # parallel, so FE and BE can never disagree on which magics are already in real.
@@ -3025,6 +3107,12 @@ def main():
         if td is not None:
             b["trade_distribution"] = td
             trade_dist_count += 1
+
+        # Daily performance for bots on REAL accounts (panel "¿Quién ganó HOY?",
+        # consistencia diaria, heatmap calendario). Informational only.
+        if b.get("account_login") in real_logins_p2:
+            b["real_daily"] = compute_real_daily(trades, daily_series)
+            real_daily_count += 1
 
     # 5b) Re-score with the MONEY + QUALITY factors. compute_score ran before the
     # per-bot enrichments existed (net_after_commission, oos, stress, institutional,
@@ -3425,7 +3513,7 @@ def main():
         f"vps_stale={n_stale_vps} partial={partial_data} {sync_md_msg} "
         f"stress={stress_count} oos={oos_count} regime={regime_count} "
         f"drift={drift_count} drift_flagged={drift_flagged} "
-        f"capacity={capacity_count} real_bots={real_bot_count} "
+        f"capacity={capacity_count} real_bots={real_bot_count} real_daily={real_daily_count} "
         f"underwater={underwater_count} ci={ci_count} events={event_count} battle_tested={battle_tested_count} "
         f"shrinkage_cohorts={(shrinkage_meta or {}).get('cohorts_with_prior', 0)}/"
         f"{(shrinkage_meta or {}).get('cohorts_total', 0)} "

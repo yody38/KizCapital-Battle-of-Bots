@@ -162,7 +162,10 @@ class Uploader:
         endpoint = f"{self.base}/storage/v1/object/{BUCKET}/{encoded}"
         headers = self._headers(mime)
         headers["x-upsert"] = "true"
-        headers["cache-control"] = "no-cache, max-age=0"
+        # 60s edge/browser cache + SWR: data changes every 30 min, so serving a
+        # ≤60s-old copy is always within tolerance and repeat loads stop
+        # re-downloading identical bytes. (Wire is already gzip via the CDN.)
+        headers["cache-control"] = "public, max-age=60, stale-while-revalidate=300"
         with file_path.open("rb") as f:
             body = f.read()
         req = urlrequest.Request(endpoint, data=body, headers=headers, method="POST")
