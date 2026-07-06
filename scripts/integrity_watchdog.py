@@ -273,6 +273,55 @@ def append_log(record: dict) -> None:
         f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
+def upload_health_to_supabase(url: str, key: str, record: dict) -> None:
+    """Persist watchdog results to Storage so the dashboard's 'Salud del
+    sistema' panel can show real uptime history. The GH Actions workspace is
+    ephemeral (fresh checkout per run), so the local jsonl never accumulates —
+    Storage is the durable store. Best-effort: never fails the watchdog.
+
+      watchdog_status.json  — full record of the LATEST run
+      watchdog_history.json — rolling 30d list of {ts, result, fails, duration_ms}
+    """
+    def _put(path: str, payload) -> None:
+        endpoint = f"{url.rstrip('/')}/storage/v1/object/{BUCKET}/{path}"
+        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        req = urlrequest.Request(
+            endpoint,
+            data=body,
+            headers={
+                "Authorization": f"Bearer {key}",
+                "apikey": key,
+                "Content-Type": "application/json",
+                "x-upsert": "true",
+            },
+            method="POST",
+        )
+        with urlrequest.urlopen(req, timeout=30):
+            pass
+
+    try:
+        _put("watchdog_status.json", record)
+
+        _, history = supa_get_json(url, key, "watchdog_history.json")
+        if not isinstance(history, list):
+            history = []
+        history.append({
+            "ts": record.get("ts"),
+            "result": record.get("result"),
+            "fails": record.get("fails") or [],
+            "duration_ms": record.get("duration_ms"),
+        })
+        cutoff = datetime.now(timezone.utc).timestamp() - 30 * 86400
+        pruned = []
+        for h in history:
+            t = parse_iso(h.get("ts"))
+            if t and t.timestamp() >= cutoff:
+                pruned.append(h)
+        _put("watchdog_history.json", pruned)
+    except Exception as e:  # noqa: BLE001
+        print(f"[watchdog] health upload failed (non-fatal): {e}", file=sys.stderr)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--no-issue", action="store_true", help="Skip GH issue creation on fail")
@@ -534,6 +583,8 @@ def main() -> int:
     info["fails"] = fails
 
     append_log(info)
+    if url and key:
+        upload_health_to_supabase(url, key, info)
 
     # "Competencia siempre activa" — separate deduped alert (independent of integrity fails).
     if dormant_eas and not args.no_issue:

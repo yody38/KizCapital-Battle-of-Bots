@@ -66,6 +66,14 @@ TERMINAL_GLOB = r"C:\Program Files\MetaTrader 5 *\terminal64.exe"
 # consecutive cycles — indicates that terminal is unreachable / down.
 MAX_MISSING_STREAK = 6
 
+# Historia intradía persistente (F1): 1 de cada N ciclos publicados también se
+# INSERTa en public.live_real_history (~30s con interval=3). Best-effort: un
+# fallo aquí NUNCA rompe el stream de live_real_state. La retención la aplica
+# el RPC prune_live_real_history() (ver supabase/live_real_history.sql) que
+# este proceso invoca una vez por hora.
+HISTORY_EVERY_N = int(os.environ.get("LIVE_HISTORY_EVERY_N", "10"))
+PRUNE_EVERY_SECS = 3600
+
 # login -> terminal path, learned on the first successful cycle so later cycles
 # init only the 2 real terminals instead of all ~12.
 _login_path_cache: dict[int, str] = {}
@@ -254,16 +262,78 @@ def upsert_state(env: dict[str, str], rows: list[dict[str, Any]]) -> bool:
     return True
 
 
+def _service_headers(env: dict[str, str]) -> dict[str, str]:
+    return {
+        "apikey": env["SUPABASE_SERVICE_KEY"],
+        "Authorization": f'Bearer {env["SUPABASE_SERVICE_KEY"]}',
+        "Content-Type": "application/json",
+        "Prefer": "return=minimal",
+    }
+
+
+def insert_history(env: dict[str, str], rows: list[dict[str, Any]]) -> None:
+    """Downsampled INSERT into live_real_history. Best-effort: log-and-continue."""
+    if not rows:
+        return
+    hist = []
+    for r in rows:
+        margin = float(r.get("margin") or 0)
+        equity = float(r.get("equity") or 0)
+        hist.append({
+            "login": r["login"],
+            "equity": equity,
+            "balance": r.get("balance"),
+            "floating_pnl": r.get("profit"),
+            "margin_level": round(equity / margin * 100, 2) if margin > 0 else None,
+        })
+    url = f'{env["SUPABASE_URL"].rstrip("/")}/rest/v1/live_real_history'
+    try:
+        resp = requests.post(url, headers=_service_headers(env), json=hist, timeout=HTTP_TIMEOUT)
+        if resp.status_code >= 300:
+            log.warning("history insert HTTP %s body=%s", resp.status_code, resp.text[:200])
+    except requests.RequestException as exc:
+        log.warning("history insert network error: %s", exc)
+
+
+def prune_history(env: dict[str, str]) -> None:
+    """Hourly retention/compaction via RPC. Best-effort."""
+    url = f'{env["SUPABASE_URL"].rstrip("/")}/rest/v1/rpc/prune_live_real_history'
+    try:
+        resp = requests.post(url, headers=_service_headers(env), json={}, timeout=30)
+        if resp.status_code >= 300:
+            log.warning("history prune HTTP %s body=%s", resp.status_code, resp.text[:200])
+        else:
+            log.info("history prune ok")
+    except requests.RequestException as exc:
+        log.warning("history prune network error: %s", exc)
+
+
 # --- Main loop -----------------------------------------------------------
+
+# Cycle counter for the downsampled history insert (module-level so
+# publish_once keeps its signature for --once and the timed wrapper).
+_cycle_count = 0
+_last_prune = 0.0
+
 
 def publish_once(env: dict[str, str]) -> set[int]:
     """Return the set of logins successfully published this cycle (empty on failure)."""
+    global _cycle_count, _last_prune
     rows = collect_real_snapshots()
     if not rows:
         return set()
     ok = upsert_state(env, rows)
     if not ok:
         return set()
+
+    # Historia persistente: cada N ciclos buenos + prune horario (best-effort).
+    _cycle_count += 1
+    if _cycle_count % HISTORY_EVERY_N == 1:  # también cubre el primer ciclo
+        insert_history(env, rows)
+    now_mono = time.monotonic()
+    if now_mono - _last_prune >= PRUNE_EVERY_SECS:
+        _last_prune = now_mono
+        prune_history(env)
     log.info(
         "published %d rows (logins=%s ages_ms=%s)",
         len(rows),

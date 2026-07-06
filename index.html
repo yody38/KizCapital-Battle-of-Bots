@@ -7,19 +7,30 @@
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
 <title>Battle of Bots — MT5 Portfolio</title>
-<link rel="stylesheet" href="styles.css?v=20260704a">
+<link rel="manifest" href="/manifest.json">
+<meta name="theme-color" content="#0d0b1a">
+<link rel="apple-touch-icon" href="/icon-192.png">
+<link rel="stylesheet" href="styles.css?v=20260706a">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500;700&display=swap" rel="stylesheet">
-<link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
 <link rel="preconnect" href="https://sudnilwqhbfcjqnzzmhi.supabase.co" crossorigin>
-<script defer src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
-<script defer src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3.0.0/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
-<script defer src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.46.1/dist/umd/supabase.min.js"></script>
+<!-- Vendor local (antes CDN jsdelivr) — una dependencia externa menos + precacheable por el SW -->
+<script defer src="/vendor/chart.umd.min.js"></script>
+<script defer src="/vendor/chartjs-adapter-date-fns.bundle.min.js"></script>
+<script defer src="/vendor/supabase.min.js"></script>
 <script defer src="/config.js"></script>
 <script defer src="/supabase-client.js?v=20260513d"></script>
 <script defer src="/auth-guard.js?v=20260513d"></script>
-<script defer src="/data-source.js?v=20260704a"></script>
+<script defer src="/data-source.js?v=20260706a"></script>
+<script>
+  // F4 · PWA: carga instantánea + offline con últimos datos.
+  if ('serviceWorker' in navigator) {
+    window.addEventListener('load', () => {
+      navigator.serviceWorker.register('/sw.js').catch((e) => console.warn('[kiz] sw register failed', e));
+    });
+  }
+</script>
 </head>
 <body>
 <div class="bg-orb orb-1"></div>
@@ -158,6 +169,20 @@
         </div>
       </div>
       <div class="live-ticker-chart-wrap"><canvas id="live-ticker-canvas"></canvas></div>
+    </div>
+
+    <!-- F1 · Historia intradía persistente (live_real_history, sobrevive recargas) -->
+    <div class="real-panel real-history-panel" id="real-history-panel" hidden>
+      <div class="real-daily-head">
+        <h3 class="panel-title">📉 Equity real histórica <span class="real-history-note" id="real-history-note"></span></h3>
+        <div class="real-history-windows" id="real-history-windows">
+          <button type="button" data-win="1h">1h</button>
+          <button type="button" data-win="24h" class="active">24h</button>
+          <button type="button" data-win="7d">7d</button>
+          <button type="button" data-win="30d">30d</button>
+        </div>
+      </div>
+      <div class="real-history-chart-wrap"><canvas id="real-history-chart"></canvas></div>
     </div>
 
     <div class="real-cards" id="real-cards"></div>
@@ -876,6 +901,21 @@
     <span class="cmp-fab-count" id="cmp-fab-n">0</span>
   </button>
 
+  <!-- F5 · Salud del sistema: uptime del watchdog + stream live + pipeline -->
+  <section class="system-health" id="system-health" hidden>
+    <details id="system-health-details">
+      <summary>
+        <span class="section-title">🛡️ Salud del sistema</span>
+        <span class="health-summary-chips" id="health-summary-chips"></span>
+      </summary>
+      <div class="health-grid" id="health-grid"></div>
+      <div class="health-events">
+        <h4>Últimos incidentes detectados por el watchdog (30 días)</h4>
+        <ul id="health-events-list"><li class="empty-state">Sin incidentes registrados 🎉</li></ul>
+      </div>
+    </details>
+  </section>
+
   <footer class="footer">
     <span class="footer-brand">Kiz Capital LLC</span>
     <span>·</span>
@@ -904,6 +944,6 @@
   <div class="war-room-footer" id="war-room-mover">—</div>
 </div>
 
-<script defer src="app.js?v=20260704a"></script>
+<script defer src="app.js?v=20260706a"></script>
 </body>
 </html>

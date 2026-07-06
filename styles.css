@@ -3668,6 +3668,9 @@ tr.bot-row:hover { background: rgba(124, 156, 255, 0.06); }
 .live-pill.live-warn { color: #ffb86b; border-color: rgba(255, 184, 107, 0.4); }
 .live-pill.live-warn .live-dot { animation: livePulse 0.9s ease-in-out infinite; }
 .live-pill.live-off { color: #ff6b8b; border-color: rgba(255, 107, 139, 0.35); }
+/* Fallback verde: datos vivos vía polling REST mientras el socket Realtime se recupera */
+.live-pill.live-fallback { color: #3ddc97; border-color: rgba(61, 220, 151, 0.35); border-style: dashed; }
+.live-pill.live-fallback .live-dot { animation: livePulse 1.4s ease-in-out infinite; }
 @keyframes livePulse {
   0%, 100% { box-shadow: 0 0 0 0 currentColor; opacity: 1; }
   50%      { box-shadow: 0 0 0 5px rgba(0,0,0,0); opacity: 0.6; }
@@ -3677,6 +3680,112 @@ tr.bot-row:hover { background: rgba(124, 156, 255, 0.06); }
   100% { background: transparent; box-shadow: none; }
 }
 .live-flash { animation: liveFlash 1s ease-out; }
+
+/* --- Panel de riesgo EN VIVO por cuenta real ---------------------------- */
+.real-risk {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1.4fr;
+  gap: 8px;
+  margin-top: 8px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: rgba(26, 22, 44, 0.5);
+  border: 1px solid rgba(255,255,255,0.06);
+}
+.real-risk .risk-item { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.real-risk strong { font-family: 'JetBrains Mono', monospace; font-size: 13px; }
+.risk-green { color: #3ddc97; }
+.risk-amber { color: #ffb86b; }
+.risk-red { color: #ff6b8b; }
+.risk-margin-bar {
+  height: 6px;
+  border-radius: 999px;
+  background: rgba(255,255,255,0.08);
+  overflow: hidden;
+  margin-top: 5px;
+}
+.risk-margin-fill {
+  height: 100%;
+  border-radius: 999px;
+  width: 0;
+  transition: width 300ms ease;
+  background: currentColor;
+}
+.risk-margin-fill.risk-green { background: #3ddc97; }
+.risk-margin-fill.risk-amber { background: #ffb86b; }
+.risk-margin-fill.risk-red { background: #ff6b8b; }
+.wr-risk { font-family: 'JetBrains Mono', monospace; font-size: 12px; color: #9aa3bb; margin-top: 4px; }
+
+/* --- F1 · Historia intradía persistente de cuentas reales ---------------- */
+.real-history-chart-wrap { position: relative; height: 260px; }
+.real-history-note { color: #9aa3bb; font-size: 12px; font-weight: 600; }
+.real-history-windows { display: inline-flex; gap: 4px; }
+.real-history-windows button {
+  padding: 4px 12px;
+  border-radius: 999px;
+  border: 1px solid rgba(255,255,255,0.1);
+  background: rgba(26, 22, 44, 0.6);
+  color: #9aa3bb;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: background 160ms ease, color 160ms ease, border-color 160ms ease;
+}
+.real-history-windows button:hover { background: rgba(36, 30, 60, 0.85); color: #cfd5e6; }
+.real-history-windows button.active { color: #e8c547; border-color: rgba(232, 197, 71, 0.45); }
+
+/* --- F5 · Salud del sistema ---------------------------------------------- */
+.system-health { margin: 24px 0; }
+.system-health details {
+  border: 1px solid rgba(255,255,255,0.08);
+  border-radius: 12px;
+  background: rgba(26, 22, 44, 0.5);
+  padding: 0;
+}
+.system-health summary {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 18px;
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+}
+.system-health summary::-webkit-details-marker { display: none; }
+.system-health summary .section-title { margin: 0; font-size: 16px; }
+.health-summary-chips { display: inline-flex; gap: 8px; margin-left: auto; flex-wrap: wrap; }
+.health-chip {
+  padding: 3px 10px;
+  border-radius: 999px;
+  border: 1px solid currentColor;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  font-weight: 700;
+}
+.health-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 10px;
+  padding: 0 18px 14px;
+}
+.health-tile {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: rgba(20, 17, 36, 0.6);
+  border: 1px solid rgba(255,255,255,0.05);
+}
+.health-tile strong { font-family: 'JetBrains Mono', monospace; font-size: 14px; }
+.health-tile small { color: #9aa3bb; font-weight: 500; }
+.health-events { padding: 0 18px 16px; }
+.health-events h4 { color: #9aa3bb; font-size: 12px; text-transform: uppercase; letter-spacing: 0.6px; margin: 8px 0; }
+.health-events ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.health-events li { font-size: 12px; color: #cfd5e6; }
+.health-events code { font-size: 11px; background: rgba(255,107,139,0.08); border: 1px solid rgba(255,107,139,0.2); border-radius: 4px; padding: 1px 6px; color: #ff9db2; }
+.health-ev-ts { color: #9aa3bb; font-family: 'JetBrains Mono', monospace; margin-right: 6px; }
 
 /* Fail-closed: live stream stalled (age ≥ 30s) → the real-account figures are no
    longer verifiable in real time. Degrade the source visibly. */
