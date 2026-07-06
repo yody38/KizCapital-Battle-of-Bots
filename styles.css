@@ -4329,6 +4329,36 @@ body.war-room-active { overflow: hidden; }
 .war-room-total-float { margin-top: 8px; font: 600 clamp(15px, 2vw, 22px)/1 ui-monospace, monospace; color: var(--text-dim); font-variant-numeric: tabular-nums; }
 .war-room-total-float.positive { color: #3ddc84; }
 .war-room-total-float.negative { color: #ff6b8b; }
+/* Gráfica semanal del War Room — ocupa el espacio central flexible */
+.war-weekly {
+  flex: 1 1 auto;
+  min-height: 180px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 0 0 14px;
+}
+.war-weekly[hidden] { display: none; }
+.war-weekly-head {
+  display: flex;
+  align-items: baseline;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+.war-weekly-title { font: 700 13px/1 ui-monospace, monospace; letter-spacing: 3px; color: var(--text-faint); }
+.war-weekly-value { font: 700 clamp(20px, 2.6vw, 32px)/1 ui-monospace, monospace; font-variant-numeric: tabular-nums; }
+.war-weekly-value.positive { color: #3ddc97; }
+.war-weekly-value.negative { color: #ff6b8b; }
+.war-weekly-range { font: 600 12px/1 ui-monospace, monospace; color: var(--text-dim); }
+.war-weekly-chip {
+  font: 700 11px/1 ui-monospace, monospace;
+  color: #ffb86b;
+  border: 1px solid rgba(255, 184, 107, 0.4);
+  border-radius: 999px;
+  padding: 4px 10px;
+}
+.war-weekly-chart-wrap { position: relative; flex: 1 1 auto; min-height: 150px; }
+
 .war-room-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 16px; margin-top: auto; margin-bottom: auto; }
 .war-room-tile {
   background: rgba(23,26,39,.6); border: 1px solid rgba(124,156,255,.16); border-radius: 16px;

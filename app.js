@@ -6858,6 +6858,240 @@ function updateTopMoverChip() {
 
 // --- B5: War Room -----------------------------------------------------------
 
+// --- War Room · Ingreso de la semana (curva P&L semanal en vivo) -------------
+// Ventana: domingo 17:00 America/New_York (apertura forex = 14:00 Las Vegas)
+// → viernes 17:00 NY (cierre = 14:00 Las Vegas). Histórico durable desde
+// public.live_real_history vía RPC real_weekly_history (buckets 15 min);
+// en vivo se añade 1 punto cada ~3s desde el stream. Al cierre del viernes
+// la curva queda congelada todo el fin de semana; el domingo a la apertura
+// la ventana cambia sola → baseline nuevo → la curva arranca desde cero.
+const warWeekly = {
+  chart: null,
+  weekOpen: 0,
+  weekClose: 0,
+  baseline: null,   // equity total en el primer punto de la semana
+  hist: [],         // puntos durables (RPC) como {x, y: pnl}
+  livePts: [],      // puntos de la sesión (stream ~3s), se descartan al refetch
+  lastFetch: 0,
+  fetching: false,
+  _testNow: null,   // override de "ahora" para pruebas en consola
+};
+
+function warNow() { return warWeekly._testNow || Date.now(); }
+
+// Wall-clock de America/New_York → epoch UTC (DST-safe, método iterativo).
+function nyWallToUtc(y, mo, d, h, mi) {
+  let guess = Date.UTC(y, mo, d, h, mi);
+  const want = Date.UTC(y, mo, d, h, mi);
+  const dtf = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/New_York', year: 'numeric', month: 'numeric',
+    day: 'numeric', hour: 'numeric', minute: 'numeric', hour12: false,
+  });
+  for (let i = 0; i < 3; i++) {
+    const parts = dtf.formatToParts(new Date(guess));
+    const get = (t) => Number(parts.find(p => p.type === t).value);
+    const wall = Date.UTC(get('year'), get('month') - 1, get('day'), get('hour') % 24, get('minute'));
+    if (wall === want) break;
+    guess += want - wall;
+  }
+  return guess;
+}
+
+// Último domingo 17:00 NY ≤ ahora → { open, close } (close = +5 días wall-clock).
+function currentWeekWindow(nowMs) {
+  const dtf = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/New_York', year: 'numeric', month: 'numeric',
+    day: 'numeric', weekday: 'short',
+  });
+  for (let k = 0; k < 9; k++) {
+    const parts = dtf.formatToParts(new Date(nowMs - k * 86400e3));
+    const get = (t) => parts.find(p => p.type === t).value;
+    if (get('weekday') !== 'Sun') continue;
+    const y = Number(get('year')), mo = Number(get('month')) - 1, d = Number(get('day'));
+    const open = nyWallToUtc(y, mo, d, 17, 0);
+    if (open <= nowMs) return { open, close: nyWallToUtc(y, mo, d + 5, 17, 0) };
+  }
+  return null;
+}
+
+const WAR_LV_FMT = new Intl.DateTimeFormat('es-US', {
+  timeZone: 'America/Los_Angeles', weekday: 'short', day: 'numeric',
+  month: 'short', hour: 'numeric', minute: '2-digit', hour12: false,
+});
+const WAR_LV_TICK = new Intl.DateTimeFormat('es-US', {
+  timeZone: 'America/Los_Angeles', weekday: 'short', hour: 'numeric', hour12: false,
+});
+
+// Recalcula la ventana; en cambio de semana (domingo 17:00 NY) resetea todo.
+function warWeeklyEnsureWindow() {
+  const w = currentWeekWindow(warNow());
+  if (!w) return false;
+  if (w.open !== warWeekly.weekOpen) {
+    warWeekly.weekOpen = w.open;
+    warWeekly.weekClose = w.close;
+    warWeekly.baseline = null;
+    warWeekly.hist = [];
+    warWeekly.livePts = [];
+    warWeekly.lastFetch = 0;
+    if (warWeekly.chart) { warWeekly.chart.destroy(); warWeekly.chart = null; }
+  }
+  return true;
+}
+
+async function warWeeklyFetch() {
+  if (!window.kizSupabase || warWeekly.fetching || !warWeekly.weekOpen) return;
+  warWeekly.fetching = true;
+  try {
+    const { data, error } = await window.kizSupabase.rpc('real_weekly_history', {
+      week_open: new Date(warWeekly.weekOpen).toISOString(),
+    });
+    if (error) { console.warn('[kiz] real_weekly_history failed', error.message || error); return; }
+    const rows = Array.isArray(data) ? data : [];
+    warWeekly.lastFetch = Date.now();
+    if (!rows.length) return; // sin datos aún esta semana — el live siembra baseline
+    const base = Number(rows[0].total_equity);
+    warWeekly.baseline = base;
+    warWeekly.hist = rows.map(r => ({ x: new Date(r.bucket).getTime(), y: Number(r.total_equity) - base }));
+    warWeekly.livePts = []; // la RPC es la fuente durable; la sesión se reconstruye
+  } finally {
+    warWeekly.fetching = false;
+  }
+}
+
+function warWeeklySeries() {
+  return warWeekly.hist.concat(warWeekly.livePts);
+}
+
+function warWeeklyRender() {
+  const panel = document.getElementById('war-weekly');
+  const canvas = document.getElementById('war-weekly-canvas');
+  if (!panel || !canvas || !warWeekly.weekOpen) return;
+  panel.hidden = false;
+
+  const now = warNow();
+  const frozen = now > warWeekly.weekClose;
+  const series = warWeeklySeries();
+  const pnl = series.length ? series[series.length - 1].y : 0;
+  const up = pnl >= 0;
+  const color = up ? '#3ddc97' : '#ff6b8b';
+
+  const valueEl = document.getElementById('war-weekly-value');
+  if (valueEl) {
+    valueEl.textContent = fmt.usd(pnl, true);
+    valueEl.classList.remove('positive', 'negative');
+    valueEl.classList.add(up ? 'positive' : 'negative');
+  }
+  const rangeEl = document.getElementById('war-weekly-range');
+  if (rangeEl) {
+    rangeEl.textContent =
+      `${WAR_LV_FMT.format(warWeekly.weekOpen)} → ${WAR_LV_FMT.format(warWeekly.weekClose)} · Las Vegas`;
+  }
+  const chipEl = document.getElementById('war-weekly-chip');
+  if (chipEl) chipEl.hidden = !frozen;
+
+  // Ticks fijos: un tick por día de la semana (apertura + cada 24h + cierre).
+  const dayTicks = [];
+  for (let t = warWeekly.weekOpen; t <= warWeekly.weekClose; t += 86400e3) dayTicks.push(t);
+
+  if (!warWeekly.chart) {
+    warWeekly.chart = new Chart(canvas, {
+      type: 'line',
+      data: {
+        datasets: [
+          {
+            label: 'P&L semana',
+            data: series,
+            borderColor: color,
+            backgroundColor: up ? 'rgba(61,220,151,0.12)' : 'rgba(255,107,139,0.12)',
+            fill: 'origin',
+            borderWidth: 2,
+            pointRadius: 0,
+            tension: 0.2,
+          },
+          {
+            label: 'cero',
+            data: [{ x: warWeekly.weekOpen, y: 0 }, { x: warWeekly.weekClose, y: 0 }],
+            borderColor: 'rgba(154,163,187,0.35)',
+            borderDash: [5, 5],
+            borderWidth: 1,
+            pointRadius: 0,
+            fill: false,
+          },
+        ],
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        animation: false,
+        interaction: { mode: 'nearest', axis: 'x', intersect: false },
+        plugins: {
+          legend: { display: false },
+          tooltip: {
+            filter: (c) => c.datasetIndex === 0,
+            callbacks: {
+              title: (items) => items.length ? WAR_LV_FMT.format(items[0].parsed.x) + ' (LV)' : '',
+              label: (c) => `P&L semana: ${fmt.usd(c.parsed.y, true)}`,
+            },
+          },
+        },
+        scales: {
+          x: {
+            type: 'linear',
+            min: warWeekly.weekOpen,
+            max: warWeekly.weekClose,
+            grid: { color: 'rgba(255,255,255,0.05)' },
+            afterBuildTicks: (axis) => { axis.ticks = dayTicks.map(v => ({ value: v })); },
+            ticks: { color: '#9aa3bb', callback: (v) => WAR_LV_TICK.format(v) },
+          },
+          y: {
+            grid: { color: 'rgba(255,255,255,0.05)' },
+            ticks: { color: '#9aa3bb', callback: (v) => fmt.usd(v, true) },
+          },
+        },
+      },
+    });
+  } else {
+    const ds = warWeekly.chart.data.datasets[0];
+    ds.data = series;
+    ds.borderColor = color;
+    ds.backgroundColor = up ? 'rgba(61,220,151,0.12)' : 'rgba(255,107,139,0.12)';
+    warWeekly.chart.data.datasets[1].data =
+      [{ x: warWeekly.weekOpen, y: 0 }, { x: warWeekly.weekClose, y: 0 }];
+    warWeekly.chart.options.scales.x.min = warWeekly.weekOpen;
+    warWeekly.chart.options.scales.x.max = warWeekly.weekClose;
+    warWeekly.chart.update('none');
+  }
+}
+
+// Al abrir el War Room: ventana + histórico + primer render.
+function warWeeklyOpen() {
+  if (!warWeeklyEnsureWindow()) return;
+  warWeeklyFetch().then(warWeeklyRender);
+  warWeeklyRender();
+}
+
+// Cada push del stream (~3s, solo con el War Room abierto).
+function warWeeklyLiveTick() {
+  if (!realSuite.warRoomOpen) return;
+  if (!warWeeklyEnsureWindow()) return;
+  const now = warNow();
+  if (now <= warWeekly.weekClose) {
+    const { eq } = liveTotals();
+    if (eq > 0) {
+      // Semana recién abierta sin histórico todavía: el live siembra el baseline.
+      if (warWeekly.baseline == null) warWeekly.baseline = eq;
+      const last = warWeekly.livePts[warWeekly.livePts.length - 1];
+      if (!last || now - last.x >= 2500) {
+        warWeekly.livePts.push({ x: now, y: eq - warWeekly.baseline });
+        if (warWeekly.livePts.length > 6000) warWeekly.livePts.splice(0, 1000);
+      }
+    }
+    // Refetch periódico para consolidar con la fuente durable (RPC).
+    if (Date.now() - warWeekly.lastFetch > 5 * 60e3) warWeeklyFetch().then(warWeeklyRender);
+  }
+  warWeeklyRender();
+}
+
 function renderWarRoom() {
   if (!realSuite.warRoomOpen) return;
   const grid = document.getElementById('war-room-grid');
@@ -6936,6 +7170,7 @@ function toggleWarRoom(open) {
   document.body.classList.toggle('war-room-active', open);
   if (open) {
     renderWarRoom();
+    warWeeklyOpen();
     const clock = document.getElementById('war-room-clock');
     const tick = () => { if (clock) clock.textContent = new Date().toLocaleTimeString('es-ES'); };
     tick();
@@ -6981,4 +7216,5 @@ function kizRealLiveHooks() {
   updateLiveFloatCells();
   updateTopMoverChip();
   renderWarRoom();
+  warWeeklyLiveTick();
 }

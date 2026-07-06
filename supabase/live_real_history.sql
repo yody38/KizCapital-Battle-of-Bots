@@ -89,6 +89,52 @@ grant execute on function public.real_equity_history(text) to authenticated;
 revoke execute on function public.real_equity_history(text) from anon;
 
 -- ---------------------------------------------------------------------
+-- Serie SEMANAL para el chart "Ingreso de la semana" del War Room:
+-- equity TOTAL (suma de todas las cuentas reales, con forward-fill por
+-- login) en buckets de 15 min desde la apertura del mercado (week_open =
+-- domingo 17:00 America/New_York) hasta now() o el cierre del viernes
+-- (week_open + 5 días), lo que llegue primero. ≤480 filas (< max_rows).
+-- SECURITY INVOKER: la RLS whitelist de live_real_history aplica al caller.
+-- Nota: el LATERAL ignora logins sin datos aún en ese bucket (una cuenta
+-- que entró a mitad de semana suma desde su primer punto).
+-- ---------------------------------------------------------------------
+create or replace function public.real_weekly_history(week_open timestamptz)
+returns table (bucket timestamptz, total_equity numeric)
+language sql
+stable
+as $$
+  with logins as (
+    select distinct h.login from public.live_real_history h
+     where h.ts >= week_open
+  ),
+  buckets as (
+    select generate_series(
+             week_open,
+             least(now(), week_open + interval '5 days'),
+             interval '15 minutes'
+           ) as b
+  )
+  select bk.b as bucket,
+         sum(ff.equity) as total_equity
+    from buckets bk
+    cross join logins lg
+    join lateral (
+      select h.equity
+        from public.live_real_history h
+       where h.login = lg.login
+         and h.ts >= week_open
+         and h.ts <= bk.b
+       order by h.ts desc
+       limit 1
+    ) ff on true
+   group by bk.b
+   order by bk.b asc;
+$$;
+
+grant execute on function public.real_weekly_history(timestamptz) to authenticated;
+revoke execute on function public.real_weekly_history(timestamptz) from anon;
+
+-- ---------------------------------------------------------------------
 -- Retención/compactado. Solo el publisher (service_role) puede ejecutarla.
 -- min(id) como representante del bucket es correcto porque id (identity)
 -- crece con el tiempo de inserción.
