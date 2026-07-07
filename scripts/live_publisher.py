@@ -241,7 +241,19 @@ def collect_real_snapshots() -> list[dict[str, Any]]:
 
 # --- Supabase upsert -----------------------------------------------------
 
-def upsert_state(env: dict[str, str], rows: list[dict[str, Any]]) -> bool:
+# Reintentos intra-ciclo del upsert: un blip de red <3s recupera el tick sin
+# perderlo (antes: 1 intento y el ciclo entero se daba por perdido). Corto a
+# propósito — el loop de ~3s ya es el retry de fondo.
+UPSERT_BACKOFF = (0.5, 2.0)
+
+# Generación del ciclo vigente. Un retry (o un thread colgado de un ciclo
+# anterior, ver publish_once_timed) que despierte cuando ya arrancó un ciclo
+# más nuevo debe abortar: upsertaría equity vieja y el trigger set_ts la
+# estamparía como fresca (pill verde sobre números muertos).
+_cycle_gen = 0
+
+
+def upsert_state(env: dict[str, str], rows: list[dict[str, Any]], gen: int) -> bool:
     if not rows:
         return True
     headers = {
@@ -251,15 +263,26 @@ def upsert_state(env: dict[str, str], rows: list[dict[str, Any]]) -> bool:
         "Prefer": "resolution=merge-duplicates,return=minimal",
     }
     url = f'{env["SUPABASE_URL"].rstrip("/")}/rest/v1/live_real_state?on_conflict=login'
-    try:
-        r = requests.post(url, headers=headers, json=rows, timeout=HTTP_TIMEOUT)
-    except requests.RequestException as exc:
-        log.error("supabase upsert network error: %s", exc)
-        return False
-    if r.status_code >= 300:
-        log.error("supabase upsert HTTP %s body=%s", r.status_code, r.text[:300])
-        return False
-    return True
+    last_err = ""
+    for attempt in range(len(UPSERT_BACKOFF) + 1):
+        if gen != _cycle_gen:
+            log.warning("upsert abandoned: cycle %d superseded by %d", gen, _cycle_gen)
+            return False
+        try:
+            r = requests.post(url, headers=headers, json=rows, timeout=HTTP_TIMEOUT)
+            if r.status_code < 300:
+                if attempt:
+                    log.info("supabase upsert recovered on retry %d", attempt)
+                return True
+            last_err = f"HTTP {r.status_code} body={r.text[:300]}"
+            if r.status_code < 500:
+                break  # 4xx no es transitorio — reintentar no ayuda
+        except requests.RequestException as exc:
+            last_err = f"network error: {exc}"
+        if attempt < len(UPSERT_BACKOFF):
+            time.sleep(UPSERT_BACKOFF[attempt])
+    log.error("supabase upsert failed: %s", last_err)
+    return False
 
 
 def _service_headers(env: dict[str, str]) -> dict[str, str]:
@@ -295,6 +318,46 @@ def insert_history(env: dict[str, str], rows: list[dict[str, Any]]) -> None:
         log.warning("history insert network error: %s", exc)
 
 
+# Heartbeat activo: una fila por publisher, cada ciclo, PUBLIQUE o no. El
+# watchdog distingue así "publisher muerto" (heartbeat viejo) de "MT5/broker
+# caído" (heartbeat fresco con published_logins vacío). 1 intento corto —
+# el ciclo siguiente (~3s) es el retry. Si la tabla aún no existe (404) se
+# desactiva para no llenar el log.
+_hb_disabled = False
+
+
+def upsert_heartbeat(
+    env: dict[str, str],
+    published: set[int],
+    missing_streak: dict[int, int],
+    cycle_ms: int,
+    interval: float,
+) -> None:
+    global _hb_disabled
+    if _hb_disabled:
+        return
+    row = {
+        "publisher_id": PUBLISHER_ID,
+        "vps": LIVE_VPS_TAG,
+        "cycle_ms": cycle_ms,
+        "published_logins": sorted(published),
+        "missing_streak": {str(k): v for k, v in missing_streak.items()},
+        "interval_secs": interval,
+    }
+    headers = dict(_service_headers(env))
+    headers["Prefer"] = "resolution=merge-duplicates,return=minimal"
+    url = f'{env["SUPABASE_URL"].rstrip("/")}/rest/v1/publisher_heartbeat?on_conflict=publisher_id'
+    try:
+        r = requests.post(url, headers=headers, json=row, timeout=HTTP_TIMEOUT)
+        if r.status_code == 404:
+            _hb_disabled = True
+            log.warning("publisher_heartbeat table missing (404) — heartbeat off; run supabase/publisher_heartbeat.sql")
+        elif r.status_code >= 300:
+            log.warning("heartbeat HTTP %s body=%s", r.status_code, r.text[:200])
+    except requests.RequestException as exc:
+        log.warning("heartbeat network error: %s", exc)
+
+
 def prune_history(env: dict[str, str]) -> None:
     """Hourly retention/compaction via RPC. Best-effort."""
     url = f'{env["SUPABASE_URL"].rstrip("/")}/rest/v1/rpc/prune_live_real_history'
@@ -308,6 +371,39 @@ def prune_history(env: dict[str, str]) -> None:
         log.warning("history prune network error: %s", exc)
 
 
+# --- Tuning shadow (aprendizaje continuo) ----------------------------------
+# SHADOW MODE: lee data/tuning.json de Storage 1×/hora y loguea la cadencia que
+# el adaptive_tuner recomendaría vs la vigente. NO aplica nada — el cambio de
+# intervalo real requiere veredicto del owner tras ≥1 semana de shadow.
+_TUNING_FETCH_SECS = 3600
+_last_tuning_fetch = 0.0
+
+
+def log_tuning_shadow(env: dict[str, str]) -> None:
+    global _last_tuning_fetch
+    now = time.monotonic()
+    if _last_tuning_fetch and now - _last_tuning_fetch < _TUNING_FETCH_SECS:
+        return
+    _last_tuning_fetch = now
+    url = f'{env["SUPABASE_URL"].rstrip("/")}/storage/v1/object/dashboard-data/tuning.json'
+    headers = {
+        "apikey": env["SUPABASE_SERVICE_KEY"],
+        "Authorization": f'Bearer {env["SUPABASE_SERVICE_KEY"]}',
+    }
+    try:
+        r = requests.get(url, headers=headers, timeout=HTTP_TIMEOUT)
+        if r.status_code != 200:
+            return
+        rec = (r.json().get("recommendations") or {}).get("live_tick_secs") or {}
+        if rec and rec.get("recommended") != rec.get("current"):
+            log.info(
+                "tuning shadow: recomendaría tick=%ss (vigente %ss) — %s [NO aplicado]",
+                rec.get("recommended"), rec.get("current"), rec.get("reason"),
+            )
+    except (requests.RequestException, ValueError):
+        pass  # shadow es best-effort puro
+
+
 # --- Main loop -----------------------------------------------------------
 
 # Cycle counter for the downsampled history insert (module-level so
@@ -318,11 +414,13 @@ _last_prune = 0.0
 
 def publish_once(env: dict[str, str]) -> set[int]:
     """Return the set of logins successfully published this cycle (empty on failure)."""
-    global _cycle_count, _last_prune
+    global _cycle_count, _last_prune, _cycle_gen
+    _cycle_gen += 1
+    gen = _cycle_gen
     rows = collect_real_snapshots()
     if not rows:
         return set()
-    ok = upsert_state(env, rows)
+    ok = upsert_state(env, rows, gen)
     if not ok:
         return set()
 
@@ -393,6 +491,10 @@ def main() -> None:
         published = publish_once_timed(env, cycle_timeout)
         for lg in REAL_LOGINS:
             missing_streak[lg] = 0 if lg in published else missing_streak[lg] + 1
+
+        cycle_ms = int((time.monotonic() - loop_start) * 1000)
+        upsert_heartbeat(env, published, missing_streak, cycle_ms, interval)
+        log_tuning_shadow(env)
 
         if published == REAL_LOGINS:
             backoff = interval

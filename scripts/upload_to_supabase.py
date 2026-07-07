@@ -30,6 +30,10 @@ ROOT = Path(__file__).resolve().parent.parent  # .../battle-of-bots
 DATA_DIR = ROOT / "data"
 ENV_FILE = ROOT / ".env.local"
 MANIFEST_FILE = DATA_DIR / ".upload-manifest.json"
+BREAKER_FILE = DATA_DIR / ".breaker_state.json"
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from circuit_breaker import Breaker, load_all as load_breakers  # noqa: E402
 REPORT_FILE = DATA_DIR / "integrity_report.json"
 UPLOAD_HEALTH_FILE = DATA_DIR / "upload_health.json"
 TIMING_FILE = DATA_DIR / "pipeline_timing.json"
@@ -90,6 +94,7 @@ SKIP_NAMES = {
     "server.stdout.log",
     "server.stderr.log",
     ".upload-manifest.json",
+    ".breaker_state.json",
 }
 SKIP_SUFFIXES = (".log", ".tmp")
 
@@ -218,6 +223,36 @@ def make_r2():
     return client, bucket
 
 
+# ----------------------- snapshot push signal -----------------------
+
+def publish_snapshot_meta(base: str, key: str, sha: str) -> None:
+    """Upsert snapshot_meta (fila única id=1) con el sha de snapshot.json.
+    El dashboard lo escucha por Realtime y recarga solo al cambiar — es la
+    señal de push del auto-refresh. Best-effort: nunca falla el upload."""
+    endpoint = f"{base.rstrip('/')}/rest/v1/snapshot_meta?on_conflict=id"
+    body = json.dumps({"id": 1, "manifest_sha": sha}).encode()
+    req = urlrequest.Request(
+        endpoint,
+        data=body,
+        headers={
+            "Authorization": f"Bearer {key}",
+            "apikey": key,
+            "Content-Type": "application/json",
+            "Prefer": "resolution=merge-duplicates,return=minimal",
+        },
+        method="POST",
+    )
+    try:
+        with urlopen_retry(req, timeout=15) as resp:
+            if resp.status >= 300:
+                print(f"[upload] snapshot_meta upsert http {resp.status}", file=sys.stderr)
+    except urlerror.HTTPError as exc:
+        hint = " — run supabase/snapshot_meta.sql" if exc.code == 404 else ""
+        print(f"[upload] snapshot_meta upsert failed: http {exc.code}{hint}", file=sys.stderr)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[upload] snapshot_meta upsert failed: {exc}", file=sys.stderr)
+
+
 # ----------------------- main -----------------------
 
 def should_skip(path: Path) -> bool:
@@ -316,6 +351,19 @@ def main() -> int:
         tries = (prev.get("tries", 0) + 1) if isinstance(prev, dict) else 1
         new_manifest[obj_path] = {"hash": "pending-retry", "tries": tries}
 
+    # Circuit breaker de Supabase Storage: OPEN (en cooldown) → cero requests,
+    # todo directo a R2 + pending-retry; HALF-OPEN → si la sonda inicial falla
+    # se corta el resto del ciclo. Además, fail-fast dentro del run: 5 fallos
+    # seguidos sin ni un éxito → dejar de martillear (295 files × timeouts).
+    storage_br = Breaker("supabase_storage", BREAKER_FILE)
+    storage_up = storage_br.allow()
+    storage_probe = storage_up and storage_br.current_state() == "half_open"
+    if not storage_up:
+        print("[upload] breaker supabase_storage OPEN — Storage saltado este ciclo (solo R2)", file=sys.stderr)
+    storage_attempted = False
+    no_success_streak = 0
+    FAIL_FAST_STREAK = 5
+
     print(f"[upload] {len(files)} files in data/")
     for abs_path, obj_path in files:
         digest = file_sha256(abs_path)
@@ -325,14 +373,28 @@ def main() -> int:
             if r2_backfill:
                 r2_put(obj_path, abs_path)
             continue
+        if not storage_up:
+            mark_pending(obj_path)      # el próximo ciclo (sonda half-open) lo retoma
+            r2_put(obj_path, abs_path)  # R2 sigue convergiendo durante el outage
+            continue
         try:
+            storage_attempted = True
             uploader.upload(obj_path, abs_path)
             uploaded += 1
+            no_success_streak = 0
             if uploaded % 25 == 0:
                 print(f"[upload]   {uploaded} uploaded...")
         except Exception as exc:  # noqa: BLE001
             record_fail("", obj_path, exc)
             mark_pending(obj_path)  # force retry next run; do NOT drop silently
+            r2_put(obj_path, abs_path)
+            no_success_streak += 1
+            if storage_probe or (uploaded == 0 and no_success_streak >= FAIL_FAST_STREAK):
+                storage_up = False
+                print(
+                    f"[upload] Storage caído (probe={storage_probe}, streak={no_success_streak}) "
+                    "— resto del ciclo directo a R2", file=sys.stderr,
+                )
             continue
         r2_put(obj_path, abs_path)
 
@@ -347,20 +409,25 @@ def main() -> int:
             folders.add(obj_path.rsplit("/", 1)[0])
 
     storage_paths: set[str] = set()
-    for folder in folders:
-        try:
-            names = uploader.list_prefix(folder)
-        except Exception as exc:  # noqa: BLE001
-            cls = classify_exc(exc)
-            fail_by_class[cls] = fail_by_class.get(cls, 0) + 1
-            print(f"[upload]   audit list FAILED for '{folder}': {exc} [{cls}]", file=sys.stderr)
-            names = set()
-        if folder:
-            storage_paths.update(f"{folder}/{n}" for n in names)
-        else:
-            storage_paths.update(names)
-
     local_paths = {obj for _, obj in files}
+    if storage_up:
+        for folder in folders:
+            try:
+                names = uploader.list_prefix(folder)
+            except Exception as exc:  # noqa: BLE001
+                cls = classify_exc(exc)
+                fail_by_class[cls] = fail_by_class.get(cls, 0) + 1
+                print(f"[upload]   audit list FAILED for '{folder}': {exc} [{cls}]", file=sys.stderr)
+                names = set()
+            if folder:
+                storage_paths.update(f"{folder}/{n}" for n in names)
+            else:
+                storage_paths.update(names)
+    else:
+        # Breaker abierto: sin red contra Storage, el audit no aporta — el
+        # pending-retry del manifest ya garantiza la convergencia al recuperar.
+        storage_paths = set(local_paths)
+
     missing_in_storage = local_paths - storage_paths
     audit_resubmit = 0
     for obj_path in sorted(missing_in_storage):
@@ -392,6 +459,19 @@ def main() -> int:
             print(f"[upload]   R2 parity check failed: {exc}", file=sys.stderr)
 
     save_manifest(new_manifest)
+
+    # Veredicto del breaker: solo con evidencia real (hubo intentos). Un run
+    # sin cambios que subir no dice nada del endpoint; el estado OPEN lo
+    # resuelve la sonda half-open del próximo ciclo, no este record.
+    if storage_attempted:
+        storage_br.record(uploaded + audit_resubmit > 0)
+
+    # Señal de push del auto-refresh: solo si snapshot.json quedó consistente
+    # en Storage este ciclo (digest str = subido o sin cambios; dict = pending-retry).
+    snap_sha = new_manifest.get("snapshot.json")
+    if isinstance(snap_sha, str) and storage_up:
+        publish_snapshot_meta(url, key, snap_sha)
+
     dur = time.time() - started
 
     # ------------------------------------------------------------------
@@ -409,7 +489,7 @@ def main() -> int:
     now_iso = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     upload_status = {
         "generated_at": now_iso,
-        "ok": (len(failed) == 0 and not stuck),
+        "ok": (len(failed) == 0 and not stuck and storage_up),
         "ssl_ctx": _SSL_CTX_SRC,
         "uploaded": uploaded,
         "unchanged": skipped,
@@ -425,6 +505,9 @@ def main() -> int:
             "failed": r2_failed,
             "parity_ok": r2_verify_ok,
         },
+        # Estado de los circuit breakers (scp_vpsN los escribe mirror.sh en el
+        # mismo archivo) — visible en el dashboard vía integrity_report.upload.
+        "breakers": load_breakers(BREAKER_FILE),
     }
 
     # Own health file (read by watchdog next cycle as redundancy).
@@ -465,13 +548,15 @@ def main() -> int:
                 print(f"[upload]   could not patch pipeline_timing.json: {exc}", file=sys.stderr)
             for status_obj in status_objs:
                 sp = DATA_DIR / status_obj
-                if sp.exists():
+                if sp.exists() and storage_up:
                     try:
                         uploader.upload(status_obj, sp)
                     except Exception as exc:  # noqa: BLE001
                         status_reupload_failed = True
                         cls = classify_exc(exc)
                         print(f"[upload]   status re-upload FAILED {status_obj}: {exc} [{cls}]", file=sys.stderr)
+                elif sp.exists():
+                    status_reupload_failed = True  # breaker abierto — quedará stale, el watchdog lo ve
     except Exception as exc:  # noqa: BLE001
         status_reupload_failed = True
         print(f"[upload]   could not patch integrity_report.json: {exc}", file=sys.stderr)

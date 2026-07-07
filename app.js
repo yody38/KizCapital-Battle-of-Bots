@@ -83,6 +83,47 @@ function wilsonLB(wins, n, z = 1.96) {
 // a green "fresh" pill over cached data; the cached snapshot carries its own
 // generated_at and the freshness logic ages it honestly.
 const SNAP_CACHE_KEY = 'kiz.snapshot.v1';
+const SNAP_ETAG_KEY = 'kiz.etag.snapshot';
+const HIST_ETAG_KEY = 'kiz.etag.history';
+
+// --- Delta sync (conditional GET) ----------------------------------------
+// Sends If-None-Match with the last seen ETag so Storage answers 304 (no body)
+// when the object hasn't changed since the previous load. Only used when
+// `reusable` says we hold a local copy to fall back on; any header/CORS hiccup
+// degrades to a plain fetch, so worst case is exactly today's behavior.
+async function fetchIfChanged(url, etagKey, reusable) {
+  let etag = null;
+  if (reusable) { try { etag = localStorage.getItem(etagKey); } catch { /* private mode */ } }
+  let res;
+  try {
+    res = await fetch(url, etag ? { headers: { 'If-None-Match': etag } } : undefined);
+  } catch (err) {
+    if (!etag) throw err;
+    res = await fetch(url);  // conditional request rejected (e.g. preflight) → plain retry
+  }
+  if (res.ok) {
+    const fresh = res.headers.get('ETag');
+    try { if (fresh) localStorage.setItem(etagKey, fresh); } catch { /* quota */ }
+  }
+  return res;
+}
+
+// history_recent.jsonl carries only the rows the dashboard actually renders
+// (real-account equity: sparklines + War Room weekly curve) — KBs instead of
+// the multi-MB full history.jsonl, which stays in Storage as archive. Falls
+// back to the full file while history_recent isn't deployed yet; a 304 reuses
+// the rows already in memory.
+async function loadHistoryRows() {
+  const reusable = Array.isArray(state.history) && state.history.length > 0;
+  let res = await fetchIfChanged('data/history_recent.jsonl', HIST_ETAG_KEY, reusable).catch(() => null);
+  if (!res || res.status === 404) res = await fetch('data/history.jsonl').catch(() => null);
+  if (res && res.status === 304) return state.history;
+  if (!res || !res.ok) return [];
+  const text = await res.text();
+  return text.split('\n').filter(Boolean).map(line => {
+    try { return JSON.parse(line); } catch { return null; }
+  }).filter(Boolean);
+}
 
 function readSnapCache() {
   try { const r = localStorage.getItem(SNAP_CACHE_KEY); return r ? JSON.parse(r) : null; }
@@ -150,26 +191,26 @@ async function loadSnapshot() {
   btn.classList.add('loading');
   try {
     const prev = state.snapshot;  // for "what moved" diff
-    const [snapRes, histRes] = await Promise.all([
-      fetch(`data/snapshot.json?t=${Date.now()}`),
-      fetch(`data/history.jsonl?t=${Date.now()}`).catch(() => null),
+    const [snapRes, histRows] = await Promise.all([
+      fetchIfChanged('data/snapshot.json', SNAP_ETAG_KEY, !!readSnapCache()),
+      loadHistoryRows().catch(() => []),
     ]);
-    if (!snapRes.ok) throw new Error(`HTTP ${snapRes.status}`);
-    const data = await snapRes.json();
-    if (histRes && histRes.ok) {
-      const text = await histRes.text();
-      state.history = text.split('\n').filter(Boolean).map(line => {
-        try { return JSON.parse(line); } catch { return null; }
-      }).filter(Boolean);
+    let data;
+    if (snapRes.status === 304) {
+      data = readSnapCache();  // unchanged upstream — reuse the local copy
+      if (!data) throw new Error('304 sin cache local');
     } else {
-      state.history = [];
+      if (!snapRes.ok) throw new Error(`HTTP ${snapRes.status}`);
+      data = await snapRes.json();
     }
+    state.history = histRows || [];
     applySnapshot(data);
     // "What moved" since the previous render (cache or prior cycle), derived
     // 100% in the browser — no backend file (Rule of Three: build it when a
     // consumer like Telegram exists). Surfaced in the latency modal.
     try { computeWhatMoved(prev, data); } catch (e) { console.error(e); }
-    writeSnapCache(data);
+    if (snapRes.status !== 304) writeSnapCache(data);
+    initSnapshotPush();  // idempotente; aquí la sesión ya está viva (fetch firmado OK)
   } catch (err) {
     console.error(err);
     // Keep whatever the cache painted; only flag freshness if we have nothing.
@@ -177,6 +218,46 @@ async function loadSnapshot() {
   } finally {
     btn.classList.remove('loading');
   }
+}
+
+// --- Snapshot push (auto-refresh sin reload) ------------------------------
+// upload_to_supabase.py upserta snapshot_meta {manifest_sha} al cierre de cada
+// ciclo de CI. Aquí: suscripción Realtime para el push instantáneo + poll de
+// respaldo de 1 fila/60s (cubre socket caído y eventos perdidos). Cambio de
+// sha → loadSnapshot() + toast. El primer valor visto es el baseline (el boot
+// ya cargó ese mismo ciclo), así que no dispara recarga.
+const snapPush = { initialized: false, lastSha: null, channel: null, pollTimer: null };
+
+function _snapPushApply(row) {
+  if (!row || !row.manifest_sha) return;
+  if (snapPush.lastSha === row.manifest_sha) return;
+  const first = snapPush.lastSha === null;
+  snapPush.lastSha = row.manifest_sha;
+  if (first) return;
+  loadSnapshot();
+  try {
+    showToast({ type: 'success', icon: '📡', title: 'Datos actualizados', msg: 'Nuevo ciclo publicado — el dashboard se refrescó solo.' });
+  } catch { /* toast es cosmético */ }
+}
+
+async function _snapPushPoll() {
+  try {
+    const { data, error } = await window.kizSupabase
+      .from('snapshot_meta').select('manifest_sha').eq('id', 1).maybeSingle();
+    if (!error && data) _snapPushApply(data);
+  } catch { /* red caída — el próximo poll reintenta */ }
+}
+
+function initSnapshotPush() {
+  if (snapPush.initialized || !window.kizSupabase) return;
+  snapPush.initialized = true;
+  snapPush.channel = window.kizSupabase
+    .channel('kiz-snapshot-meta')
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'snapshot_meta' },
+      (payload) => _snapPushApply(payload.new))
+    .subscribe();
+  _snapPushPoll();
+  snapPush.pollTimer = setInterval(_snapPushPoll, 60000);
 }
 
 // --- Staleness banner (out-of-band sync alert) ---------------------------

@@ -38,6 +38,7 @@ OBJ = "candidates_history.jsonl"
 
 HISTORY = DATA_DIR / "history.jsonl"
 HISTORY_OBJ = "history.jsonl"
+HISTORY_RECENT = DATA_DIR / "history_recent.jsonl"
 HISTORY_REAL_DAYS = 14   # equity rows for is_real accounts
 HISTORY_DEMO_HOURS = 48  # equity rows for demo accounts (unused by the UI today)
 
@@ -157,6 +158,16 @@ def main() -> int:
             HISTORY.write_text(body + ("\n" if body else ""), encoding="utf-8")
             print(f"[fetch_ledger] history.jsonl trimmed {len(hist)} -> {len(trimmed)} rows "
                   f"(real {HISTORY_REAL_DAYS}d / demo {HISTORY_DEMO_HOURS}h)")
+        # history_recent.jsonl (delta sync): solo las filas que el dashboard
+        # renderiza — cuentas reales (sparklines + curva semanal del War Room).
+        # El cliente baja este recorte (~KB); history.jsonl completo queda en
+        # Storage como archivo histórico. Corre aquí porque este es el único
+        # punto del ciclo con la historia hidratada completa (el runner de CI
+        # arranca con data/ vacío).
+        recent = [r for r in trimmed if r.get("is_real")]
+        body = "\n".join(json.dumps(r, ensure_ascii=False) for r in recent)
+        HISTORY_RECENT.write_text(body + ("\n" if body else ""), encoding="utf-8")
+        print(f"[fetch_ledger] history_recent.jsonl -> {len(recent)} real rows")
     return 0
 
 

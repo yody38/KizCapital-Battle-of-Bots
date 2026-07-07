@@ -137,6 +137,21 @@
   const CHECK_MS = 3000;
   const BACKOFF_MS = [5000, 15000, 45000, 120000];
 
+  // Breaker del socket Realtime con memoria entre visitas (localStorage): si
+  // el WS falló ≥3 veces seguidas hace <10 min, la próxima carga arranca
+  // directo en polling y sonda el socket al vencer el cooldown (half-open),
+  // en vez de re-martillear un transporte que ya se sabe caído.
+  const WS_BREAKER_KEY = "kiz.breaker.ws";
+  const WS_BREAKER_FAILS = 3;
+  const WS_BREAKER_COOLDOWN_MS = 10 * 60 * 1000;
+  function readWsBreaker() {
+    try { return JSON.parse(localStorage.getItem(WS_BREAKER_KEY)) || { fails: 0, last: 0 }; }
+    catch { return { fails: 0, last: 0 }; }
+  }
+  function writeWsBreaker(b) {
+    try { localStorage.setItem(WS_BREAKER_KEY, JSON.stringify(b)); } catch { /* private mode */ }
+  }
+
   function connect(onUpdate, onMode) {
     const st = {
       mode: null,            // 'realtime' | 'polling'
@@ -191,6 +206,8 @@
     }
 
     function failover() {
+      const wb = readWsBreaker();
+      writeWsBreaker({ fails: wb.fails + 1, last: Date.now() });
       startPolling();
       dropChannel();
       scheduleRetry();
@@ -211,6 +228,7 @@
           if (status === "SUBSCRIBED") {
             st.lastEventAt = Date.now();
             st.backoffIdx = 0;
+            writeWsBreaker({ fails: 0, last: Date.now() });  // transporte probado → closed
             stopPolling();
             setMode("realtime");
           } else if (status === "CHANNEL_ERROR" || status === "TIMED_OUT" || status === "CLOSED") {
@@ -242,9 +260,32 @@
     };
     document.addEventListener("visibilitychange", onVisible);
 
-    // First data without waiting for the socket, then bring up Realtime.
+    // Tuning shadow (aprendizaje continuo): loguea qué recomendaría el
+    // adaptive_tuner para el polling — NO se aplica (proceso shadow-first).
+    fetch("data/tuning.json")
+      .then((r) => (r && r.ok ? r.json() : null))
+      .then((t) => {
+        const rec = t && t.recommendations && t.recommendations.frontend_poll_ms;
+        if (rec && rec.recommended !== rec.current) {
+          console.info("[kiz] tuning shadow: POLL_MS recomendado " + rec.recommended +
+            " (vigente " + rec.current + ") — " + rec.reason + " [NO aplicado]");
+        }
+      })
+      .catch(() => {});
+
+    // First data without waiting for the socket, then bring up Realtime —
+    // salvo que el breaker del WS esté abierto: polling de entrada y sonda
+    // del socket cuando venza el cooldown (half-open).
     pollNow();
-    openChannel();
+    const wb = readWsBreaker();
+    const wsOpenLeft = wb.fails >= WS_BREAKER_FAILS ? wb.last + WS_BREAKER_COOLDOWN_MS - Date.now() : 0;
+    if (wsOpenLeft > 0) {
+      console.warn("[kiz] ws breaker open (" + wb.fails + " fails) — polling now, socket probe in " + Math.round(wsOpenLeft / 1000) + "s");
+      startPolling();
+      st.retryTimer = setTimeout(() => { st.retryTimer = null; openChannel(); }, wsOpenLeft);
+    } else {
+      openChannel();
+    }
 
     return {
       stop() {

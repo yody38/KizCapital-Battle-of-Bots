@@ -23,6 +23,11 @@ SNAPSHOT_MAX_AGE_SEC=${SNAPSHOT_MAX_AGE_SEC:-1800}
 # absent on a VPS that hasn't been upgraded to builder v3 yet).
 BOTS_SCP_MAX_ATTEMPTS=${BOTS_SCP_MAX_ATTEMPTS:-3}
 BOTS_SCP_RETRY_DELAY_SEC=${BOTS_SCP_RETRY_DELAY_SEC:-15}
+# Circuit breaker por VPS (closed/open/half-open, ver scripts/circuit_breaker.py):
+# una VPS caída varios ciclos deja de quemar la escalera de reintentos y pasa
+# directo a carry-forward; a la recuperación se sonda con 1 intento.
+BREAKER_STATE="$DATA_DIR/.breaker_state.json"
+CB="$DIR/scripts/circuit_breaker.py"
 # Set to 1 to abort the cycle when a VPS lacks a valid .ready flag (strict).
 # Default 0 during rollout: the .ready check is performed and logged, but
 # absence falls back to the legacy bots-scp-with-retry path. Flip to 1 once
@@ -119,9 +124,21 @@ fetch_vps() {
 
   fail() { echo "FAIL:$1" > "${status_file}.tmp" && mv "${status_file}.tmp" "$status_file"; return 1; }
 
+  # --- circuit breaker: presupuesto de intentos SCP para esta VPS ---
+  # closed → escalera completa; half-open → 1 sonda; open → 0 (skip directo,
+  # el quorum/carry-forward decide con el resto de VPS).
+  local scp_budget
+  scp_budget=$(python3 "$CB" --state "$BREAKER_STATE" budget "scp_${id}" "$BOTS_SCP_MAX_ATTEMPTS" 2>/dev/null || echo "$BOTS_SCP_MAX_ATTEMPTS")
+  case "$scp_budget" in (*[!0-9]*|'') scp_budget="$BOTS_SCP_MAX_ATTEMPTS" ;; esac
+  if [ "$scp_budget" -eq 0 ]; then
+    echo "[$(ts)] $id breaker OPEN — fetch saltado este ciclo (carry-forward decide)"
+    fail "${id}:breaker_open"; return 1
+  fi
+  [ "$scp_budget" -ne "$BOTS_SCP_MAX_ATTEMPTS" ] && echo "[$(ts)] $id breaker HALF-OPEN — sonda con $scp_budget intento(s)"
+
   # --- snapshot.json fetch (mandatory, fail-closed with retry) ---
   snap_scp_ok=0
-  for attempt in $(seq 1 "$BOTS_SCP_MAX_ATTEMPTS"); do
+  for attempt in $(seq 1 "$scp_budget"); do
     rm -f "$local_tmp"
     if scp "${SCP_OPTS[@]}" "$host:$REMOTE_FILE" "$local_tmp" 2>&1; then
       if [ -s "$local_tmp" ] && head -c 1 "$local_tmp" | grep -q '{'; then
@@ -134,10 +151,11 @@ fetch_vps() {
     else
       echo "[$(ts)] $id snapshot SCP error on attempt $attempt — retrying"
     fi
-    [ "$attempt" -lt "$BOTS_SCP_MAX_ATTEMPTS" ] && sleep "$BOTS_SCP_RETRY_DELAY_SEC"
+    [ "$attempt" -lt "$scp_budget" ] && sleep "$BOTS_SCP_RETRY_DELAY_SEC"
   done
   if [ "$snap_scp_ok" -ne 1 ]; then
-    echo "[$(ts)] $id snapshot scp FAILED after $BOTS_SCP_MAX_ATTEMPTS attempts — aborting cycle (fail-closed)"
+    echo "[$(ts)] $id snapshot scp FAILED after $scp_budget attempts — aborting cycle (fail-closed)"
+    python3 "$CB" --state "$BREAKER_STATE" record "scp_${id}" fail >/dev/null 2>&1 || true
     rm -f "$local_tmp"; fail "${id}:snapshot_scp_exhausted"; return 1
   fi
   mv "$local_tmp" "$local_file"
@@ -184,7 +202,7 @@ fetch_vps() {
   bots_target="$BOTS_OUT_DIR/$id"
   bots_staging="$BOTS_OUT_DIR/.${id}.staging"
   bots_attempt_ok=0
-  for attempt in $(seq 1 "$BOTS_SCP_MAX_ATTEMPTS"); do
+  for attempt in $(seq 1 "$scp_budget"); do
     rm -rf "$bots_staging"
     mkdir -p "$bots_staging"
     if scp "${SCP_OPTS[@]}" -r "$host:$REMOTE_BOTS_DIR/." "$bots_staging/" 2>&1; then
@@ -199,12 +217,15 @@ fetch_vps() {
     else
       echo "[$(ts)] $id bots SCP error on attempt $attempt — retrying"
     fi
-    [ "$attempt" -lt "$BOTS_SCP_MAX_ATTEMPTS" ] && sleep "$BOTS_SCP_RETRY_DELAY_SEC"
+    [ "$attempt" -lt "$scp_budget" ] && sleep "$BOTS_SCP_RETRY_DELAY_SEC"
   done
   if [ "$bots_attempt_ok" -ne 1 ]; then
-    echo "[$(ts)] $id bots scp FAILED after $BOTS_SCP_MAX_ATTEMPTS attempts — aborting cycle"
+    echo "[$(ts)] $id bots scp FAILED after $scp_budget attempts — aborting cycle"
+    python3 "$CB" --state "$BREAKER_STATE" record "scp_${id}" fail >/dev/null 2>&1 || true
     rm -rf "$bots_staging"; fail "${id}:bots_scp_exhausted"; return 1
   fi
+  # Transporte SCP sano este ciclo (snapshot + bots) → breaker a closed.
+  python3 "$CB" --state "$BREAKER_STATE" record "scp_${id}" ok >/dev/null 2>&1 || true
 
   # Atomic swap: ensures dashboard NEVER hits a 404 window during refresh.
   # Backup name keyed by $id (unique per VPS) so concurrent swaps never collide.
@@ -549,6 +570,12 @@ T_FETCH_LEDGER_MS="$T_FETCH_LEDGER_MS" T_POSTMERGE_MS="$T_POSTMERGE_MS" \
 T_VERIFY_MS="$T_VERIFY_MS" T_UPLOAD_MS="0" T_E2E_MS="$T_E2E_MS" \
   python3 "$SCRIPT_DIR/emit_timing.py" >> "$LOG" 2>&1 || \
   echo "[$(ts)] emit_timing non-fatal error (timing skipped this cycle)" >> "$LOG"
+
+# Motor de aprendizaje continuo (SHADOW): baselines por hora + recomendaciones
+# de cadencia en data/tuning.json (viaja en el upload). Ningún consumidor las
+# aplica todavía — solo loguean qué cambiaría. Best-effort.
+python3 "$SCRIPT_DIR/adaptive_tuner.py" >> "$LOG" 2>&1 || \
+  echo "[$(ts)] adaptive_tuner non-fatal error (tuning skipped this cycle)" >> "$LOG"
 
 # Push fresh data/ (including integrity_report.json + pipeline_timing.json) to
 # Supabase Storage. Pending-retry on transient failures.

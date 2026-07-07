@@ -572,6 +572,46 @@ def main() -> int:
                     f"live-stream dead-man: real account(s) stale {stale}s "
                     f"(>{LIVE_DEADMAN_SEC}s — Railway worker / tailnet / MT5 down?)"
                 )
+            # Root cause via publisher_heartbeat (best-effort: la tabla puede no
+            # existir aún). Heartbeat fresco + cuenta stale → lado MT5/broker;
+            # heartbeat viejo → proceso/SSH/Railway caído.
+            if missing or stale:
+                hb_ages = {}
+                try:
+                    ep2 = f"{url.rstrip('/')}/rest/v1/publisher_heartbeat?select=vps,ts"
+                    req2 = urlrequest.Request(ep2, headers={"Authorization": f"Bearer {key}", "apikey": key})
+                    with urlrequest.urlopen(req2, timeout=20) as r2:
+                        for hb_row in json.loads(r2.read()):
+                            t = parse_iso(hb_row.get("ts"))
+                            if t:
+                                hb_ages[str(hb_row.get("vps"))] = int((now - t).total_seconds())
+                except Exception:
+                    pass
+                if hb_ages:
+                    info["steps"]["publisher_heartbeat"] = hb_ages
+                    alive = sorted(v for v, a in hb_ages.items() if a < 180)
+                    dead = sorted(v for v, a in hb_ages.items() if a >= 180)
+                    fails.append(
+                        f"live-stream root-cause: publisher vivo en {alive or 'ninguno'}"
+                        f" (→ lado MT5/broker), heartbeat muerto en {dead or 'ninguno'}"
+                        f" (→ proceso/SSH/Railway) · ages_sec={hb_ages}"
+                    )
+
+    # Step 4c — Tuning shadow (aprendizaje continuo, warn-only): anota qué
+    # recomendaría el adaptive_tuner vs los umbrales vigentes. NO cambia el
+    # dead-man real — evidencia para el veredicto tras la semana de shadow.
+    if url and key:
+        try:
+            _, tuning = supa_get_json(url, key, "tuning.json")
+            if isinstance(tuning, dict):
+                recs = tuning.get("recommendations") or {}
+                info["steps"]["tuning_shadow"] = {
+                    k: {"current": v.get("current"), "recommended": v.get("recommended")}
+                    for k, v in recs.items()
+                    if isinstance(v, dict) and v.get("recommended") != v.get("current")
+                }
+        except Exception:  # noqa: BLE001 — shadow jamás afecta el veredicto
+            pass
 
     # Step 5 — Vercel version pin (warn only)
     app_v, css_v = vercel_version_pin()
