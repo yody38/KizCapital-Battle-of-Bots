@@ -6858,19 +6858,21 @@ function updateTopMoverChip() {
 
 // --- B5: War Room -----------------------------------------------------------
 
-// --- War Room · Ingreso de la semana (curva P&L semanal en vivo) -------------
+// --- War Room · Ingreso de la semana (equity total en vivo) ------------------
 // Ventana: domingo 17:00 America/New_York (apertura forex = 14:00 Las Vegas)
-// → viernes 17:00 NY (cierre = 14:00 Las Vegas). Histórico durable desde
-// public.live_real_history vía RPC real_weekly_history (buckets 15 min);
-// en vivo se añade 1 punto cada ~3s desde el stream. Al cierre del viernes
-// la curva queda congelada todo el fin de semana; el domingo a la apertura
-// la ventana cambia sola → baseline nuevo → la curva arranca desde cero.
+// → viernes 17:00 NY (cierre = 14:00 Las Vegas). La curva grafica el EQUITY
+// TOTAL ABSOLUTO (todas las cuentas reales, flotante incluido): arranca en el
+// valor exacto de la apertura del domingo (línea punteada de referencia) y
+// fluctúa con las ganancias. Histórico durable desde public.live_real_history
+// vía RPC real_weekly_history (buckets 15 min); en vivo 1 punto cada ~3s.
+// Al cierre del viernes queda congelada como foto todo el fin de semana; el
+// domingo a la apertura la ventana rota sola → se borra y arranca de nuevo.
 const warWeekly = {
   chart: null,
   weekOpen: 0,
   weekClose: 0,
-  baseline: null,   // equity total en el primer punto de la semana
-  hist: [],         // puntos durables (RPC) como {x, y: pnl}
+  openEquity: null, // equity total en el primer punto de la semana (apertura)
+  hist: [],         // puntos durables (RPC) como {x, y: equity total}
   livePts: [],      // puntos de la sesión (stream ~3s), se descartan al refetch
   lastFetch: 0,
   fetching: false,
@@ -6929,7 +6931,7 @@ function warWeeklyEnsureWindow() {
   if (w.open !== warWeekly.weekOpen) {
     warWeekly.weekOpen = w.open;
     warWeekly.weekClose = w.close;
-    warWeekly.baseline = null;
+    warWeekly.openEquity = null;
     warWeekly.hist = [];
     warWeekly.livePts = [];
     warWeekly.lastFetch = 0;
@@ -6948,10 +6950,9 @@ async function warWeeklyFetch() {
     if (error) { console.warn('[kiz] real_weekly_history failed', error.message || error); return; }
     const rows = Array.isArray(data) ? data : [];
     warWeekly.lastFetch = Date.now();
-    if (!rows.length) return; // sin datos aún esta semana — el live siembra baseline
-    const base = Number(rows[0].total_equity);
-    warWeekly.baseline = base;
-    warWeekly.hist = rows.map(r => ({ x: new Date(r.bucket).getTime(), y: Number(r.total_equity) - base }));
+    if (!rows.length) return; // sin datos aún esta semana — el live siembra la apertura
+    warWeekly.openEquity = Number(rows[0].total_equity);
+    warWeekly.hist = rows.map(r => ({ x: new Date(r.bucket).getTime(), y: Number(r.total_equity) }));
     warWeekly.livePts = []; // la RPC es la fuente durable; la sesión se reconstruye
   } finally {
     warWeekly.fetching = false;
@@ -6971,7 +6972,9 @@ function warWeeklyRender() {
   const now = warNow();
   const frozen = now > warWeekly.weekClose;
   const series = warWeeklySeries();
-  const pnl = series.length ? series[series.length - 1].y : 0;
+  const openEq = warWeekly.openEquity;
+  // Ingreso de la semana = equity actual − equity en la apertura del domingo.
+  const pnl = (series.length && openEq != null) ? series[series.length - 1].y - openEq : 0;
   const up = pnl >= 0;
   const color = up ? '#3ddc97' : '#ff6b8b';
 
@@ -6983,8 +6986,9 @@ function warWeeklyRender() {
   }
   const rangeEl = document.getElementById('war-weekly-range');
   if (rangeEl) {
+    const desde = openEq != null ? `desde ${fmt.usd(openEq)} · ` : '';
     rangeEl.textContent =
-      `${WAR_LV_FMT.format(warWeekly.weekOpen)} → ${WAR_LV_FMT.format(warWeekly.weekClose)} · Las Vegas`;
+      `${desde}${WAR_LV_FMT.format(warWeekly.weekOpen)} → ${WAR_LV_FMT.format(warWeekly.weekClose)} · Las Vegas`;
   }
   const chipEl = document.getElementById('war-weekly-chip');
   if (chipEl) chipEl.hidden = !frozen;
@@ -6999,18 +7003,20 @@ function warWeeklyRender() {
       data: {
         datasets: [
           {
-            label: 'P&L semana',
+            label: 'Equity total',
             data: series,
             borderColor: color,
             backgroundColor: up ? 'rgba(61,220,151,0.12)' : 'rgba(255,107,139,0.12)',
-            fill: 'origin',
+            fill: { target: { value: openEq != null ? openEq : 0 } },
             borderWidth: 2,
             pointRadius: 0,
             tension: 0.2,
           },
           {
-            label: 'cero',
-            data: [{ x: warWeekly.weekOpen, y: 0 }, { x: warWeekly.weekClose, y: 0 }],
+            // Referencia: el valor exacto de la apertura del domingo.
+            label: 'apertura',
+            data: openEq == null ? [] :
+              [{ x: warWeekly.weekOpen, y: openEq }, { x: warWeekly.weekClose, y: openEq }],
             borderColor: 'rgba(154,163,187,0.35)',
             borderDash: [5, 5],
             borderWidth: 1,
@@ -7030,7 +7036,10 @@ function warWeeklyRender() {
             filter: (c) => c.datasetIndex === 0,
             callbacks: {
               title: (items) => items.length ? WAR_LV_FMT.format(items[0].parsed.x) + ' (LV)' : '',
-              label: (c) => `P&L semana: ${fmt.usd(c.parsed.y, true)}`,
+              label: (c) => {
+                const delta = warWeekly.openEquity != null ? c.parsed.y - warWeekly.openEquity : null;
+                return `Equity: ${fmt.usd(c.parsed.y)}${delta != null ? ` (${fmt.usd(delta, true)} vs apertura)` : ''}`;
+              },
             },
           },
         },
@@ -7044,8 +7053,9 @@ function warWeeklyRender() {
             ticks: { color: '#9aa3bb', callback: (v) => WAR_LV_TICK.format(v) },
           },
           y: {
+            grace: '5%',
             grid: { color: 'rgba(255,255,255,0.05)' },
-            ticks: { color: '#9aa3bb', callback: (v) => fmt.usd(v, true) },
+            ticks: { color: '#9aa3bb', callback: (v) => fmt.usd(v) },
           },
         },
       },
@@ -7055,8 +7065,9 @@ function warWeeklyRender() {
     ds.data = series;
     ds.borderColor = color;
     ds.backgroundColor = up ? 'rgba(61,220,151,0.12)' : 'rgba(255,107,139,0.12)';
-    warWeekly.chart.data.datasets[1].data =
-      [{ x: warWeekly.weekOpen, y: 0 }, { x: warWeekly.weekClose, y: 0 }];
+    ds.fill = { target: { value: openEq != null ? openEq : 0 } };
+    warWeekly.chart.data.datasets[1].data = openEq == null ? [] :
+      [{ x: warWeekly.weekOpen, y: openEq }, { x: warWeekly.weekClose, y: openEq }];
     warWeekly.chart.options.scales.x.min = warWeekly.weekOpen;
     warWeekly.chart.options.scales.x.max = warWeekly.weekClose;
     warWeekly.chart.update('none');
@@ -7078,11 +7089,11 @@ function warWeeklyLiveTick() {
   if (now <= warWeekly.weekClose) {
     const { eq } = liveTotals();
     if (eq > 0) {
-      // Semana recién abierta sin histórico todavía: el live siembra el baseline.
-      if (warWeekly.baseline == null) warWeekly.baseline = eq;
+      // Semana recién abierta sin histórico todavía: el live siembra la apertura.
+      if (warWeekly.openEquity == null) warWeekly.openEquity = eq;
       const last = warWeekly.livePts[warWeekly.livePts.length - 1];
       if (!last || now - last.x >= 2500) {
-        warWeekly.livePts.push({ x: now, y: eq - warWeekly.baseline });
+        warWeekly.livePts.push({ x: now, y: eq });
         if (warWeekly.livePts.length > 6000) warWeekly.livePts.splice(0, 1000);
       }
     }
