@@ -5,7 +5,7 @@
 // VERSION debe ir en sync con el pin ?v= de index.html — bump en cada deploy
 // que cambie app.js/styles.css/data-source.js para no servir código viejo.
 
-const VERSION = '20260707b';
+const VERSION = '20260707c';
 const SHELL_CACHE = `kiz-shell-${VERSION}`;
 const DATA_CACHE = 'kiz-data-v1';
 const FONT_CACHE = 'kiz-fonts-v1';

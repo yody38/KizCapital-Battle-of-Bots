@@ -6940,6 +6940,41 @@ function warWeeklyEnsureWindow() {
   return true;
 }
 
+// Relleno del arranque de semana con la historia de 30 min (data/history.jsonl,
+// ya cargada en state.history para los sparklines — 14 días de retención para
+// cuentas reales, ver scripts/fetch_ledger.py HISTORY_REAL_DAYS). La tabla
+// live_real_history (F1) es más reciente que algunos domingos de apertura, así
+// que sin esto la curva "arrancaría" tarde. Agrupa por ts exacto (un ciclo de
+// snapshot escribe todas las cuentas con el mismo ts), forward-fill por login,
+// y solo emite el total cuando ya se vio a TODAS las cuentas reales de la
+// semana al menos una vez (mismo patrón que el forward-fill de F1).
+function warWeeklyHistoryPrefix(cutoffMs) {
+  const rows = (state.history || [])
+    .filter(h => h.is_real && state.realLogins && state.realLogins.has(h.login))
+    .map(h => ({ t: new Date(h.ts).getTime(), login: h.login, equity: Number(h.equity) || 0 }))
+    .filter(h => Number.isFinite(h.t) && h.t >= warWeekly.weekOpen && h.t < cutoffMs);
+  if (!rows.length) return [];
+
+  const byTs = new Map();
+  const distinctLogins = new Set();
+  for (const r of rows) {
+    distinctLogins.add(r.login);
+    if (!byTs.has(r.t)) byTs.set(r.t, []);
+    byTs.get(r.t).push(r);
+  }
+  const last = new Map();
+  const out = [];
+  for (const t of [...byTs.keys()].sort((a, b) => a - b)) {
+    byTs.get(t).forEach(r => last.set(r.login, r.equity));
+    if (last.size >= distinctLogins.size) {
+      let sum = 0;
+      last.forEach(v => { sum += v; });
+      out.push({ x: t, y: sum });
+    }
+  }
+  return out;
+}
+
 async function warWeeklyFetch() {
   if (!window.kizSupabase || warWeekly.fetching || !warWeekly.weekOpen) return;
   warWeekly.fetching = true;
@@ -6950,10 +6985,16 @@ async function warWeeklyFetch() {
     if (error) { console.warn('[kiz] real_weekly_history failed', error.message || error); return; }
     const rows = Array.isArray(data) ? data : [];
     warWeekly.lastFetch = Date.now();
-    if (!rows.length) return; // sin datos aún esta semana — el live siembra la apertura
-    warWeekly.openEquity = Number(rows[0].total_equity);
-    warWeekly.hist = rows.map(r => ({ x: new Date(r.bucket).getTime(), y: Number(r.total_equity) }));
-    warWeekly.livePts = []; // la RPC es la fuente durable; la sesión se reconstruye
+
+    const rpcHist = rows.map(r => ({ x: new Date(r.bucket).getTime(), y: Number(r.total_equity) }));
+    const cutoff = rpcHist.length ? rpcHist[0].x : warWeekly.weekClose;
+    const prefix = warWeeklyHistoryPrefix(cutoff);
+    const combined = prefix.concat(rpcHist);
+
+    if (!combined.length) return; // sin datos aún esta semana — el live siembra la apertura
+    warWeekly.openEquity = combined[0].y;
+    warWeekly.hist = combined;
+    warWeekly.livePts = []; // la RPC + el prefijo son la fuente durable; la sesión se reconstruye
   } finally {
     warWeekly.fetching = false;
   }
