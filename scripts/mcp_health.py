@@ -134,8 +134,14 @@ def probe_vps(vps_id: str, host: str) -> dict:
         "checked_at": now_iso(),
     }
 
-    # 1. SSH ping
+    # 1. SSH ping — con UN reintento a timeout más generoso antes de declarar
+    # down: una VPS lenta-pero-viva (VPS4 bajo presión de RAM responde en ~11s,
+    # sobre el ConnectTimeout de 8s) no debe abrir incidente; una VPS muerta
+    # sigue cayendo igual (2 checks consecutivos = ~10 min, FAIL_THRESHOLD).
     rc, stdout, stderr, ms = ssh_cmd(host, "echo pong")
+    if rc != 0 or "pong" not in stdout:
+        result["ssh_retry"] = True
+        rc, stdout, stderr, ms = ssh_cmd(host, "echo pong", timeout=15)
     result["ssh_ms"] = round(ms, 1)
     if rc != 0 or "pong" not in stdout:
         result["status"] = "down"
