@@ -7337,6 +7337,7 @@ function renderRealDailySuite() {
   renderRealBotCards();
   renderRealHeatmap();
   renderRealRace();
+  renderWeeklySuite();
   wireWarRoom();
   updateLiveFloatCells();
   updateTopMoverChip();
@@ -7350,4 +7351,614 @@ function kizRealLiveHooks() {
   updateTopMoverChip();
   renderWarRoom();
   warWeeklyLiveTick();
+  weeklySuiteLiveTick();
+}
+
+/* ==========================================================================
+   Weekly Suite (v20260711a)
+   Analítica semanal de las cuentas reales: scorecard ejecutivo (W5),
+   comparador week-over-week (W2), reloj de trading día×hora (W1), waterfall
+   de contribución (W3) y pulso de riesgo intra-semana (W4).
+   Fuente: trades[] de los per-bot files de los bots en cuentas reales
+   (100% client-side, sin backend nuevo) + la ventana semanal del War Room
+   (domingo 17:00 NY → viernes 17:00 NY, currentWeekWindow) + el equity
+   intra-semana durable de real_weekly_history (via warWeeklyFetch).
+   ========================================================================== */
+
+const weeklySuite = {
+  key: null,        // generated_at del snapshot con el que se cachearon los trades
+  trades: null,     // trades cerrados de bots reales, cada uno con _key/_label
+  loading: false,
+  weeks: [],        // ventanas semanales desc ([0] = semana actual)
+  stats: [],        // wkStats por ventana (mismo índice que weeks)
+  clockWeeks: 1,    // toggle del reloj: 1 | 4 | 12 semanas
+  charts: {},       // instancias Chart.js por canvas id
+  wfBase: 0,        // cum de net cerrado antes del paso "Flotante" (live update)
+  lastLiveTick: 0,
+};
+
+const WK_DOW_ORDER = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri'];
+const WK_DOW_ES = { Sun: 'Dom', Mon: 'Lun', Tue: 'Mar', Wed: 'Mié', Thu: 'Jue', Fri: 'Vie', Sat: 'Sáb' };
+const WK_CELL_FMT = new Intl.DateTimeFormat('en-US', {
+  timeZone: 'America/New_York', weekday: 'short', hour: 'numeric', hour12: false,
+});
+const WK_DAY_FMT = new Intl.DateTimeFormat('es-ES', {
+  timeZone: 'America/New_York', day: '2-digit', month: 'short',
+});
+
+function wkChart(id, cfg) {
+  const canvas = document.getElementById(id);
+  if (!canvas || typeof Chart === 'undefined') return null;
+  if (weeklySuite.charts[id]) weeklySuite.charts[id].destroy();
+  weeklySuite.charts[id] = new Chart(canvas, cfg);
+  return weeklySuite.charts[id];
+}
+
+function wkFmtDur(sec) {
+  if (sec == null || !isFinite(sec)) return '—';
+  if (sec < 90) return `${Math.round(sec)}s`;
+  const m = sec / 60;
+  if (m < 90) return `${Math.round(m)}m`;
+  const h = m / 60;
+  if (h < 36) return `${Math.floor(h)}h ${Math.round(m % 60)}m`;
+  return `${Math.floor(h / 24)}d ${Math.round(h % 24)}h`;
+}
+
+// Descarga (una vez por snapshot) los trades cerrados de todos los bots que
+// corren en cuentas reales fundadas. data-source.js reescribe data/ a signed URLs.
+async function wkLoadRealTrades() {
+  const s = state.snapshot;
+  if (!s) return null;
+  const key = s.generated_at || 'nokey';
+  if (weeklySuite.trades && weeklySuite.key === key) return weeklySuite.trades;
+  if (weeklySuite.loading) return weeklySuite.trades;
+  const logins = new Set(((s.real_portfolio || {}).accounts || [])
+    .filter(isFundedRealAccount).map(a => a.login));
+  const bots = (s.bots || []).filter(b => logins.has(b.account_login));
+  if (!bots.length) return null;
+  weeklySuite.loading = true;
+  try {
+    const results = await Promise.all(bots.map(async (b) => {
+      try {
+        const res = await fetch(`data/bots/${b.vps}/${b.account_login}-${b.magic}.json?t=${Date.now()}`);
+        if (!res.ok) return [];
+        const j = await res.json();
+        return (j.trades || []).map(t => ({ ...t, _key: botKey(b), _label: botLabel(b), _login: b.account_login }));
+      } catch { return []; }
+    }));
+    weeklySuite.trades = results.flat();
+    weeklySuite.key = key;
+  } finally { weeklySuite.loading = false; }
+  return weeklySuite.trades;
+}
+
+// Últimas n ventanas semanales (DST-safe, reutiliza currentWeekWindow). Desc.
+function wkWeekWindows(n) {
+  const wins = [];
+  let w = currentWeekWindow(Date.now());
+  for (let i = 0; i < n && w; i++) {
+    wins.push(w);
+    w = currentWeekWindow(w.open - 36e5); // 1h antes de la apertura → semana previa
+  }
+  return wins;
+}
+
+function wkStats(trades) {
+  const st = { net: 0, trades: trades.length, wins: 0, grossW: 0, grossL: 0,
+    best: null, worst: null, durSum: 0, byBot: new Map() };
+  for (const t of trades) {
+    const n = Number(t.net) || 0;
+    st.net += n;
+    if (n > 0) { st.wins++; st.grossW += n; } else { st.grossL += -n; }
+    if (!st.best || n > st.best.net) st.best = { net: n, t };
+    if (!st.worst || n < st.worst.net) st.worst = { net: n, t };
+    st.durSum += Number(t.duration_sec) || 0;
+    const e = st.byBot.get(t._key) || { net: 0, trades: 0, label: t._label };
+    e.net += n; e.trades++;
+    st.byBot.set(t._key, e);
+  }
+  st.winRate = st.trades ? (st.wins / st.trades) * 100 : null;
+  st.pf = st.grossL > 0 ? st.grossW / st.grossL : (st.grossW > 0 ? null : 0); // null = ∞
+  st.expectancy = st.trades ? st.net / st.trades : null;
+  st.avgDur = st.trades ? st.durSum / st.trades : null;
+  return st;
+}
+
+// Mini bar-spark de 12 semanas (verde/rojo por signo, semana actual resaltada).
+function wkBarSpark(vals, w = 96, h = 24) {
+  const arr = (vals || []).map(v => Number(v) || 0);
+  if (arr.length < 2) return '';
+  const max = Math.max(1e-9, ...arr.map(Math.abs));
+  const bw = w / arr.length;
+  const mid = h / 2;
+  const bars = arr.map((v, i) => {
+    const bh = Math.max(1, (Math.abs(v) / max) * (mid - 1));
+    const y = v >= 0 ? mid - bh : mid;
+    const cur = i === arr.length - 1;
+    return `<rect x="${(i * bw + 1).toFixed(1)}" y="${y.toFixed(1)}" width="${Math.max(1, bw - 2).toFixed(1)}" height="${bh.toFixed(1)}" rx="1" fill="${v >= 0 ? '#3ddc97' : '#ff6b8b'}" opacity="${cur ? 1 : 0.5}"/>`;
+  }).join('');
+  return `<svg class="wk-spark" viewBox="0 0 ${w} ${h}" width="${w}" height="${h}" aria-hidden="true"><line x1="0" y1="${mid}" x2="${w}" y2="${mid}" stroke="rgba(255,255,255,0.12)"/>${bars}</svg>`;
+}
+
+function wkWeekLabel(w) {
+  return `${WK_DAY_FMT.format(w.open)} → ${WK_DAY_FMT.format(w.close)}`;
+}
+
+// --- entry point (tras cada applySnapshot) ---------------------------------
+
+async function renderWeeklySuite() {
+  const panelIds = ['weekly-scorecard-panel', 'weekly-compare-panel',
+    'weekly-clock-panel', 'weekly-waterfall-panel', 'weekly-risk-panel'];
+  try {
+    const trades = await wkLoadRealTrades();
+    if (!trades || !trades.length) {
+      panelIds.forEach(id => { const el = document.getElementById(id); if (el) el.hidden = true; });
+      return;
+    }
+    weeklySuite.weeks = wkWeekWindows(12);
+    weeklySuite.stats = weeklySuite.weeks.map((w, i) => {
+      const end = i === 0 ? w.open + 7 * 86400e3 : weeklySuite.weeks[i - 1].open;
+      return wkStats(trades.filter(t => {
+        const ms = (Number(t.close_time) || 0) * 1000;
+        return ms >= w.open && ms < end;
+      }));
+    });
+    renderWeeklyScorecard();
+    renderWeekCompare();
+    renderWeeklyClock();
+    renderWeeklyWaterfall();
+    renderWeeklyRiskPulse();
+  } catch (e) { console.error('weekly suite failed', e); }
+}
+
+// --- W5 · Scorecard --------------------------------------------------------
+
+function renderWeeklyScorecard() {
+  const panel = document.getElementById('weekly-scorecard-panel');
+  const grid = document.getElementById('wk-kpi-grid');
+  if (!panel || !grid) return;
+  const cur = weeklySuite.stats[0];
+  const prev = weeklySuite.stats[1];
+  panel.hidden = false;
+
+  const rangeEl = document.getElementById('wk-scorecard-range');
+  if (rangeEl) rangeEl.textContent = wkWeekLabel(weeklySuite.weeks[0]) + ' · NY';
+
+  const health = !cur.trades
+    ? { icon: '⚪', label: 'sin trades cerrados aún', cls: 'wkh-neutral' }
+    : cur.net > 0 && (cur.pf == null || cur.pf >= 1.3)
+      ? { icon: '🟢', label: 'semana sana', cls: 'wkh-good' }
+      : cur.net > 0
+        ? { icon: '🟡', label: 'positiva pero justa', cls: 'wkh-warn' }
+        : { icon: '🔴', label: 'semana en rojo', cls: 'wkh-bad' };
+  const healthEl = document.getElementById('wk-health');
+  if (healthEl) {
+    healthEl.textContent = `${health.icon} ${health.label}`;
+    healthEl.className = `wk-health ${health.cls}`;
+  }
+
+  const asc = weeklySuite.stats.slice().reverse(); // oldest → current
+  const delta = (curV, prevV, fmtFn) => {
+    if (curV == null || prevV == null) return '';
+    const d = curV - prevV;
+    return `<span class="wk-kpi-delta ${signedClass(d)}">${d >= 0 ? '▲' : '▼'} ${fmtFn(Math.abs(d))} vs sem. ant.</span>`;
+  };
+  const tile = (label, value, extra = '', spark = '', tip = '') =>
+    `<div class="wk-kpi" ${tip ? `title="${tip}"` : ''}>
+      <span class="wk-kpi-label">${label}</span>
+      <span class="wk-kpi-value">${value}</span>
+      ${extra}${spark}
+    </div>`;
+
+  grid.innerHTML = [
+    tile('Net cerrado', `<span class="${signedClass(cur.net)}">${fmt.usd(cur.net, true)}</span>`,
+      delta(cur.net, prev && prev.net, v => fmt.usd(v)), wkBarSpark(asc.map(s => s.net)),
+      'Suma del net (profit+swap+comisión) de los trades cerrados esta semana'),
+    tile('Win rate', cur.winRate == null ? '—' : fmt.pct(cur.winRate),
+      delta(cur.winRate, prev && prev.winRate, v => v.toFixed(1) + ' pp'),
+      wkBarSpark(asc.map(s => s.winRate == null ? 0 : s.winRate - 50)),
+      'Spark: win rate semanal vs 50%'),
+    tile('Profit factor', fmt.pf(cur.pf),
+      (cur.pf != null && prev && prev.pf != null) ? delta(cur.pf, prev.pf, v => v.toFixed(2)) : ''),
+    tile('Expectancy', cur.expectancy == null ? '—' : fmt.usd(cur.expectancy, true),
+      delta(cur.expectancy, prev && prev.expectancy, v => fmt.usd(v)),
+      wkBarSpark(asc.map(s => s.expectancy || 0)), 'Net promedio por trade'),
+    tile('Trades', fmt.int(cur.trades),
+      delta(cur.trades, prev && prev.trades, v => fmt.int(v)),
+      wkBarSpark(asc.map(s => s.trades))),
+    tile('Duración media', wkFmtDur(cur.avgDur)),
+    tile('Mejor trade', cur.best ? `<span class="positive">${fmt.usd(cur.best.net, true)}</span>` : '—', '', '',
+      cur.best ? `${cur.best.t.symbol} · magic ${cur.best.t.magic} · #${cur.best.t._login}` : ''),
+    tile('Peor trade', cur.worst ? `<span class="${signedClass(cur.worst.net)}">${fmt.usd(cur.worst.net, true)}</span>` : '—', '', '',
+      cur.worst ? `${cur.worst.t.symbol} · magic ${cur.worst.t.magic} · #${cur.worst.t._login}` : ''),
+  ].join('');
+
+  const mvpRow = document.getElementById('wk-mvp-row');
+  if (mvpRow) {
+    const byBot = [...cur.byBot.values()].sort((a, b) => b.net - a.net);
+    if (!byBot.length) { mvpRow.innerHTML = ''; }
+    else {
+      const mvp = byBot[0];
+      const worst = byBot[byBot.length - 1];
+      mvpRow.innerHTML =
+        `<span class="wk-mvp">🏆 MVP: <code>${mvp.label}</code> <span class="${signedClass(mvp.net)}">${fmt.usd(mvp.net, true)}</span> (${mvp.trades} trades)</span>` +
+        (worst !== mvp && worst.net < 0
+          ? `<span class="wk-mvp">🪨 Lastre: <code>${worst.label}</code> <span class="negative">${fmt.usd(worst.net, true)}</span> (${worst.trades} trades)</span>`
+          : '');
+    }
+  }
+}
+
+// --- W2 · Comparador week-over-week ---------------------------------------
+
+function renderWeekCompare() {
+  const panel = document.getElementById('weekly-compare-panel');
+  if (!panel) return;
+  const weeks = weeklySuite.weeks;
+  const stats = weeklySuite.stats;
+  if (weeks.length < 2) { panel.hidden = true; return; }
+  panel.hidden = false;
+
+  const asc = stats.slice().reverse();
+  const weeksAsc = weeks.slice().reverse();
+  const labels = weeksAsc.map(w => WK_DAY_FMT.format(w.open));
+  const nets = asc.map(s => s.net);
+
+  // Promedio de las semanas CERRADAS con actividad (excluye la actual).
+  const closed = asc.slice(0, -1).filter(s => s.trades > 0);
+  const avg = closed.length ? closed.reduce((a, s) => a + s.net, 0) / closed.length : null;
+
+  // Proyección run-rate de la semana actual (fracción transcurrida de la
+  // ventana de trading dom 17:00 → vie 17:00 NY).
+  const now = Date.now();
+  const w0 = weeks[0];
+  const frac = Math.min(1, Math.max(0, (now - w0.open) / (w0.close - w0.open)));
+  const curNet = nets[nets.length - 1];
+  const proj = (frac > 0.08 && frac < 1) ? curNet / frac : null;
+  const projData = labels.map(() => null);
+  if (proj != null && Math.abs(proj - curNet) > 0.005) {
+    projData[labels.length - 1] = curNet >= 0 ? [curNet, proj] : [proj, curNet];
+  }
+
+  wkChart('wk-compare-canvas', {
+    data: {
+      labels,
+      datasets: [
+        {
+          type: 'bar', label: 'Net cerrado', data: nets, order: 2,
+          backgroundColor: nets.map((v, i) => i === nets.length - 1
+            ? (v >= 0 ? 'rgba(61,220,151,0.9)' : 'rgba(255,107,139,0.9)')
+            : (v >= 0 ? 'rgba(61,220,151,0.45)' : 'rgba(255,107,139,0.45)')),
+          borderColor: nets.map((v, i) => i === nets.length - 1 ? '#ffc36b' : 'transparent'),
+          borderWidth: 1.5, borderRadius: 4,
+        },
+        {
+          type: 'bar', label: 'Proyección run-rate', data: projData, order: 3,
+          backgroundColor: (curNet >= 0 ? 'rgba(61,220,151,0.18)' : 'rgba(255,107,139,0.18)'),
+          borderColor: 'rgba(255,195,107,0.6)', borderWidth: 1, borderRadius: 4,
+          grouped: false,
+        },
+        {
+          type: 'line', label: 'Promedio semanas cerradas', order: 1,
+          data: labels.map(() => avg), borderColor: 'rgba(154,163,187,0.55)',
+          borderDash: [5, 5], borderWidth: 1.2, pointRadius: 0, fill: false,
+          hidden: avg == null,
+        },
+      ],
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false, animation: false,
+      onClick: (evt, elements) => {
+        if (!elements || !elements.length) return;
+        wkShowWeekDetail(labels.length - 1 - elements[0].index); // idx en stats (desc)
+      },
+      plugins: {
+        legend: { display: true, labels: { color: '#9aa3bb', boxWidth: 14, font: { size: 11 } } },
+        tooltip: {
+          callbacks: {
+            title: (items) => items.length ? `Semana del ${items[0].label}` : '',
+            label: (c) => {
+              if (c.dataset.type === 'line') return `Promedio: ${fmt.usd(c.parsed.y, true)}`;
+              if (c.datasetIndex === 1) return `Proyección run-rate: ${fmt.usd(proj, true)}`;
+              const st = asc[c.dataIndex];
+              return [`Net: ${fmt.usd(st.net, true)}`, `${st.trades} trades · WR ${st.winRate == null ? '—' : fmt.pct(st.winRate)} · PF ${fmt.pf(st.pf)}`];
+            },
+          },
+        },
+      },
+      scales: {
+        x: { ticks: { color: '#9aa3bb', maxRotation: 0, font: { size: 11 } }, grid: { display: false } },
+        y: { ticks: { color: '#9aa3bb', callback: v => fmt.usd(v) }, grid: { color: 'rgba(255,255,255,0.05)' } },
+      },
+    },
+  });
+}
+
+function wkShowWeekDetail(statIdx) {
+  const el = document.getElementById('wk-week-detail');
+  if (!el || statIdx < 0 || statIdx >= weeklySuite.stats.length) return;
+  const st = weeklySuite.stats[statIdx];
+  const w = weeklySuite.weeks[statIdx];
+  if (!st.trades) {
+    el.innerHTML = `<strong>Semana ${wkWeekLabel(w)}:</strong> sin trades cerrados.`;
+    el.hidden = false;
+    return;
+  }
+  const byBot = [...st.byBot.values()].sort((a, b) => b.net - a.net);
+  const top = byBot[0];
+  el.innerHTML = `<strong>Semana ${wkWeekLabel(w)}${statIdx === 0 ? ' (actual)' : ''}:</strong>
+    <span class="${signedClass(st.net)}">${fmt.usd(st.net, true)}</span> ·
+    ${st.trades} trades · WR ${st.winRate == null ? '—' : fmt.pct(st.winRate)} ·
+    PF ${fmt.pf(st.pf)} · expectancy ${st.expectancy == null ? '—' : fmt.usd(st.expectancy, true)} ·
+    mejor bot <code>${top.label}</code> <span class="${signedClass(top.net)}">${fmt.usd(top.net, true)}</span>`;
+  el.hidden = false;
+}
+
+// --- W1 · Reloj de trading (heatmap día × hora, hora NY) --------------------
+
+function renderWeeklyClock() {
+  const panel = document.getElementById('weekly-clock-panel');
+  const grid = document.getElementById('wk-clock-grid');
+  const pills = document.getElementById('wk-clock-pills');
+  if (!panel || !grid) return;
+  const trades = weeklySuite.trades || [];
+  const weeks = weeklySuite.weeks;
+  if (!weeks.length) { panel.hidden = true; return; }
+  panel.hidden = false;
+
+  if (pills && !pills.dataset.wired) {
+    pills.dataset.wired = '1';
+    pills.querySelectorAll('.wk-pill').forEach(p => p.addEventListener('click', () => {
+      weeklySuite.clockWeeks = Number(p.dataset.ckwin) || 1;
+      pills.querySelectorAll('.wk-pill').forEach(x => x.classList.toggle('active', x === p));
+      renderWeeklyClock();
+    }));
+  }
+
+  const n = Math.min(weeklySuite.clockWeeks, weeks.length);
+  const from = weeks[n - 1].open;
+  const to = weeks[0].open + 7 * 86400e3;
+  const agg = new Map(); // "dow_h" -> {net, count}
+  for (const t of trades) {
+    const ms = (Number(t.close_time) || 0) * 1000;
+    if (ms < from || ms >= to) continue;
+    const parts = WK_CELL_FMT.formatToParts(new Date(ms));
+    const wd = parts.find(p => p.type === 'weekday').value;
+    const h = Number(parts.find(p => p.type === 'hour').value) % 24;
+    const k = `${wd}_${h}`;
+    const e = agg.get(k) || { net: 0, count: 0 };
+    e.net += Number(t.net) || 0;
+    e.count++;
+    agg.set(k, e);
+  }
+
+  // Escala por cuantiles simétricos sobre |net| (mismo criterio que el calendario).
+  const abs = [...agg.values()].map(e => Math.abs(e.net)).filter(v => v > 0).sort((a, b) => a - b);
+  const q = p => abs.length ? abs[Math.min(abs.length - 1, Math.floor(p * abs.length))] : 1;
+  const t1 = q(0.33), t2 = q(0.66);
+  const cls = (e) => {
+    if (!e) return 'hm-empty';
+    if (e.net === 0) return 'hm-0';
+    const a = Math.abs(e.net);
+    const lvl = a <= t1 ? 1 : a <= t2 ? 2 : 3;
+    return (e.net > 0 ? 'hm-p' : 'hm-n') + lvl;
+  };
+
+  const header = ['<span class="wkc-lbl"></span>']
+    .concat(Array.from({ length: 24 }, (_, h) =>
+      `<span class="wkc-h">${h % 3 === 0 ? h : ''}</span>`));
+  const rows = WK_DOW_ORDER.map(dow => {
+    const cells = [`<span class="wkc-lbl">${WK_DOW_ES[dow]}</span>`];
+    for (let h = 0; h < 24; h++) {
+      const e = agg.get(`${dow}_${h}`);
+      const tip = `${WK_DOW_ES[dow]} ${String(h).padStart(2, '0')}:00–${String((h + 1) % 24).padStart(2, '0')}:00 NY · ${e ? `${fmt.usd(e.net, true)} · ${e.count} trade${e.count > 1 ? 's' : ''}` : 'sin trades'}`;
+      cells.push(`<span class="wkc ${cls(e)}" title="${tip}"></span>`);
+    }
+    return cells.join('');
+  });
+  grid.innerHTML = header.join('') + rows.join('');
+}
+
+// --- W3 · Waterfall de contribución ----------------------------------------
+
+function wkCurrentFloat() {
+  if (liveState.byLogin.size) return liveTotals().fl;
+  const rp = (state.snapshot && state.snapshot.real_portfolio) || {};
+  return Number(rp.total_unrealised_pnl) || 0;
+}
+
+function renderWeeklyWaterfall() {
+  const panel = document.getElementById('weekly-waterfall-panel');
+  if (!panel) return;
+  const cur = weeklySuite.stats[0];
+  if (!cur) { panel.hidden = true; return; }
+  const fl = wkCurrentFloat();
+  if (!cur.trades && Math.abs(fl) < 0.005) { panel.hidden = true; return; }
+  panel.hidden = false;
+
+  // Bots ordenados por contribución desc; cola >10 agrupada en "Otros".
+  let byBot = [...cur.byBot.values()].sort((a, b) => b.net - a.net);
+  if (byBot.length > 10) {
+    const tail = byBot.slice(10);
+    byBot = byBot.slice(0, 10);
+    byBot.push({
+      label: `Otros (${tail.length} bots)`,
+      net: tail.reduce((a, e) => a + e.net, 0),
+      trades: tail.reduce((a, e) => a + e.trades, 0),
+    });
+  }
+
+  const labels = [];
+  const data = [];
+  const colors = [];
+  let cum = 0;
+  for (const e of byBot) {
+    labels.push(e.label);
+    data.push(e.net >= 0 ? [cum, cum + e.net] : [cum + e.net, cum]);
+    colors.push(e.net >= 0 ? 'rgba(61,220,151,0.75)' : 'rgba(255,107,139,0.75)');
+    cum += e.net;
+  }
+  weeklySuite.wfBase = cum;
+  labels.push('Flotante ahora');
+  data.push(fl >= 0 ? [cum, cum + fl] : [cum + fl, cum]);
+  colors.push(fl >= 0 ? 'rgba(61,220,151,0.35)' : 'rgba(255,107,139,0.35)');
+  const total = cum + fl;
+  labels.push('Resultado semana');
+  data.push(total >= 0 ? [0, total] : [total, 0]);
+  colors.push('rgba(124,156,255,0.8)');
+
+  const totalEl = document.getElementById('wk-waterfall-total');
+  if (totalEl) totalEl.innerHTML =
+    `cerrado <span class="${signedClass(cum)}">${fmt.usd(cum, true)}</span> + flotante <span class="${signedClass(fl)}">${fmt.usd(fl, true)}</span> = <strong class="${signedClass(total)}">${fmt.usd(total, true)}</strong>`;
+
+  const botsMeta = byBot; // para tooltips
+  wkChart('wk-waterfall-canvas', {
+    type: 'bar',
+    data: { labels, datasets: [{ data, backgroundColor: colors, borderRadius: 4, borderSkipped: false }] },
+    options: {
+      responsive: true, maintainAspectRatio: false, animation: false,
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          callbacks: {
+            label: (c) => {
+              const i = c.dataIndex;
+              if (i < botsMeta.length) return `${fmt.usd(botsMeta[i].net, true)} · ${botsMeta[i].trades} trades`;
+              if (i === labels.length - 2) return `Flotante: ${fmt.usd(wkCurrentFloat(), true)}`;
+              return `Resultado de la semana: ${fmt.usd(weeklySuite.wfBase + wkCurrentFloat(), true)}`;
+            },
+          },
+        },
+      },
+      scales: {
+        x: { ticks: { color: '#9aa3bb', maxRotation: 45, minRotation: 30, font: { size: 10 } }, grid: { display: false } },
+        y: { ticks: { color: '#9aa3bb', callback: v => fmt.usd(v) }, grid: { color: 'rgba(255,255,255,0.05)' } },
+      },
+    },
+  });
+}
+
+// --- W4 · Pulso de riesgo intra-semana -------------------------------------
+
+async function renderWeeklyRiskPulse() {
+  const panel = document.getElementById('weekly-risk-panel');
+  if (!panel) return;
+  try {
+    if (!warWeeklyEnsureWindow()) { panel.hidden = true; return; }
+    if (!warWeekly.hist.length && !warWeekly.fetching) await warWeeklyFetch();
+  } catch (e) { console.warn('risk pulse fetch failed', e); }
+  const series = warWeeklySeries();
+  if (series.length < 3) { panel.hidden = true; return; }
+  panel.hidden = false;
+
+  let peak = -Infinity;
+  let maxDD = { v: 0, x: null, pct: 0 };
+  const dd = series.map(p => {
+    peak = Math.max(peak, p.y);
+    const v = p.y - peak; // ≤ 0
+    if (v < maxDD.v) maxDD = { v, x: p.x, pct: peak ? (v / peak) * 100 : 0 };
+    return { x: p.x, y: v };
+  });
+
+  const chips = document.getElementById('wk-risk-chips');
+  if (chips) {
+    const net = weeklySuite.stats[0] ? weeklySuite.stats[0].net : 0;
+    const ratio = maxDD.v < -0.005 ? net / Math.abs(maxDD.v) : null;
+    let mg = 0;
+    liveState.byLogin.forEach(r => { mg += Number(r.margin) || 0; });
+    const eqNow = liveTotals().eq;
+    const rp = (state.snapshot && state.snapshot.real_portfolio) || {};
+    if (!liveState.byLogin.size) mg = Number(rp.total_open_margin) || 0;
+    const mgPct = eqNow > 0 ? (mg / eqNow) * 100 : null;
+    chips.innerHTML = [
+      `<span class="wk-chip wk-chip-dd">Max DD semana: <strong class="negative">${fmt.usd(maxDD.v, true)}</strong> (${Math.abs(maxDD.pct).toFixed(2)}%)${maxDD.x ? ` · ${WAR_LV_FMT.format(maxDD.x)} LV` : ''}</span>`,
+      ratio != null
+        ? `<span class="wk-chip" title="Net cerrado de la semana dividido por el max drawdown intra-semana — cuánto ingreso costó cada $1 de dolor">Costo del ingreso: <strong class="${signedClass(ratio)}">${ratio.toFixed(2)}</strong> $net / $DD</span>`
+        : '',
+      mgPct != null
+        ? `<span class="wk-chip" id="wk-chip-margin">Margen usado ahora: <strong>${fmt.usd(mg)}</strong> (${mgPct.toFixed(1)}% del equity)</span>`
+        : '',
+    ].filter(Boolean).join('');
+  }
+
+  const dayTicks = [];
+  for (let t = warWeekly.weekOpen; t <= warWeekly.weekClose; t += 86400e3) dayTicks.push(t);
+
+  wkChart('wk-risk-canvas', {
+    type: 'line',
+    data: {
+      datasets: [{
+        label: 'Drawdown vs pico de la semana',
+        data: dd,
+        borderColor: '#ff6b8b',
+        backgroundColor: 'rgba(255,107,139,0.16)',
+        fill: { target: { value: 0 } },
+        borderWidth: 1.8,
+        tension: 0.15,
+        pointRadius: (ctx) => (dd[ctx.dataIndex] && dd[ctx.dataIndex].x === maxDD.x && maxDD.v < 0) ? 4 : 0,
+        pointBackgroundColor: '#ffc36b',
+        pointBorderColor: '#ffc36b',
+      }],
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false, animation: false,
+      interaction: { mode: 'nearest', axis: 'x', intersect: false },
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          callbacks: {
+            title: (items) => items.length ? WAR_LV_FMT.format(items[0].parsed.x) + ' (LV)' : '',
+            label: (c) => `DD: ${fmt.usd(c.parsed.y, true)}`,
+          },
+        },
+      },
+      scales: {
+        x: {
+          type: 'linear', min: warWeekly.weekOpen, max: warWeekly.weekClose,
+          grid: { color: 'rgba(255,255,255,0.05)' },
+          afterBuildTicks: (axis) => { axis.ticks = dayTicks.map(v => ({ value: v })); },
+          ticks: { color: '#9aa3bb', callback: (v) => WAR_LV_TICK.format(v) },
+        },
+        y: {
+          max: 0, grace: '5%',
+          grid: { color: 'rgba(255,255,255,0.05)' },
+          ticks: { color: '#9aa3bb', callback: (v) => fmt.usd(v) },
+        },
+      },
+    },
+  });
+}
+
+// --- live tick (throttled ~15s): flotante del waterfall + chip de margen ----
+
+function weeklySuiteLiveTick() {
+  const now = Date.now();
+  if (now - weeklySuite.lastLiveTick < 15000) return;
+  weeklySuite.lastLiveTick = now;
+  try {
+    const chart = weeklySuite.charts['wk-waterfall-canvas'];
+    const panel = document.getElementById('weekly-waterfall-panel');
+    if (chart && panel && !panel.hidden) {
+      const fl = wkCurrentFloat();
+      const cum = weeklySuite.wfBase;
+      const data = chart.data.datasets[0].data;
+      const colors = chart.data.datasets[0].backgroundColor;
+      const iFl = data.length - 2;
+      data[iFl] = fl >= 0 ? [cum, cum + fl] : [cum + fl, cum];
+      colors[iFl] = fl >= 0 ? 'rgba(61,220,151,0.35)' : 'rgba(255,107,139,0.35)';
+      const total = cum + fl;
+      data[data.length - 1] = total >= 0 ? [0, total] : [total, 0];
+      chart.update('none');
+      const totalEl = document.getElementById('wk-waterfall-total');
+      if (totalEl) totalEl.innerHTML =
+        `cerrado <span class="${signedClass(cum)}">${fmt.usd(cum, true)}</span> + flotante <span class="${signedClass(fl)}">${fmt.usd(fl, true)}</span> = <strong class="${signedClass(total)}">${fmt.usd(total, true)}</strong>`;
+    }
+    const mgChip = document.getElementById('wk-chip-margin');
+    if (mgChip && liveState.byLogin.size) {
+      let mg = 0;
+      liveState.byLogin.forEach(r => { mg += Number(r.margin) || 0; });
+      const eqNow = liveTotals().eq;
+      if (eqNow > 0) mgChip.innerHTML = `Margen usado ahora: <strong>${fmt.usd(mg)}</strong> (${((mg / eqNow) * 100).toFixed(1)}% del equity)`;
+    }
+  } catch (e) { /* nunca romper el live loop */ }
 }

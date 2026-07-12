@@ -10,7 +10,7 @@
 <link rel="manifest" href="/manifest.json">
 <meta name="theme-color" content="#0d0b1a">
 <link rel="apple-touch-icon" href="/icon-192.png">
-<link rel="stylesheet" href="styles.css?v=20260707d">
+<link rel="stylesheet" href="styles.css?v=20260711a">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500;700&display=swap" rel="stylesheet">
@@ -238,6 +238,62 @@
       </div>
       <div class="race-track" id="race-track"></div>
       <div class="race-date" id="race-date"></div>
+    </div>
+
+    <!-- W1-W5 · Weekly Suite: analítica semanal de las cuentas reales -->
+    <div id="weekly-suite">
+
+      <!-- W5 · Scorecard ejecutivo de la semana -->
+      <div class="real-panel" id="weekly-scorecard-panel" hidden>
+        <div class="real-daily-head">
+          <h3 class="panel-title">🏅 Scorecard de la semana <span class="wk-health" id="wk-health"></span></h3>
+          <span class="wk-range-note" id="wk-scorecard-range"></span>
+        </div>
+        <div class="wk-kpi-grid" id="wk-kpi-grid"></div>
+        <div class="wk-mvp-row" id="wk-mvp-row"></div>
+      </div>
+
+      <!-- W2 · Comparador week-over-week -->
+      <div class="real-panel" id="weekly-compare-panel" hidden>
+        <div class="real-daily-head">
+          <h3 class="panel-title">📊 Semana vs semana <span class="wk-subtitle">net cerrado · últimas 12 semanas · click en una barra para el detalle</span></h3>
+        </div>
+        <div class="wk-chart-wrap"><canvas id="wk-compare-canvas"></canvas></div>
+        <div class="wk-week-detail" id="wk-week-detail" hidden></div>
+      </div>
+
+      <!-- W1 · Reloj de trading día × hora -->
+      <div class="real-panel" id="weekly-clock-panel" hidden>
+        <div class="real-daily-head">
+          <h3 class="panel-title">🕐 Reloj de trading <span class="wk-subtitle">P/L cerrado por día × hora · hora New York</span></h3>
+          <div class="wk-clock-pills" id="wk-clock-pills">
+            <button type="button" class="pill wk-pill active" data-ckwin="1">Esta semana</button>
+            <button type="button" class="pill wk-pill" data-ckwin="4">4 semanas</button>
+            <button type="button" class="pill wk-pill" data-ckwin="12">12 semanas</button>
+          </div>
+        </div>
+        <div class="wk-clock-scroll"><div class="wk-clock-grid" id="wk-clock-grid"></div></div>
+        <div class="heatmap-legend">Pérdida <span class="hm-cell hm-n3"></span><span class="hm-cell hm-n2"></span><span class="hm-cell hm-n1"></span><span class="hm-cell hm-0"></span><span class="hm-cell hm-p1"></span><span class="hm-cell hm-p2"></span><span class="hm-cell hm-p3"></span> Ganancia <span class="wk-session-note">· Sesiones (NY): Asia 18–03 · Londres 03–11 · Nueva York 08–17</span></div>
+      </div>
+
+      <!-- W3 · Waterfall de contribución semanal -->
+      <div class="real-panel" id="weekly-waterfall-panel" hidden>
+        <div class="real-daily-head">
+          <h3 class="panel-title">💧 Anatomía de la semana <span class="wk-subtitle">quién construyó el resultado (net cerrado por bot + flotante)</span></h3>
+          <span class="wk-range-note" id="wk-waterfall-total"></span>
+        </div>
+        <div class="wk-chart-wrap"><canvas id="wk-waterfall-canvas"></canvas></div>
+      </div>
+
+      <!-- W4 · Pulso de riesgo intra-semana -->
+      <div class="real-panel" id="weekly-risk-panel" hidden>
+        <div class="real-daily-head">
+          <h3 class="panel-title">❤️ Pulso de riesgo de la semana <span class="wk-subtitle">drawdown bajo el pico de equity intra-semana</span></h3>
+        </div>
+        <div class="wk-risk-chips" id="wk-risk-chips"></div>
+        <div class="wk-chart-wrap"><canvas id="wk-risk-canvas"></canvas></div>
+      </div>
+
     </div>
 
     <div class="real-panel">
@@ -954,6 +1010,6 @@
   <div class="war-room-footer" id="war-room-mover">—</div>
 </div>
 
-<script defer src="app.js?v=20260707d"></script>
+<script defer src="app.js?v=20260711a"></script>
 </body>
 </html>
