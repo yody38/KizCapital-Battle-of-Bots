@@ -2271,7 +2271,16 @@ function tribunalCellHtml(b) {
   if (stale.length) {
     parts.push(`<span class="chip chip-danger" title="Veredicto posiblemente OBSOLETO para este bot — cambio material desde ${t.run_date}: ${stale.join(' · ').replace(/"/g, "'")}">⚠ obsoleto</span>`);
   }
-  return parts.join(' ') || '<span style="color:var(--text-dim)">—</span>';
+  if (!parts.length) return '<span style="color:var(--text-dim)">—</span>';
+  // Operaciones de este caballo del podio: totales + ganadas/perdidas (mismos
+  // campos que las columnas Trades/Gan./Perd. — perdidas = trades - wins).
+  let opsLine = '';
+  if (t && !t.is_suplente && t.rank != null) {
+    const wins = b.wins || 0;
+    const losses = (b.trades || 0) - wins;
+    opsLine = `<div style="font-size:.82em;margin-top:3px;white-space:nowrap" title="Operaciones cerradas de este bot · WR ${fmt.pct(b.win_rate_pct)}">${fmt.int(b.trades)} ops · <span class="profit-positive">${fmt.int(wins)} G</span> / <span class="profit-negative">${fmt.int(losses)} P</span></div>`;
+  }
+  return `<div>${parts.join(' ')}</div>${opsLine}`;
 }
 
 function rachaCellHtml(b) {
@@ -2308,22 +2317,6 @@ function renderTribunalStrip() {
     const gCls = pass ? 'background:rgba(22,199,132,.12);color:#16c784' : 'background:rgba(234,57,67,.12);color:#ea3943';
     const vio = (cg.violations || []).map(v => `${v.challenger} domina a ${v.winner} en ${v.beats_on}/${v.of} ejes (${(v.axes || []).join(', ')})`).join(' · ').replace(/"/g, "'");
     chips.push(`<span class="chip" style="${gCls};font-weight:600" title="Gate de dominancia del tribunal (12 ejes núcleo, misma regla que verify_verdict.py vía gate_lib) corrido sobre el top-3 READY en CADA ciclo de 30 min · cohorte viva: ${cg.cohort_n || '—'} bots. ${pass ? 'Ningún retador con evidencia comparable domina al top-3.' : 'REJECT — señal temprana de que el próximo tribunal cambiará el podio: ' + vio}">⚖️ Gate continuo ${cg.verdict}${pass ? '' : ` (${(cg.violations || []).length})`}</span>`);
-  }
-  // Operaciones por caballo del podio: totales + ganadas/perdidas (mismos campos
-  // que las columnas Trades/Gan./Perd. de la tabla — perdidas = trades - wins).
-  const botsById = {};
-  for (const b of (state.snapshot.bots || [])) {
-    if (b.magic && !botsById[`${b.vps}:${b.account_login}:${b.magic}`]) {
-      botsById[`${b.vps}:${b.account_login}:${b.magic}`] = b;
-    }
-  }
-  const podiumSorted = [...(tm.podium || [])].sort((a, b) => (a.rank || 9) - (b.rank || 9));
-  for (const p of podiumSorted) {
-    const b = botsById[p.id];
-    if (!b) continue;
-    const wins = b.wins || 0;
-    const losses = (b.trades || 0) - wins;
-    chips.push(`<span class="chip" style="font-weight:600" title="${p.id} · ${(b.symbols || []).join(',') || '—'} · comp ${p.comp != null ? p.comp : '—'} · WR ${fmt.pct(b.win_rate_pct)} · net ${fmt.usd(b.net_profit, true)}">${TRIBUNAL_MEDALS[p.rank] || '#' + p.rank} ${b.magic} · ${fmt.int(b.trades)} ops · <span class="profit-positive">${fmt.int(wins)} G</span> / <span class="profit-negative">${fmt.int(losses)} P</span></span>`);
   }
   strip.innerHTML = chips.join('');
   strip.hidden = false;

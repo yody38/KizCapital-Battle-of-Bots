@@ -234,21 +234,24 @@ class Audit {
       A.assert(stripText.includes(tm.continuous_gate.verdict),
         `strip muestra gate continuo ${tm.continuous_gate.verdict}`);
     }
-    // Chips de operaciones por caballo del podio: magic + trades + G/P del snapshot
-    const botsByIdAudit = {};
-    for (const b of (snap.bots || [])) {
-      const k = `${b.vps}:${b.account_login}:${b.magic}`;
-      if (b.magic && !botsByIdAudit[k]) botsByIdAudit[k] = b;
-    }
+    // Operaciones G/P en la celda TRIBUNAL de cada fila del podio (no en el strip).
+    // El READY pill queda activo tras los clicks previos → filas del podio visibles.
+    await ev(ws, `document.querySelector('#candidates-status-pills .pill[data-status="READY"]').click()`);
+    await wait(150);
+    const int = n => Number(n || 0).toLocaleString('en-US'); // = fmt.int de app.js
     for (const p of (tm.podium || [])) {
-      const b = botsByIdAudit[p.id];
+      const [vps, login, magic] = p.id.split(':');
+      const b = (snap.bots || []).find(x => x.vps === vps && String(x.account_login) === login && String(x.magic) === magic);
       if (!b) continue;
       const wins = b.wins || 0;
       const losses = (b.trades || 0) - wins;
-      const int = n => Number(n || 0).toLocaleString('en-US'); // = fmt.int de app.js
-      const expected = `${b.magic} · ${int(b.trades)} ops · ${int(wins)} G / ${int(losses)} P`;
-      A.assert(stripText.includes(expected),
-        `strip ops podio #${p.rank}: "${expected}"`);
+      const expected = `${int(b.trades)} ops · ${int(wins)} G / ${int(losses)} P`;
+      const cellText = await ev(ws, `(() => {
+        const r = [...document.querySelectorAll('#candidates-tbody tr')].find(r => r.dataset.magic === ${JSON.stringify(magic)});
+        return r ? r.children[4].textContent.replace(/\\s+/g,' ').trim() : '';
+      })()`);
+      A.assert(cellText.includes(expected),
+        `celda TRIBUNAL fila magic ${magic} muestra ops "${expected}"`, `celda: "${cellText}"`);
     }
     // READY pill quedó activo tras los clicks de arriba → sellos ✓✓ visibles = bots confirmed
     await ev(ws, `document.querySelector('#candidates-status-pills .pill[data-status="READY"]').click()`);
