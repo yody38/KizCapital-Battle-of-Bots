@@ -199,24 +199,52 @@ class Audit {
   const watchCount = counts.WATCH || 0;
   console.log(`     status counts: READY=${readyCount} NEAR=${nearCount} WATCH=${watchCount} NO=${counts.NO || 0}`);
 
+  // Caps from backend rank_caps (single source of truth — mirrors renderCandidates)
+  const rankCaps = (snap.promotion_meta && snap.promotion_meta.rank_caps) || {};
+  const capReady = rankCaps.READY ?? 3, capNear = rankCaps.NEAR ?? 5, capWatch = rankCaps.WATCH ?? 15;
+
   // READY pill is default active
   const readyRows = await ev(ws, `document.querySelectorAll('#candidates-tbody tr').length`);
-  const expectedReady = Math.min(readyCount, 5);
-  A.assert(readyRows === expectedReady, `READY pill: ${readyRows} filas = min(${readyCount}, 5)`);
+  const expectedReady = Math.min(readyCount, capReady);
+  A.assert(readyRows === expectedReady, `READY pill: ${readyRows} filas = min(${readyCount}, ${capReady})`);
 
   // Click NEAR
   await ev(ws, `document.querySelector('#candidates-status-pills .pill[data-status="NEAR"]').click()`);
   await wait(150);
   const nearRows = await ev(ws, `document.querySelectorAll('#candidates-tbody tr').length`);
-  const expectedNear = Math.min(nearCount, 8);
-  A.assert(nearRows === expectedNear, `NEAR pill: ${nearRows} filas = min(${nearCount}, 8)`);
+  const expectedNear = Math.min(nearCount, capNear);
+  A.assert(nearRows === expectedNear, `NEAR pill: ${nearRows} filas = min(${nearCount}, ${capNear})`);
 
   // Click WATCH
   await ev(ws, `document.querySelector('#candidates-status-pills .pill[data-status="WATCH"]').click()`);
   await wait(150);
   const watchRows = await ev(ws, `document.querySelectorAll('#candidates-tbody tr').length`);
-  const expectedWatch = Math.min(watchCount, 10);
-  A.assert(watchRows === expectedWatch, `WATCH pill: ${watchRows} filas = min(${watchCount}, 10)`);
+  const expectedWatch = Math.min(watchCount, capWatch);
+  A.assert(watchRows === expectedWatch, `WATCH pill: ${watchRows} filas = min(${watchCount}, ${capWatch})`);
+
+  // ----- Ultra Tribunal strip + sello ✓✓ (solo si el snapshot trae tribunal_meta) -----
+  if (snap.tribunal_meta) {
+    const tm = snap.tribunal_meta;
+    const stripVisible = await ev(ws, `!document.getElementById('tribunal-strip')?.hidden`);
+    A.assert(stripVisible, `tribunal-strip visible (veredicto ${tm.run_date} · ${tm.verdict_state})`);
+    const stripText = await ev(ws, `document.getElementById('tribunal-strip')?.textContent || ''`);
+    A.assert(stripText.includes(`${tm.concordance.matches}/${tm.concordance.of}`),
+      `strip muestra concordancia ${tm.concordance.matches}/${tm.concordance.of}`);
+    if (tm.continuous_gate && tm.continuous_gate.verdict) {
+      A.assert(stripText.includes(tm.continuous_gate.verdict),
+        `strip muestra gate continuo ${tm.continuous_gate.verdict}`);
+    }
+    // READY pill quedó activo tras los clicks de arriba → sellos ✓✓ visibles = bots confirmed
+    await ev(ws, `document.querySelector('#candidates-status-pills .pill[data-status="READY"]').click()`);
+    await wait(150);
+    const sealRows = await ev(ws,
+      `[...document.querySelectorAll('#candidates-tbody tr')].filter(r => r.textContent.includes('✓✓')).length`);
+    const confirmedReady = (snap.bots || []).filter(b => b.double_signature === 'confirmed').length;
+    A.assert(sealRows === confirmedReady,
+      `sellos ✓✓ en filas READY (${sealRows}) = bots double_signature confirmed (${confirmedReady})`);
+  } else {
+    console.log('     tribunal_meta ausente — fail-open OK (sin asserts de tribunal)');
+  }
 
   // Verify each rendered row has a confidence chip + click-able data attrs
   await ev(ws, `document.querySelector('#candidates-status-pills .pill[data-status="READY"]').click()`);

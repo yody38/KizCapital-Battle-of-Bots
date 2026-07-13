@@ -2230,11 +2230,95 @@ function fmtSigned(n, digits = 2) {
   return (v > 0 ? '+' : '') + v.toFixed(digits);
 }
 
+// --- 🏛️ Ultra Tribunal — sincronización veredicto ↔ candidatos ------------
+// Visual-only: el veredicto NUNCA reordena asientos. Doble firma = READY
+// (gating cuantitativo, cada 30 min) ∧ podio del tribunal (50 pares
+// adversariales, semanal). Backend: apply_tribunal() en post_merge.py.
+
+const TRIBUNAL_MEDALS = { 1: '🥇', 2: '🥈', 3: '🥉' };
+
+function tribunalMeta() {
+  return (state.snapshot && state.snapshot.tribunal_meta) || null;
+}
+
+function tribunalCellHtml(b) {
+  const tm = tribunalMeta();
+  if (!tm) return '<span style="color:var(--text-dim)">—</span>';
+  const t = b.tribunal;
+  const parts = [];
+  if (t && !t.is_suplente && t.rank != null) {
+    const medal = TRIBUNAL_MEDALS[t.rank] || `#${t.rank}`;
+    const dis = (t.dissents || []).length;
+    parts.push(`<span style="white-space:nowrap" title="Podio del Ultra Tribunal ${t.run_date} · rank #${t.rank} · comp ${t.comp != null ? t.comp.toFixed(1) : '—'} · gate ${t.gate || '—'}${dis ? ` · ${dis} disenso(s) registrado(s) — ver modal` : ''}">${medal}</span>`);
+  } else if (t && t.is_suplente) {
+    parts.push(`<span style="white-space:nowrap;color:var(--text-dim)" title="Suplente del tribunal ${t.run_date}: ${String(t.note || '').replace(/"/g, "'")}">🎗 supl.</span>`);
+  }
+  const ds = b.double_signature;
+  if (ds === 'confirmed') {
+    if (tm.verdict_state === 'vigente') {
+      parts.push(`<span class="chip" style="background:rgba(22,199,132,.15);color:#16c784;font-weight:700" title="DOBLE FIRMA: READY (gating cuantitativo, cada 30 min) ∧ podio del Ultra Tribunal (${tm.run_date}). Dos vías independientes coinciden — candidato sí-o-sí a cuenta real (veto humano final).">✓✓ SUBIR</span>`);
+    } else if (tm.verdict_state === 'viejo') {
+      parts.push(`<span class="chip chip-warn" title="READY ∧ podio, pero el veredicto tiene ${tm.age_days} días (>${tm.fresh_days}d): relanzar el tribunal para re-confirmar la doble firma">✓✓ ${tm.age_days}d</span>`);
+    } else {
+      parts.push(`<span class="chip" style="color:var(--text-dim)" title="READY ∧ podio, pero el veredicto EXPIRÓ (${tm.age_days}d > ${tm.expired_days}d): la doble firma ya no vale — relanzar tribunal">✓✓ expirado</span>`);
+    }
+  } else if (ds === 'quant_only') {
+    parts.push(`<span class="chip chip-warn" title="READY por score, pero NO está en el podio del tribunal ${tm.run_date} — falta la segunda firma (adversarial)">✓· solo quant</span>`);
+  } else if (ds === 'tribunal_only') {
+    parts.push(`<span class="chip chip-warn" title="En el podio del tribunal ${tm.run_date} pero HOY no es READY — divergencia que investigar">🏛️ sin READY</span>`);
+  }
+  const stale = (t && t.stale_reasons) || [];
+  if (stale.length) {
+    parts.push(`<span class="chip chip-danger" title="Veredicto posiblemente OBSOLETO para este bot — cambio material desde ${t.run_date}: ${stale.join(' · ').replace(/"/g, "'")}">⚠ obsoleto</span>`);
+  }
+  return parts.join(' ') || '<span style="color:var(--text-dim)">—</span>';
+}
+
+function rachaCellHtml(b) {
+  const h = b.tribunal_history;
+  const pod = h ? h.consecutive_podiums : 0;
+  const days = b.ready_streak_days;
+  const bits = [];
+  if (pod > 0) {
+    const path = (h.ranks || []).map(r => '#' + r.rank).join('→');
+    bits.push(`<span title="${pod} veredicto(s) consecutivo(s) en el podio (${h.podium_appearances} total, 1º ${h.first_podium}) · trayectoria: ${path}">🏛️×${pod}</span>`);
+  }
+  if (days != null) bits.push(`<span title="${days} día(s) consecutivo(s) en READY según el ledger append-only (candidates_history)">${days}d</span>`);
+  return bits.length ? `<span style="white-space:nowrap">${bits.join(' · ')}</span>` : '<span style="color:var(--text-dim)">—</span>';
+}
+
+function renderTribunalStrip() {
+  const strip = document.getElementById('tribunal-strip');
+  if (!strip) return;
+  const tm = tribunalMeta();
+  if (!tm) { strip.hidden = true; return; }
+  const c = tm.concordance || {};
+  const chips = [];
+  const ageCls = tm.verdict_state === 'vigente' ? 'background:rgba(22,199,132,.12);color:#16c784'
+    : tm.verdict_state === 'viejo' ? 'background:rgba(240,160,32,.12);color:#f0a020'
+    : 'background:rgba(234,57,67,.12);color:#ea3943';
+  chips.push(`<span class="chip" style="${ageCls};font-weight:600" title="Último veredicto del Ultra Tribunal (50 pares adversariales): ${tm.run_date} · estado ${tm.verdict_state} (vigente ≤${tm.fresh_days}d, expira >${tm.expired_days}d)${tm.verdict_state !== 'vigente' ? ' — relanzar tribunal' : ''}">🏛️ Veredicto hace ${tm.age_days}d · ${tm.verdict_state}</span>`);
+  const full = c.matches === c.of;
+  const concCls = full ? 'background:rgba(22,199,132,.12);color:#16c784' : 'background:rgba(240,160,32,.12);color:#f0a020';
+  const diverge = !full ? ` · divergen: ${(c.podium_not_ready || []).join(', ') || '—'}` : '';
+  chips.push(`<span class="chip" style="${concCls};font-weight:600" title="¿Cuántos de los READY actuales coinciden con el podio del tribunal? READY sin podio: ${(c.ready_not_podium || []).join(', ') || 'ninguno'}. Podio sin READY: ${(c.podium_not_ready || []).join(', ') || 'ninguno'}.">🤝 Concordancia tribunal ${c.matches}/${c.of}${diverge}</span>`);
+  const cg = tm.continuous_gate || {};
+  if (cg.verdict) {
+    const pass = cg.verdict === 'PASS';
+    const gCls = pass ? 'background:rgba(22,199,132,.12);color:#16c784' : 'background:rgba(234,57,67,.12);color:#ea3943';
+    const vio = (cg.violations || []).map(v => `${v.challenger} domina a ${v.winner} en ${v.beats_on}/${v.of} ejes (${(v.axes || []).join(', ')})`).join(' · ').replace(/"/g, "'");
+    chips.push(`<span class="chip" style="${gCls};font-weight:600" title="Gate de dominancia del tribunal (12 ejes núcleo, misma regla que verify_verdict.py vía gate_lib) corrido sobre el top-3 READY en CADA ciclo de 30 min · cohorte viva: ${cg.cohort_n || '—'} bots. ${pass ? 'Ningún retador con evidencia comparable domina al top-3.' : 'REJECT — señal temprana de que el próximo tribunal cambiará el podio: ' + vio}">⚖️ Gate continuo ${cg.verdict}${pass ? '' : ` (${(cg.violations || []).length})`}</span>`);
+  }
+  strip.innerHTML = chips.join('');
+  strip.hidden = false;
+}
+
 function renderCandidates() {
   const tbody = document.getElementById('candidates-tbody');
   const empty = document.getElementById('candidates-empty');
   const counter = document.getElementById('candidates-count');
   if (!tbody) return;
+  renderTribunalStrip();
   // Pool: solo bots candidatos reales (READY/NEAR/WATCH) — NO no se muestra (no es candidato).
   const CANDIDATE_STATUSES = new Set(['READY', 'NEAR', 'WATCH']);
   let pool = (state.snapshot.bots || [])
@@ -2279,6 +2363,8 @@ function renderCandidates() {
         <td><span class="rank-badge">${i + 1}</span></td>
         <td class="num"><strong style="color:var(--accent)">${b.promotion_score.toFixed(1)}</strong> ${confChip}</td>
         <td>${statusBadge(b.promotion_status)} ${provChip} ${freshChip}</td>
+        <td>${tribunalCellHtml(b)}</td>
+        <td class="num">${rachaCellHtml(b)}</td>
         <td>${domCell}</td>
         <td>${qualityBadge(b)}</td>
         <td class="mono">${b.magic}</td>
@@ -3207,6 +3293,44 @@ function renderScorePanel(b) {
     : b.promotion_status === 'WATCH'
     ? `<div class="score-verdict status-watch"><strong>👀 WATCH</strong> — observar, score ${b.promotion_score.toFixed(1)}</div>`
     : `<div class="score-verdict status-no"><strong>❌ NO</strong> — no califica${fails.length ? ': ' + fails.join(', ') : ''}</div>`;
+  // 🏛️ Ultra Tribunal block — veredicto adversarial + doble firma + tenure.
+  const tmModal = tribunalMeta();
+  const trib = b.tribunal || null;
+  let tribunalBlock = '';
+  if (tmModal && (trib || b.double_signature || b.tribunal_history)) {
+    const ds = b.double_signature;
+    const dsLine = ds === 'confirmed'
+      ? (tmModal.verdict_state === 'vigente'
+        ? `<div class="score-verdict status-ready"><strong>✓✓ SUBIR</strong> — doble firma: READY (cuantitativo) ∧ podio del tribunal ${tmModal.run_date}. Dos vías independientes coinciden (veto humano final).</div>`
+        : `<div class="score-verdict status-watch"><strong>✓✓ con veredicto ${tmModal.verdict_state}</strong> — READY ∧ podio, pero el veredicto tiene ${tmModal.age_days} días. Relanzar el tribunal para re-confirmar.</div>`)
+      : ds === 'quant_only'
+      ? `<div class="score-verdict status-watch"><strong>✓· solo quant</strong> — READY por score pero sin podio en el tribunal ${tmModal.run_date}: falta la segunda firma adversarial.</div>`
+      : ds === 'tribunal_only'
+      ? `<div class="score-verdict status-watch"><strong>🏛️ sin READY</strong> — en el podio del tribunal pero hoy no es READY. Divergencia que investigar.</div>`
+      : '';
+    const podLine = trib && !trib.is_suplente && trib.rank != null
+      ? `<p style="margin:8px 0 0">${TRIBUNAL_MEDALS[trib.rank] || '#' + trib.rank} <strong>Rank #${trib.rank}</strong> del podio · composite ${trib.comp != null ? trib.comp.toFixed(1) : '—'}/100 · gate determinístico ${trib.gate || '—'} · validador adversarial ${trib.validator_holds ? 'sostiene el veredicto' : '—'}</p>`
+      : trib && trib.is_suplente
+      ? `<p style="margin:8px 0 0">🎗 <strong>Suplente</strong> del tribunal · comp ${trib.comp != null ? trib.comp.toFixed(1) : '—'} — ${trib.note || ''}</p>`
+      : '';
+    const staleLine = trib && (trib.stale_reasons || []).length
+      ? `<div class="score-verdict status-no" style="margin-top:8px"><strong>⚠ Veredicto posiblemente obsoleto</strong> — cambio material desde ${trib.run_date}: ${trib.stale_reasons.join(' · ')}</div>`
+      : '';
+    const h = b.tribunal_history;
+    const tenureLine = h
+      ? `<p style="margin:8px 0 0">📜 <strong>Tenure:</strong> ${h.consecutive_podiums} podio(s) consecutivo(s) · ${h.podium_appearances} aparición(es) desde ${h.first_podium} · trayectoria ${(h.ranks || []).map(r => `#${r.rank} (${r.run_date})`).join(' → ')}${b.ready_streak_days != null ? ` · ${b.ready_streak_days} día(s) seguidos en READY` : ''}</p>`
+      : '';
+    const dissents = (trib && trib.dissents || []);
+    const dissentsHtml = dissents.length
+      ? `<p style="margin:10px 0 4px"><strong>Disensos y riesgos registrados que mencionan a este bot:</strong></p><ul class="gating-list">${dissents.map(d => `<li>⚠ ${d}</li>`).join('')}</ul>`
+      : '';
+    const recLine = trib && !trib.is_suplente && tmModal.recommendation
+      ? `<p style="margin:10px 0 0;color:var(--muted)"><strong>Recomendación del Domain Outsider:</strong> ${tmModal.recommendation}</p>`
+      : '';
+    tribunalBlock = `
+      <h4 class="panel-title" style="margin-top:18px">🏛️ Ultra Tribunal <small style="font-weight:400;color:var(--muted)">(veredicto ${tmModal.run_date} · ${tmModal.verdict_state} · concordancia ${tmModal.concordance.matches}/${tmModal.concordance.of} · visual-only, nunca mueve asientos)</small></h4>
+      ${dsLine}${podLine}${staleLine}${tenureLine}${dissentsHtml}${recLine}`;
+  }
   // Dominance block — ¿es uno de los caballos? (top-25% en cada eje + no dominado).
   const dom = b.dominance || null;
   let dominanceBlock = '';
@@ -3286,6 +3410,7 @@ function renderScorePanel(b) {
       <div class="score-big">${(b.promotion_score ?? 0).toFixed(1)}<span class="score-big-suffix">/100</span></div>
       ${verdict}
     </div>
+    ${tribunalBlock}
     ${dominanceBlock}
     ${shrinkageBlock}
     <h4 class="panel-title" style="margin-top:18px">Composición del score</h4>
@@ -4018,11 +4143,17 @@ const QUERY_FIELDS = {
   capacity_usd: b => b.capacity?.capacity_usd,
   drift_severity: b => b.drift?.severity,
   dd_pct: b => b.dd_pct_of_balance,
+  tribunal_rank: b => (b.tribunal && !b.tribunal.is_suplente) ? b.tribunal.rank : null,
+  tribunal_comp: b => b.tribunal ? b.tribunal.comp : null,
+  podium_streak: b => b.tribunal_history ? b.tribunal_history.consecutive_podiums : null,
+  ready_streak: b => b.ready_streak_days,
   // boolean
   drift_flag: b => !!(b.drift && b.drift.flag),
   decay_flag: b => !!b.decay_flag,
   is_real: b => !!(b.real_vs_demo && b.real_vs_demo.is_real),
+  in_podium: b => !!(b.tribunal && !b.tribunal.is_suplente && b.tribunal.rank != null),
   // strings (for IN / =)
+  double_signature: b => b.double_signature || '',
   status: b => b.promotion_status,
   vps: b => b.vps,
   login: b => String(b.account_login),

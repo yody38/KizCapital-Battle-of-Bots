@@ -32,10 +32,20 @@ import json
 import math
 import os
 import random
+import re
 import sys
 from datetime import datetime, timezone, timedelta
 
 from _metrics import clamp01, pearson, percentile, stdev
+
+# gate_lib del Ultra Tribunal (fuente única del gate de dominancia — 12 ejes).
+# Fail-open: sin tribunal/ el gate continuo simplemente no corre.
+_TRIBUNAL_SCRIPTS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "tribunal", "scripts")
+try:
+    sys.path.insert(0, _TRIBUNAL_SCRIPTS)
+    import gate_lib as _gate_lib
+except Exception:
+    _gate_lib = None
 
 # --- Configuration -------------------------------------------------------
 
@@ -130,6 +140,15 @@ TRUST = {
     "max_corr_vs_real": 0.7,     # do not clone what already runs in real                 [HARD]
     "enforce_sqn_malo": True,    # exclude SQN == "MALO"                                   [HARD]
 }
+
+# Ultra Tribunal sync (2026-07-13) — veredictos versionados en tribunal/data/.
+# El veredicto NUNCA mueve asientos (visual-only, decisión owner): decora bots,
+# emite doble-firma READY∧podio y corre el gate de dominancia en continuo.
+TRIBUNAL_DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "tribunal", "data")
+TRIBUNAL_FRESH_DAYS = 7        # veredicto vigente
+TRIBUNAL_EXPIRED_DAYS = 14     # > N días: la doble firma se degrada en la UI
+TRIBUNAL_STALE_DD_PTS = 2.0    # dd_pct empeoró > N pts vs el veredicto → obsoleto
+TRIBUNAL_STALE_PF_DROP = 0.3   # PF cayó > N vs el veredicto → obsoleto
 
 MIN_CORR_TRADES = 25          # min trades to be in correlation matrix
 MAX_CORR_BOTS = 60            # cap matrix size
@@ -2962,6 +2981,298 @@ def write_sync_status_md(data_dir, snap, vps_freshness, health_metrics, partial_
     return md_path
 
 
+# --- Ultra Tribunal sync — veredicto ↔ Candidatos a Cuenta Real -------------
+# 5 features (2026-07-13): ingesta del veredicto, doble firma READY∧podio,
+# vigencia/obsolescencia, gate de dominancia continuo, tenure/racha de podio.
+# TODO visual-only: jamás muta promotion_status ni el orden de asientos.
+
+_VERDICT_FILE_RE = re.compile(r"^verdict_(\d{8})\S*\.json$")
+_PODIUM_ID_RE = re.compile(r"[\w.\-]+:\d+:\d+")
+
+
+def _load_tribunal_verdicts():
+    """Todos los verdict_*.json de tribunal/data/ → [(run_date, dict)] asc por fecha.
+    Dedupe por run_date prefiriendo el esquema rico (podium de dicts)."""
+    d = os.path.abspath(TRIBUNAL_DATA_DIR)
+    if not os.path.isdir(d):
+        return []
+    by_date = {}
+    for name in sorted(os.listdir(d)):
+        m = _VERDICT_FILE_RE.match(name)
+        if not m:
+            continue
+        try:
+            with open(os.path.join(d, name)) as f:
+                v = json.load(f)
+        except (json.JSONDecodeError, OSError) as exc:
+            print(f"[tribunal] verdict ilegible {name}: {exc}", file=sys.stderr)
+            continue
+        date8 = m.group(1)
+        run_date = str(v.get("run_date") or f"{date8[:4]}-{date8[4:6]}-{date8[6:]}")[:10]
+        pod = _podium_entries(v)
+        if not pod:
+            print(f"[tribunal] {name}: sin podio parseable — omitido", file=sys.stderr)
+            continue
+        rich = any(e[3] for e in pod)
+        cur = by_date.get(run_date)
+        if cur is None or (rich and not cur[1]):
+            by_date[run_date] = (v, rich)
+    return [(rd, v) for rd, (v, _r) in sorted(by_date.items())]
+
+
+def _podium_entries(v):
+    """Podio normalizado → [(id, rank, comp, entry_dict|None)] tolerando esquemas viejos
+    (incluida la variante 'con lote' que usa la clave podio_READY)."""
+    out = []
+    for i, p in enumerate(v.get("podium") or v.get("podio_READY") or []):
+        if isinstance(p, dict) and p.get("id"):
+            out.append((p["id"], p.get("rank") or i + 1, p.get("comp"), p))
+        elif isinstance(p, str):
+            m = _PODIUM_ID_RE.search(p)
+            if m:
+                out.append((m.group(0), i + 1, None, None))
+    return out
+
+
+def _suplente_entries(v):
+    out = []
+    for s in v.get("suplentes") or []:
+        if isinstance(s, dict) and s.get("id"):
+            out.append((s["id"], s.get("comp"), s.get("note")))
+        elif isinstance(s, str):
+            m = _PODIUM_ID_RE.search(s)
+            if m:
+                out.append((m.group(0), None, s))
+    return out
+
+
+def _tribunal_stale_reasons(b, entry):
+    """Cambio material post-veredicto: la data del bot ya no respalda lo juzgado."""
+    reasons = []
+    vdd, bdd = entry.get("dd_pct"), b.get("dd_pct_of_balance")
+    if vdd is not None and bdd is not None and (bdd - vdd) > TRIBUNAL_STALE_DD_PTS:
+        reasons.append(f"DD% empeoró {vdd}→{bdd}")
+    vpf, bpf = entry.get("pf"), b.get("profit_factor")
+    if vpf is not None and bpf is not None and (vpf - bpf) > TRIBUNAL_STALE_PF_DROP:
+        reasons.append(f"PF cayó {vpf}→{round(bpf, 2)}")
+    if b.get("dormant"):
+        reasons.append("dormant (sin trades recientes)")
+    if b.get("decay_flag") and str(entry.get("decay", "no")).lower() in ("no", "false"):
+        reasons.append("decay flag nuevo")
+    if entry.get("status") == "READY" and b.get("promotion_status") != "READY":
+        reasons.append(f"cayó de READY→{b.get('promotion_status')}")
+    return reasons
+
+
+def _ready_streak_days(data_dir, snap):
+    """Racha de días consecutivos en READY según el ledger append-only
+    candidates_history.jsonl (ya persistido cross-ciclo vía fetch_ledger)."""
+    path = os.path.join(data_dir, "candidates_history.jsonl")
+    rows_by_key = {}
+    if os.path.exists(path):
+        with open(path) as f:
+            for raw in f:
+                line = raw.strip()
+                if not line:
+                    continue
+                try:
+                    row = json.loads(line)
+                except json.JSONDecodeError:
+                    continue  # ya contado/gateado por tracker_health
+                k = (row.get("vps"), row.get("login"), row.get("magic"))
+                rows_by_key.setdefault(k, []).append(row)
+    decorated = 0
+    for b in snap.get("bots", []):
+        if b.get("promotion_status") != "READY":
+            continue
+        rows = rows_by_key.get((b.get("vps"), b.get("account_login"), b.get("magic")), [])
+        streak = 0
+        for row in reversed(rows):
+            if row.get("status") == "READY":
+                streak += 1
+            else:
+                break
+        b["ready_streak_days"] = streak
+        decorated += 1
+    return decorated
+
+
+def _continuous_dominance_gate(snap, now, real_logins, real_magics):
+    """Gate de dominancia del tribunal (gate_lib, 12 ejes) aplicado al top-3 READY
+    vigente en CADA ciclo CI — mini-tribunal continuo entre veredictos semanales."""
+    if _gate_lib is None:
+        return {"verdict": None, "error": "gate_lib no disponible"}
+    ready_ids = [f"{b.get('vps')}:{b.get('account_login')}:{b.get('magic')}"
+                 for b in snap.get("bots", []) if b.get("promotion_status") == "READY"]
+    if len(ready_ids) != 3:
+        return {"verdict": None, "error": f"READY={len(ready_ids)} (se requieren 3)"}
+    # Cohorte viva demo — misma definición que build_expediente.py Fase 0.
+    rows = []
+    for b in snap.get("bots", []):
+        if b.get("is_real") or b.get("magic") in real_magics \
+                or b.get("account_login") in real_logins or not b.get("magic"):
+            continue
+        if (b.get("trades") or 0) < _gate_lib.COHORT_MIN_TRADES:
+            continue
+        dsl = _days_since_last_trade(b, now)
+        if dsl is None or dsl > _gate_lib.COHORT_ALIVE_DAYS:
+            continue
+        row = {"id": f"{b.get('vps')}:{b.get('account_login')}:{b.get('magic')}",
+               "trades": b.get("trades")}
+        for axis, _hb in _gate_lib.CORE_AXES_DIRECTION:
+            row[axis] = b.get(axis)
+        rows.append(row)
+    _gate_lib.percentile_ranks(rows, _gate_lib.CORE_AXES_DIRECTION)
+    for r in rows:
+        r["core_composite"] = _gate_lib.core_composite(r)
+    scan = _gate_lib.dominance_scan(rows, ready_ids)
+    scan["cohort_n"] = len(rows)
+    return scan
+
+
+def apply_tribunal(snap, data_dir, now, real_logins, real_magics):
+    """Ingesta el último veredicto del Ultra Tribunal + histórico y decora el
+    snapshot. Fail-open: sin veredictos → tribunal_meta ausente, sección intacta."""
+    for b in snap.get("bots", []):
+        b.pop("tribunal", None)  # nunca heredar decoración de un snapshot previo
+    verdicts = _load_tribunal_verdicts()
+    streak_decorated = _ready_streak_days(data_dir, snap)
+    if not verdicts:
+        return None
+
+    run_date, v = verdicts[-1]
+    bots_by_id = {}
+    for b in snap.get("bots", []):
+        if b.get("magic"):
+            bots_by_id.setdefault(
+                f"{b.get('vps')}:{b.get('account_login')}:{b.get('magic')}", b)
+
+    try:
+        age_days = (now.date() - datetime.fromisoformat(run_date).date()).days
+    except ValueError:
+        age_days = None
+    if age_days is None:
+        verdict_state = "desconocido"
+    elif age_days <= TRIBUNAL_FRESH_DAYS:
+        verdict_state = "vigente"
+    elif age_days <= TRIBUNAL_EXPIRED_DAYS:
+        verdict_state = "viejo"
+    else:
+        verdict_state = "expirado"
+
+    dissents_all = v.get("registered_dissents_and_risks") or []
+    gate = (v.get("gate") or {}).get("deterministic")
+    validator = (v.get("adversarial_validator") or {}).get("verdict_holds")
+
+    podium = _podium_entries(v)
+    podium_meta = []
+    for pid, rank, comp, entry in podium:
+        b = bots_by_id.get(pid)
+        magic_str = pid.split(":")[-1]
+        dissents = [s for s in dissents_all if magic_str in s or f"#{rank}" in s]
+        stale = _tribunal_stale_reasons(b, entry) if (b is not None and entry) else []
+        if b is not None:
+            b["tribunal"] = {
+                "rank": rank, "comp": comp, "run_date": run_date,
+                "is_suplente": False, "note": None,
+                "dissents": dissents, "stale_reasons": stale,
+                "gate": gate, "validator_holds": validator,
+            }
+        podium_meta.append({
+            "id": pid, "rank": rank, "comp": comp,
+            "sym": (entry or {}).get("sym"),
+            "in_snapshot": b is not None,
+            "current_status": b.get("promotion_status") if b is not None else "AUSENTE",
+            "stale_reasons": stale,
+        })
+
+    suplentes_meta = []
+    for pid, comp, note in _suplente_entries(v):
+        b = bots_by_id.get(pid)
+        if b is not None and "tribunal" not in b:
+            b["tribunal"] = {
+                "rank": None, "comp": comp, "run_date": run_date,
+                "is_suplente": True, "note": note,
+                "dissents": [], "stale_reasons": [],
+                "gate": gate, "validator_holds": validator,
+            }
+        suplentes_meta.append({"id": pid, "comp": comp, "note": note,
+                               "in_snapshot": b is not None})
+
+    # Doble firma: READY (gating cuantitativo) ∧ podio (juicio adversarial).
+    podium_ids = {pid for pid, _r, _c, _e in podium}
+    ready_ids = {bid for bid, b in bots_by_id.items()
+                 if b.get("promotion_status") == "READY"}
+    for bid, b in bots_by_id.items():
+        in_pod, is_ready = bid in podium_ids, bid in ready_ids
+        if in_pod or is_ready:
+            b["double_signature"] = ("confirmed" if (in_pod and is_ready)
+                                     else "quant_only" if is_ready else "tribunal_only")
+        else:
+            b.pop("double_signature", None)
+
+    concordance = {
+        "matches": len(ready_ids & podium_ids),
+        "of": len(podium_ids),
+        "ready_not_podium": sorted(ready_ids - podium_ids),
+        "podium_not_ready": [m["id"] for m in podium_meta
+                             if m["current_status"] != "READY"],
+    }
+
+    # Tenure: histórico de podios por bot a través de TODOS los veredictos.
+    appearances = {}
+    run_dates = [rd for rd, _v in verdicts]
+    for rd, vv in verdicts:
+        for pid, rank, comp, _e in _podium_entries(vv):
+            appearances.setdefault(pid, []).append(
+                {"run_date": rd, "rank": rank, "comp": comp})
+    history_decorated = 0
+    for b in snap.get("bots", []):
+        b.pop("tribunal_history", None)
+    for pid, ranks in appearances.items():
+        b = bots_by_id.get(pid)
+        if b is None:
+            continue
+        present = {r["run_date"] for r in ranks}
+        consecutive = 0
+        for rd in reversed(run_dates):
+            if rd in present:
+                consecutive += 1
+            else:
+                break
+        b["tribunal_history"] = {
+            "podium_appearances": len(ranks),
+            "consecutive_podiums": consecutive,
+            "first_podium": ranks[0]["run_date"],
+            "ranks": ranks,
+        }
+        history_decorated += 1
+
+    continuous_gate = _continuous_dominance_gate(snap, now, real_logins, real_magics)
+
+    return {
+        "run_date": run_date,
+        "age_days": age_days,
+        "verdict_state": verdict_state,
+        "fresh_days": TRIBUNAL_FRESH_DAYS,
+        "expired_days": TRIBUNAL_EXPIRED_DAYS,
+        "universe": v.get("universe"),
+        "gate": v.get("gate"),
+        "validator_holds": validator,
+        "block_weights": v.get("block_weights"),
+        "recommendation": v.get("domain_outsider_recommendation"),
+        "dissents": dissents_all,
+        "podium": podium_meta,
+        "suplentes": suplentes_meta,
+        "concordance": concordance,
+        "continuous_gate": continuous_gate,
+        "history": {"n_verdicts": len(verdicts), "run_dates": run_dates,
+                    "bots_with_history": history_decorated},
+        "ready_streak_decorated": streak_decorated,
+        "ranker_note": "visual-only: el veredicto jamás mueve asientos (shadow-first + human veto)",
+    }
+
+
 def main():
     if len(sys.argv) < 2:
         print("usage: post_merge.py <data_dir>", file=sys.stderr)
@@ -3398,6 +3709,21 @@ def main():
 
     # Adversarial Pair Finder — top-3 portfolio partners per READY/NEAR.
     pair_count = compute_pair_recommendations(snap, data_dir)
+
+    # Ultra Tribunal — ingesta veredicto + doble firma + vigencia + gate continuo
+    # + tenure. Visual-only (nunca muta promotion_status). Fail-open sin veredictos.
+    tribunal_meta = apply_tribunal(snap, data_dir, now, real_logins, real_magics)
+    if tribunal_meta is not None:
+        snap["tribunal_meta"] = tribunal_meta
+        cg = tribunal_meta.get("continuous_gate") or {}
+        print(f"[tribunal] verdict={tribunal_meta['run_date']} ({tribunal_meta['verdict_state']}, "
+              f"{tribunal_meta['age_days']}d) concordancia="
+              f"{tribunal_meta['concordance']['matches']}/{tribunal_meta['concordance']['of']} "
+              f"gate_continuo={cg.get('verdict')} violations={len(cg.get('violations') or [])} "
+              f"historial={tribunal_meta['history']['n_verdicts']} veredictos")
+    else:
+        snap.pop("tribunal_meta", None)
+        print("[tribunal] sin veredictos en tribunal/data/ — sección sin decorar (fail-open)")
 
     snap["promotion_meta"] = {
         "weights": WEIGHTS,

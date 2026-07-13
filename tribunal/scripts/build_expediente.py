@@ -176,12 +176,8 @@ PCT_AXES: list[tuple[str, bool]] = [
     ("ci_calmar_width", False), ("radar_asymmetry", False), ("ulcer_index_pct", False),
 ]
 
-# 12 ejes núcleo (gate de dominancia + composite)
-CORE_AXES = [
-    "net_30d", "net_90d", "net_profit", "expectancy", "profit_factor", "calmar",
-    "sortino", "recovery_factor", "months_positive_pct", "promotion_score_shrunk",
-    "dd_pct_of_balance", "monthly_net_cov",
-]
+# 12 ejes núcleo (gate de dominancia + composite) — fuente única en gate_lib.py
+from gate_lib import CORE_AXES  # noqa: E402
 
 CANDIDATE_METRICS = [
     "net_30d", "net_90d", "net_profit", "net_after_commission", "expectancy",

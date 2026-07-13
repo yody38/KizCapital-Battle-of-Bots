@@ -1,0 +1,17 @@
+{
+  "corrida": "v2 CON LOTE (dinero normalizado a real 0.05)",
+  "snapshot": "2026-07-09T18:59:57Z",
+  "pares_completados": "48/50 (faltan 33,39 por límite de sesión; Bloques A-E = 95% del peso)",
+  "podio_READY": [
+    {"rank":1,"id":"vps1:25536:2011","sym":"USDJPY","lote_demo":0.01,"comp":93.61,"net30_real":54.0,"life_real":248.25,"pf":1.97,"dd_pct":0.13},
+    {"rank":2,"id":"vps4:22334:701789535","sym":"GBPUSD.b","lote_demo":0.01,"comp":89.25,"net30_real":18.6,"life_real":304.85,"pf":1.557,"dd_pct":0.18},
+    {"rank":3,"id":"vps3:30997:1275409816","sym":"EURUSD","lote_demo":0.05,"comp":86.21,"net30_real":81.26,"life_real":192.42,"pf":1.649,"dd_pct":0.65}
+  ],
+  "gate_deterministico": "PASS (0 violaciones)",
+  "suplente_1": "vps4:22334:1848274272 (USDJPY.b, NEAR, Mes+ 87.5%, 70 trades, lote 0.01) — primero a promover cuando pase a READY",
+  "watchlist_alto_upside_pero_no_ready": ["vps4:22336:61896397 (Comp 94.2, n=22, gating FAIL min_trades)","vps4:22327:1418841512 (Life$R 376.6, n=24)","vps2:40500:257025304 (Life$R 742.8, n=20, 4 meses)"],
+  "no_promover_juntos": "vps4:22334:701789535 y vps1:25530:701789535 = MISMO magic 701789535 (espejo), no diversifican",
+  "cambio_vs_v1": "30997 baja de PLATA a #3 (su dinero era lote 0.05, no edge). 2011 y 22334:701789535 se refuerzan.",
+  "flags_datos": ["magic espejo 1418841512 (22327 vs 22334): WR/PF idénticos pero Life$R distinto (376.6 vs 188.3) — revisar lote/comisión .b","NetComm==NetLife en símbolos .b: comisión posiblemente no restada","30997 corre lote 0.05 en demo = ya probado al lote real"],
+  "validator_adversarial": "NO ejecutado (límite de sesión); gate determinístico PASS como salvaguarda"
+}

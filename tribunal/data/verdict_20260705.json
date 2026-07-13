@@ -1,0 +1,60 @@
+{
+  "run_date": "2026-07-05",
+  "snapshot_generated_at": "2026-07-05T03:47:35.374072+00:00",
+  "universe": {"demo_total": 252, "alive_cohort": 129, "candidates": 35, "reals_excluded": true},
+  "tribunal": {"pairs_run": 50, "mode": "full"},
+  "podium": [
+    {
+      "rank": 1,
+      "id": "vps4:22333:1711497962",
+      "symbol": "GBPUSD.b",
+      "role": "Ancla / core del podio",
+      "evidence": "status READY, 8.0 meses, Comp 91.4, PF 1.94, WR 70.5%, DD% 0.3, top5%=14.1 (el más limpio del podio), 37/50 menciones transversales — sin fisuras estadísticas serias",
+      "caveat": "Comparte magic (misma lógica EA) con vps4:22328:1711497962 (status NO) — no es evidencia totalmente independiente si se combinan ambas cuentas",
+      "confidence": 0.90
+    },
+    {
+      "rank": 2,
+      "id": "vps4:22336:1863321263",
+      "symbol": "USDJPY.b",
+      "role": "Ancla de calidad / riesgo-ajustado",
+      "evidence": "Comp 94.8 (el más alto de todo el expediente), PF 2.39, Calmar 8.39, Sharpe 6.06, 8.0 meses",
+      "caveat": "Tr30=4 (actividad reciente débil), CIcalmarW=127.9 (el más ancho de toda la mesa), CI estables 0/5 — su #2 descansa en parte en 'Comp', métrica que el propio expediente marca como 'referencia, no veredicto'",
+      "confidence": 0.68
+    },
+    {
+      "rank": 3,
+      "id": "vps6:40839:1393300615",
+      "symbol": "USDCHF",
+      "role": "Motor de dinero puro",
+      "evidence": "Mejor generador de caja de la mesa: Net30=134.1, Net90=266.2, PF=2.25, WR=80%, status READY",
+      "caveat": "Solo 4.0 meses de historial (el más corto del podio), peor combo Skew/Kurt de toda la mesa (-1.91/+2.12), mayor brecha Raw→Shrunk (83.3→57.1, -26.2 pts) — asiento más frágil del podio, requiere revalidación a 90 días",
+      "confidence": 0.58
+    }
+  ],
+  "suplentes": [
+    {
+      "id": "vps2:27533:1239435523",
+      "symbol": "USDJPY",
+      "why_not_podium": "Duplica símbolo USDJPY con el #2 (colapsa diversificación) y status ficha 'NO' sin gating FAIL explícito",
+      "why_strong": "Comp 93.0 (2do más alto), único bot con Mes+%=100% (todos los meses positivos), colas más limpias que #3 (-0.25/-1.87), menor brecha shrink (12.2 vs 26.2 de #3)",
+      "promote_if": "cae vps6:40839 en su revalidación a 90 días, o si se prioriza consistencia sobre dinero reciente"
+    },
+    {
+      "id": "vps3:30997:1275409816",
+      "symbol": "EURUSD",
+      "why_not_podium": "WR%=46.1 débil, status WATCH, dependencia moderada de trades grandes (top5%=29.7%)",
+      "why_strong": "Net90=141.2 (2do más alto), Exp=5.30 (mayor expectancy de la mesa)"
+    }
+  ],
+  "gate_deterministico": {"verdict": "PASS", "rule": "retador mejor en >=8/12 ejes núcleo con trades >=75% del ganador", "violations": []},
+  "adversarial_validator": {"verdict_holds": true, "hallucinations": [], "unsupported_items": ["scores ponderados por bloque son cálculo del Juez, no aparecen literalmente en el expediente"], "note": "orden interno 22336>40839 es juicio defendible, no hecho puro"},
+  "disensos_no_resueltos": [
+    "vps2:24034:20251024 (301 trades, 10 meses, único CI estables 2/5) fue descartado en ~49/50 pares por dist=LOTTERY/top5%=103.7%/SQN=0.06/Shrunk=45.6 — descarte sostenido por datos duros, no herencia ciega, pero el Devil's Advocate insistió en re-examinarlo",
+    "vps6:40839 vs vps2:27533 en el puesto #3: 40839 gana en dinero crudo (Net30 134 vs 10.7), 27533 gana en robustez/consistencia (CI, shrink gap, colas, Mes+100%) — riesgo genuino a monitorear"
+  ],
+  "riesgo_de_correlacion": [
+    "vps4:22333 comparte magic 1711497962 con vps4:22328 (status NO, excluido) — misma lógica de EA",
+    "vps4:22336 y el suplente vps2:27533 comparten símbolo USDJPY"
+  ]
+}

@@ -10,7 +10,7 @@
 <link rel="manifest" href="/manifest.json">
 <meta name="theme-color" content="#0d0b1a">
 <link rel="apple-touch-icon" href="/icon-192.png">
-<link rel="stylesheet" href="styles.css?v=20260711a">
+<link rel="stylesheet" href="styles.css?v=20260713a">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500;700&display=swap" rel="stylesheet">
@@ -465,6 +465,8 @@
         🚦 Gating: trades≥30 · meses≥3 · DD≤10% · net&gt;0 · WR≥50% · fresco≤14d · no clona real · SQN≠malo — orden por score ajustado por confianza (ⓘ)
       </div>
     </div>
+    <!-- 🏛️ Ultra Tribunal — sincronización veredicto ↔ candidatos (visual-only, JS) -->
+    <div id="tribunal-strip" class="table-controls" style="margin-bottom:12px;flex-wrap:wrap;gap:8px" hidden></div>
     <div class="table-controls" style="margin-bottom:12px">
       <div class="filter-pills" id="candidates-status-pills">
         <button class="pill active" data-status="READY">✅ READY · top 3</button>
@@ -480,6 +482,8 @@
             <th>#</th>
             <th class="num">Score</th>
             <th>Estado</th>
+            <th title="Veredicto del Ultra Tribunal (50 pares adversariales): 🥇🥈🥉 = posición en el podio vigente · ✓✓ SUBIR = doble firma (READY cuantitativo ∧ podio del tribunal, dos vías independientes que coinciden) · ✓· = READY sin podio · ⚠ = la data cambió materialmente desde el veredicto">🏛️ Tribunal</th>
+            <th class="num" title="Persistencia = credibilidad: 🏛️×N = veredictos consecutivos en el podio · Nd = días consecutivos en READY (ledger append-only)">Racha</th>
             <th title="✅ Caballo = top-25% (≥P75) en dinero, riesgo, consistencia y estabilidad, y nadie lo supera en todo · ⚠ Discutible = no cumple (ver tooltip)">Dominancia</th>
             <th title="Calidad media de los 4 factores nuevos: robustez fuera de muestra (OOS), seguridad (riesgo de quedar negativo), cola/CVaR y significancia estadística. 🟢 sólido · 🟡 medio · 🔴 flojo (ver tooltip)">Calidad</th>
             <th>Magic</th>
@@ -1010,6 +1014,6 @@
   <div class="war-room-footer" id="war-room-mover">—</div>
 </div>
 
-<script defer src="app.js?v=20260711a"></script>
+<script defer src="app.js?v=20260713a"></script>
 </body>
 </html>
