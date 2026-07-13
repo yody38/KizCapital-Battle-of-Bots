@@ -259,27 +259,14 @@ class Audit {
     A.assert(sampleRow.hasChip, `primera fila tiene chip de confianza shrinkage`);
   }
 
-  // ----- SECTION 5: Forward Tracker -----
-  A.begin('Forward Tracker');
-  const trackedBots = (snap.bots || []).filter(b => b.tracker && b.tracker.first_seen_date);
-  const trackerCounter = await ev(ws, `document.getElementById('tracker-count')?.textContent`);
-  A.assert(String(trackedBots.length) === trackerCounter || trackerCounter === '0', `tracker counter (${trackerCounter}) = bots con tracker (${trackedBots.length})`);
-
-  // ----- SECTION 6: Drift Watch -----
-  A.begin('Drift Watch (Page-Hinkley)');
-  const drifted = (snap.bots || []).filter(b => b.drift && b.drift.flag);
-  const driftCounter = await ev(ws, `document.getElementById('drift-count')?.textContent`);
-  A.assert(String(drifted.length) === driftCounter, `drift counter (${driftCounter}) = bots flagged (${drifted.length})`);
-  const driftRows = await ev(ws, `document.querySelectorAll('#drift-tbody tr').length`);
-  A.assert(driftRows === drifted.length, `tabla drift renderiza ${driftRows} = ${drifted.length} bots`);
-  // Severity filter — severo
-  await ev(ws, `document.querySelector('#drift-severity-pills .pill[data-sev="severe"]').click()`);
-  await wait(120);
-  const severeRows = await ev(ws, `document.querySelectorAll('#drift-tbody tr').length`);
-  const expectedSevere = drifted.filter(b => (b.drift.severity || 0) >= 2.0).length;
-  A.assert(severeRows === expectedSevere, `pill severe: ${severeRows} filas = ${expectedSevere} bots severidad ≥ 2.0`);
-  await ev(ws, `document.querySelector('#drift-severity-pills .pill[data-sev="all"]').click()`);
-  await wait(120);
+  // ----- SECTION 5+6: Forward Tracker / Drift Watch — secciones ELIMINADAS del
+  // dashboard el 2026-06-08 (NO re-agregar). Solo se valida que sigan ausentes;
+  // los campos backend (tracker/drift) siguen vivos y los usan modal + Query DSL.
+  A.begin('Forward Tracker / Drift Watch (removidas 2026-06-08)');
+  const trackerGone = await ev(ws, `document.getElementById('tracker-section') === null`);
+  A.assert(trackerGone, 'sección Forward Tracker sigue removida del DOM');
+  const driftGoneAudit = await ev(ws, `document.getElementById('drift-section') === null`);
+  A.assert(driftGoneAudit, 'sección Drift Watch sigue removida del DOM');
 
   // ----- SECTION 7: Balanced + New bots -----
   A.begin('Balanced + Bots Nuevos');
@@ -370,7 +357,9 @@ class Audit {
   const queries = [
     { q: 'is_real = true SORT BY net DESC', expected: isRealBots.length },
     { q: 'status = "READY"', expected: readyCount },
-    { q: 'drift_flag = true', expected: drifted.length },
+    { q: 'drift_flag = true', expected: (snap.bots || []).filter(b => b.drift && b.drift.flag).length },
+    { q: 'double_signature = "confirmed"', expected: (snap.bots || []).filter(b => b.double_signature === 'confirmed').length },
+    { q: 'in_podium = true', expected: (snap.bots || []).filter(b => b.tribunal && !b.tribunal.is_suplente && b.tribunal.rank != null).length },
     { q: 'capacity_usd >= 50000', expected: (snap.bots || []).filter(b => (b.capacity?.capacity_usd || 0) >= 50000 && b.magic && b.magic !== 0).length },
     { q: 'symbol IN ("EURUSD","GBPUSD") AND pf >= 1.5 SORT BY calmar DESC LIMIT 5', expected: null },
   ];
