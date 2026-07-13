@@ -234,6 +234,22 @@ class Audit {
       A.assert(stripText.includes(tm.continuous_gate.verdict),
         `strip muestra gate continuo ${tm.continuous_gate.verdict}`);
     }
+    // Chips de operaciones por caballo del podio: magic + trades + G/P del snapshot
+    const botsByIdAudit = {};
+    for (const b of (snap.bots || [])) {
+      const k = `${b.vps}:${b.account_login}:${b.magic}`;
+      if (b.magic && !botsByIdAudit[k]) botsByIdAudit[k] = b;
+    }
+    for (const p of (tm.podium || [])) {
+      const b = botsByIdAudit[p.id];
+      if (!b) continue;
+      const wins = b.wins || 0;
+      const losses = (b.trades || 0) - wins;
+      const int = n => Number(n || 0).toLocaleString('en-US'); // = fmt.int de app.js
+      const expected = `${b.magic} · ${int(b.trades)} ops · ${int(wins)} G / ${int(losses)} P`;
+      A.assert(stripText.includes(expected),
+        `strip ops podio #${p.rank}: "${expected}"`);
+    }
     // READY pill quedó activo tras los clicks de arriba → sellos ✓✓ visibles = bots confirmed
     await ev(ws, `document.querySelector('#candidates-status-pills .pill[data-status="READY"]').click()`);
     await wait(150);
