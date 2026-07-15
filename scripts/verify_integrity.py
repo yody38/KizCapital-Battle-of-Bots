@@ -16,6 +16,12 @@ Cross-cutting gates (snapshot-level, re-derivable — no wall-clock):
      real_portfolio.account_count (catches a real silently dropping out).
   7. Forward-tracker ledger health — > 5 corrupt lines in candidates_history.jsonl
      (surfaced by post_merge as tracker_health) fails the cycle.
+  7b. [VELOCIDAD F1] Detail-split integrity — every field moved out of the
+     snapshot (regime, event_stress, promotion_radar, underwater, oos,
+     institutional, confidence_intervals, capacity, shrinkage_meta,
+     promotion_components) must exist in the bot's per-bot `detail`
+     (len(_fields) == snapshot detail_n) and must NOT ride in the slim
+     snapshot (candidate exceptions aside). Hard gate.
 
 Optional remote check (--check-remote):
   8. sha256(local file) == sha256(file downloaded from Supabase Storage).
@@ -468,6 +474,50 @@ def main() -> int:
             all_fails.append(f"promotion buckets: solapamiento {an}∩{bn}: {sorted(inter)}")
     bucket_fails = len(all_fails) - bucket_fail_start
 
+    # 7th check — [VELOCIDAD F1] DETAIL-SPLIT integrity gate. Cada campo que
+    # post_merge movió del snapshot al per-bot file DEBE existir allí: para
+    # cada bot con detail_n>0, per-bot.detail._fields debe tener exactamente
+    # detail_n campos y todos presentes. Y el snapshot slim no puede seguir
+    # cargando un campo movido (salvo las excepciones de candidatos). Si algo
+    # falta → CI aborta (--strict) y NO se sube nada: cero pérdida por diseño.
+    detail_fails: list[str] = []
+    ds_meta = (snap.get("enrichment_meta") or {}).get("detail_split") or {}
+    if ds_meta.get("enabled"):
+        ds_fields = set(ds_meta.get("fields") or [])
+        ds_keep = set(ds_meta.get("candidate_keep") or [])
+        cand_statuses = {"READY", "NEAR", "WATCH"}
+        for b in bots:
+            key = f"{b.get('vps')}/{b.get('account_login')}-{b.get('magic')}"
+            n = b.get("detail_n") or 0
+            if n > 0:
+                # (a) slim invariant: un campo movido no puede seguir en el snapshot
+                for fld in ds_fields:
+                    if fld in b and not (fld in ds_keep and b.get("promotion_status") in cand_statuses):
+                        detail_fails.append(f"{key}: campo '{fld}' sigue en el snapshot pese al detail split")
+                # (b) presencia verificada en el per-bot file
+                pb_path = BOTS_DIR / b.get("vps") / f"{b.get('account_login')}-{b.get('magic')}.json"
+                try:
+                    pb = json.loads(pb_path.read_text(encoding="utf-8"))
+                except Exception:
+                    continue  # per-bot ausente/ilegible ya es hard-fail del check #1
+                det = pb.get("detail")
+                if not isinstance(det, dict):
+                    detail_fails.append(f"{key}: detail_n={n} pero el per-bot file no tiene 'detail'")
+                    continue
+                fields = det.get("_fields") or []
+                if len(fields) != n:
+                    detail_fails.append(
+                        f"{key}: detail_n={n} != len(detail._fields)={len(fields)} en per-bot file"
+                    )
+                missing = [f_ for f_ in fields if f_ not in det]
+                if missing:
+                    detail_fails.append(f"{key}: campos declarados ausentes en detail: {missing}")
+        # errores de escritura reportados por post_merge (campos que se quedaron
+        # en el snapshot por fallo de write) — warn, no gate: la data está completa.
+        for err in ds_meta.get("errors") or []:
+            freshness_warn.append(f"detail_split: {err}")
+        all_fails.extend(detail_fails)
+
     remote_fails: list[str] = []
     if args.check_remote:
         env = load_env()
@@ -498,6 +548,7 @@ def main() -> int:
             "series_missing": series_missing,
             "freshness_hard_fails": len(freshness_hard),
             "candidate_bucket_fails": bucket_fails,
+            "detail_split_fails": len(detail_fails),
             "tracker_corrupt_lines": tracker_corrupt,
             "remote_check_run": args.check_remote,
             "remote_failures": len(remote_fails),

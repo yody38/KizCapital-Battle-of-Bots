@@ -579,6 +579,85 @@ def load_per_bot(data_dir, vps, login, magic):
         return None
 
 
+# ------------------------------------------------------------------
+# [VELOCIDAD F1] SNAPSHOT SLIM — mueve el detalle modal-only a los
+# per-bot files (data/bots/<vps>/<login>-<magic>.json), que el modal
+# ya descarga on-demand. NO recalcula nada: mueve los objetos YA
+# computados por el pipeline → paridad por construcción.
+# Regla de fidelidad: un campo solo se quita del snapshot DESPUÉS de
+# persistirse en su per-bot file; si el write falla, se queda (fail-open
+# hacia más data, nunca menos). verify_integrity.py (check 7b) comprueba
+# después que detail._fields (per-bot) == detail_n (snapshot) y aborta
+# el CI si falta uno.
+# Excepciones que siguen en el snapshot índice:
+#   - capacity → queda el escalar capacity_usd (Query DSL filtra/ordena
+#     los 316 bots sin abrir modales).
+#   - shrinkage_meta / promotion_components → se conservan SOLO para
+#     candidatos READY/NEAR/WATCH (su tabla los pinta sin abrir modal).
+# ------------------------------------------------------------------
+DETAIL_SPLIT_FIELDS = [
+    "regime", "event_stress", "promotion_radar", "underwater",
+    "oos", "institutional", "confidence_intervals", "capacity",
+    "shrinkage_meta", "promotion_components",
+]
+DETAIL_CANDIDATE_KEEP = {"shrinkage_meta", "promotion_components"}
+DETAIL_CANDIDATE_STATUSES = {"READY", "NEAR", "WATCH"}
+
+
+def split_detail_to_per_bot(snap, data_dir):
+    """Mueve los campos modal-only de snap['bots'] al `detail` de su per-bot
+    file. Muta snap in place y devuelve el meta dict para enrichment_meta."""
+    bots_split = 0
+    fields_removed = 0
+    errors = []
+    for b in snap.get("bots", []):
+        vps_b, login_b, magic_b = b.get("vps"), b.get("account_login"), b.get("magic")
+        moved = {fld: b[fld] for fld in DETAIL_SPLIT_FIELDS if fld in b}
+        if not (vps_b and login_b and magic_b) or not moved:
+            b["detail_n"] = 0
+            continue
+        pb = load_per_bot(data_dir, vps_b, login_b, magic_b)
+        if pb is None:
+            # Sin destino verificable no se quita nada (check #1 de verify ya
+            # hard-failea el per-bot file ausente por separado).
+            errors.append(f"{vps_b}/{login_b}-{magic_b}: per-bot file missing/unreadable — fields kept in snapshot")
+            b["detail_n"] = 0
+            continue
+        pb["detail"] = dict(moved)
+        pb["detail"]["_fields"] = sorted(moved.keys())
+        pb_path = os.path.join(data_dir, "bots", vps_b, f"{login_b}-{magic_b}.json")
+        tmp_pb = pb_path + ".dt.tmp"
+        try:
+            with open(tmp_pb, "w") as f:
+                json.dump(pb, f, ensure_ascii=False, separators=(",", ":"))
+            os.replace(tmp_pb, pb_path)
+        except OSError as exc:
+            errors.append(f"{vps_b}/{login_b}-{magic_b}: detail write failed ({exc}) — fields kept in snapshot")
+            b["detail_n"] = 0
+            continue
+        # Persistido y verificable → ahora sí adelgazar el snapshot.
+        keep_candidate = b.get("promotion_status") in DETAIL_CANDIDATE_STATUSES
+        for fld in moved:
+            if fld in DETAIL_CANDIDATE_KEEP and keep_candidate:
+                continue
+            if fld == "capacity":
+                cap_usd = (b.get("capacity") or {}).get("capacity_usd")
+                if cap_usd is not None:
+                    b["capacity_usd"] = cap_usd
+            del b[fld]
+            fields_removed += 1
+        b["detail_n"] = len(pb["detail"]["_fields"])
+        bots_split += 1
+    return {
+        "enabled": True,
+        "fields": DETAIL_SPLIT_FIELDS,
+        "candidate_keep": sorted(DETAIL_CANDIDATE_KEEP),
+        "bots_split": bots_split,
+        "fields_removed": fields_removed,
+        "errors": errors[:20],
+    }
+
+
 def percentile(sorted_xs, p):
     if not sorted_xs:
         return None
@@ -3778,10 +3857,19 @@ def main():
         "computed_at": today_iso,
     }
 
+    # [VELOCIDAD F1] SNAPSHOT SLIM — ver split_detail_to_per_bot().
+    ds_meta = split_detail_to_per_bot(snap, data_dir)
+    snap["enrichment_meta"]["detail_split"] = ds_meta
+    print(f"[post_merge] detail split: {ds_meta['bots_split']} bots, "
+          f"{ds_meta['fields_removed']} campos movidos a per-bot files, "
+          f"{len(ds_meta['errors'])} errores")
+
     # Save snapshot first (atomic), then build correlations + portfolio using stored scores.
+    # [VELOCIDAD F2] Minificado: mismo contenido, sin indent → 3.3MB->1.9MB.
+    # El navegador nunca lee este JSON "a ojo"; indent=2 solo pesaba de más.
     tmp = snap_path + ".pm.tmp"
     with open(tmp, "w") as f:
-        json.dump(snap, f, ensure_ascii=False, indent=2)
+        json.dump(snap, f, ensure_ascii=False, separators=(",", ":"))
     os.replace(tmp, snap_path)
 
     corr = build_correlation_matrix(snap, data_dir, real_accounts)
@@ -3818,7 +3906,7 @@ def main():
         # but health_metrics + final status need to persist).
         tmpH = snap_path + ".hm.tmp"
         with open(tmpH, "w") as f:
-            json.dump(snap, f, ensure_ascii=False, indent=2)
+            json.dump(snap, f, ensure_ascii=False, separators=(",", ":"))
         os.replace(tmpH, snap_path)
 
     # Auto-generated operations status page.

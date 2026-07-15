@@ -36,6 +36,19 @@
     return url;
   }
 
+  // [VELOCIDAD F5] Prewarm del snapshot: la firma + descarga arrancan en
+  // cuanto hay sesión, en PARALELO con el parse/boot de app.js (antes eran
+  // secuenciales: boot → firmar → bajar). El primer fetch de app.js a
+  // data/snapshot.json consume esta respuesta ya en vuelo; los siguientes
+  // (refresh de 30 min, push) van por el camino normal con ETag.
+  let snapshotPrewarm = null;
+  sessionReady.then(() => {
+    snapshotPrewarm = (async () => {
+      const signed = await getSignedUrl("snapshot.json");
+      return signed ? originalFetch(signed) : null;
+    })().catch(() => null);
+  });
+
   async function patchedFetch(input, init) {
     const rawUrl =
       typeof input === "string"
@@ -53,6 +66,14 @@
     if (!path) return originalFetch(input, init);
 
     await sessionReady;
+    // [VELOCIDAD F5] Primer fetch del snapshot → servir el prewarm en vuelo.
+    // Solo se consume una vez; si falló, cae al camino normal sin ruido.
+    if (path === "snapshot.json" && snapshotPrewarm) {
+      const pre = snapshotPrewarm;
+      snapshotPrewarm = null;
+      const res = await pre;
+      if (res && res.ok) return res;
+    }
     const signed = await getSignedUrl(path);
     if (!signed) {
       return new Response(JSON.stringify({ error: "storage signed url failed", path }), {

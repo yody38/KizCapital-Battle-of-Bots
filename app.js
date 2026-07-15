@@ -1750,6 +1750,20 @@ async function openBotModal(vps, login, magic) {
   try {
     const bot = await fetchBotHistoryWithRetry(vps, login, magic);
     if (!bot) throw new Error(`No pude cargar el histórico de este bot tras reintentos. El archivo puede estar regenerándose en el VPS — espera 1 min y reabre.`);
+    // [VELOCIDAD F1] El per-bot file trae bajo `detail` los campos modal-only
+    // (regime, event_stress, promotion_radar, underwater, oos, institutional,
+    // confidence_intervals, capacity, shrinkage_meta, promotion_components)
+    // que ya no viajan en el snapshot índice. Se fusionan al bot en memoria
+    // ANTES de renderizar → header, las pestañas de análisis y el modal DNA
+    // los encuentran donde siempre (findBotInSnapshot).
+    if (bot.detail && typeof bot.detail === 'object') {
+      const sb = findBotInSnapshot(login, magic);
+      if (sb) {
+        for (const [k, v] of Object.entries(bot.detail)) {
+          if (k !== '_fields') sb[k] = v;
+        }
+      }
+    }
     modalState.bot = { ...bot, vps };
     modalState.trades = (bot.trades || []).slice().sort((a, b) => b.close_time - a.close_time);
     modalState.page = 0;
@@ -4149,7 +4163,7 @@ const QUERY_FIELDS = {
   months_active: b => b.months_active,
   age_days: b => (b.months_active || 0) * 30,
   decay_ratio: b => b.decay_ratio,
-  capacity_usd: b => b.capacity?.capacity_usd,
+  capacity_usd: b => b.capacity_usd ?? b.capacity?.capacity_usd, // [F1] escalar en snapshot slim; objeto completo vive en per-bot detail
   drift_severity: b => b.drift?.severity,
   dd_pct: b => b.dd_pct_of_balance,
   tribunal_rank: b => (b.tribunal && !b.tribunal.is_suplente) ? b.tribunal.rank : null,
@@ -4375,7 +4389,8 @@ function applyQuery(text) {
   }
   tbody.innerHTML = bots.map((b, i) => {
     const drift = b.drift?.flag ? `<span class="profit-negative">${b.drift.severity?.toFixed(2)}×</span>` : '—';
-    const cap = b.capacity?.capacity_usd ? `$${Math.round(b.capacity.capacity_usd / 1000)}K` : '—';
+    const capUsd = b.capacity_usd ?? b.capacity?.capacity_usd; // [F1] escalar slim con fallback
+    const cap = capUsd ? `$${Math.round(capUsd / 1000)}K` : '—';
     return `
       <tr class="bot-row" data-vps="${b.vps}" data-login="${b.account_login}" data-magic="${b.magic}">
         <td><span class="rank-badge">${i + 1}</span></td>
@@ -5864,7 +5879,7 @@ function renderDNACard(b) {
   dims.push({ name: 'Régimen', icon: '🌊', val: robust != null ? `Robust ${robust.toFixed(2)}` : 'sin datos',
               sem: sReg, hint: 'Robustez temporal (DoW/hour/duration) · OK ≥0.7' });
   // 5. Capacity
-  const cap = b.capacity?.capacity_usd;
+  const cap = b.capacity_usd ?? b.capacity?.capacity_usd; // [F1] escalar slim con fallback
   const sCap = dnaSemaphore(cap, [50000, 10000]);
   dims.push({ name: 'Capacity', icon: '⚙️', val: cap != null ? `Escala a ${fmt.usd(cap)}` : 'sin datos',
               sem: sCap, hint: 'USD escalable antes de slippage · OK ≥$50K' });
