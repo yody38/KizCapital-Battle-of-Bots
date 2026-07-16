@@ -1,15 +1,17 @@
 name: spread-sampler
 
-# Muestreo de spread ADN (solo lectura) durante el overlap Londres+NY.
-# Pedido 2026-07-16: medir spread real de USDJPY.b/EURJPY.b/USDCAD.b/NZDUSD.b
+# Muestreo de spread ADN (solo lectura) cada 2 horas en dias habiles.
+# Pedido 2026-07-16: perfil completo de spread de USDJPY.b/EURJPY.b/USDCAD.b/NZDUSD.b
 # en la cuenta 32081 (VPS5) para calibrar Symbol Settings de EA Studio.
-# Patrón: gh-actions + tailscale + ssh one-shot (mismo que sampler-tick.yml).
-# Resultados: spread-samples/YYYY-MM-DD.json (commit al repo).
+# Patron: gh-actions + tailscale + ssh one-shot (mismo que sampler-tick.yml).
+# Resultados: spread-samples/YYYY-MM-DD_HHMM.json (commit al repo).
+# Notificacion: Telegram tras cada corrida — audio via ElevenLabs si
+# ELEVENLABS_API_KEY existe como secret; si no, mensaje de texto.
 
 on:
   workflow_dispatch: {}
   schedule:
-    - cron: "5 13 * * 1-5"   # 13:05 UTC lun-vie = 6:05 AM Las Vegas (PDT), dentro de la sesion 12:00-17:00 UTC
+    - cron: "5 */2 * * 1-5"   # cada 2 horas, lun-vie (UTC)
 
 concurrency:
   group: spread-sampler
@@ -23,7 +25,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 28
     env:
-      VPS_HOST: "100.70.228.19"   # VPS5 (cuenta real 32081)
+      VPS_HOST: "100.70.228.19"   # VPS5 (cuenta 32081)
       DURATION_S: "1200"          # 20 minutos
       INTERVAL_S: "5"
 
@@ -73,7 +75,6 @@ jobs:
           result = {
               "login": ai.login if ai else None,
               "utc": datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
-              "window": "london_ny_overlap",
               "duration_s": DURATION_S,
               "interval_s": INTERVAL_S,
               "stats": {},
@@ -116,10 +117,57 @@ jobs:
       - name: Commit result
         run: |
           python3 -c "import json,sys; json.load(open('/tmp/spread_result.json'))" || { echo "invalid JSON, aborting commit"; exit 1; }
+          git pull --rebase
           mkdir -p spread-samples
-          cp /tmp/spread_result.json "spread-samples/$(date -u +%F).json"
+          cp /tmp/spread_result.json "spread-samples/$(date -u +%F_%H%M).json"
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add spread-samples/
-          git commit -m "spread sample $(date -u +%F) (london+ny overlap)" || echo "nothing to commit"
+          git commit -m "spread sample $(date -u +'%F %H:%M UTC')" || echo "nothing to commit"
           git push
+
+      - name: Build summary text
+        id: summary
+        run: |
+          python3 <<'PYEOF'
+          import json, datetime, os
+          d = json.load(open("/tmp/spread_result.json"))
+          hh = d["utc"][11:16]
+          nice = {"USDJPY.b": "dolar yen", "EURJPY.b": "euro yen", "USDCAD.b": "dolar canadiense", "NZDUSD.b": "neozelandes dolar"}
+          in_session = 12 <= int(d["utc"][11:13]) < 17
+          parts = [f"Muestreo de spread ADN de las {hh} UTC" + (", dentro de la sesion Londres Nueva York." if in_session else ", fuera de sesion.")]
+          for sym, st in d["stats"].items():
+              parts.append(f"{nice.get(sym, sym)}: tipico {st['mode']} puntos, promedio {st['mean']}, rango {st['min']} a {st['max']}.")
+          text = " ".join(parts)
+          with open("/tmp/summary.txt", "w") as f:
+              f.write(text)
+          print(text)
+          PYEOF
+
+      - name: Send Telegram update (audio via ElevenLabs si hay key, texto si no)
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          ELEVENLABS_API_KEY: ${{ secrets.ELEVENLABS_API_KEY }}
+          ELEVENLABS_VOICE_ID: ${{ vars.ELEVENLABS_VOICE_ID || '21m00Tcm4TlvDq8ikWAM' }}
+        run: |
+          TEXT=$(cat /tmp/summary.txt)
+          if [ -n "$ELEVENLABS_API_KEY" ]; then
+            HTTP=$(curl -s -o /tmp/summary.mp3 -w "%{http_code}" \
+              -X POST "https://api.elevenlabs.io/v1/text-to-speech/${ELEVENLABS_VOICE_ID}" \
+              -H "xi-api-key: ${ELEVENLABS_API_KEY}" \
+              -H "Content-Type: application/json" \
+              -d "$(python3 -c 'import json,sys; print(json.dumps({"text": open("/tmp/summary.txt").read(), "model_id": "eleven_multilingual_v2"}))')")
+            if [ "$HTTP" = "200" ]; then
+              curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendAudio" \
+                -F "chat_id=${TELEGRAM_CHAT_ID}" \
+                -F "audio=@/tmp/summary.mp3" \
+                -F "title=Spread ADN $(date -u +'%H:%M UTC')" \
+                -F "caption=${TEXT}" > /dev/null && echo "telegram audio sent"
+              exit 0
+            fi
+            echo "elevenlabs http $HTTP — fallback a texto"
+          fi
+          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            -F "chat_id=${TELEGRAM_CHAT_ID}" \
+            -F "text=🎙️ ${TEXT}" > /dev/null && echo "telegram text sent"
