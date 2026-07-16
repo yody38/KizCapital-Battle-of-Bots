@@ -1,0 +1,52 @@
+name: voice-note
+
+# Convierte un texto en audio (ElevenLabs, voz de vars.ELEVENLABS_VOICE_ID)
+# y lo envia al Telegram del owner. Reutilizable: cualquier update importante
+# puede llegar como nota de voz. Fallback a texto si ElevenLabs falla.
+
+on:
+  workflow_dispatch:
+    inputs:
+      text:
+        description: "Texto del voice-over"
+        required: true
+        type: string
+      title:
+        description: "Titulo del audio en Telegram"
+        required: false
+        type: string
+        default: "Kiz Capital — update"
+
+jobs:
+  send:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      ELEVENLABS_API_KEY: ${{ secrets.ELEVENLABS_API_KEY }}
+      ELEVENLABS_VOICE_ID: ${{ vars.ELEVENLABS_VOICE_ID || '21m00Tcm4TlvDq8ikWAM' }}
+      NOTE_TEXT: ${{ inputs.text }}
+      NOTE_TITLE: ${{ inputs.title }}
+    steps:
+      - name: TTS + Telegram
+        run: |
+          printf '%s' "$NOTE_TEXT" > /tmp/note.txt
+          if [ -n "$ELEVENLABS_API_KEY" ]; then
+            HTTP=$(curl -s -o /tmp/note.mp3 -w "%{http_code}" \
+              -X POST "https://api.elevenlabs.io/v1/text-to-speech/${ELEVENLABS_VOICE_ID}" \
+              -H "xi-api-key: ${ELEVENLABS_API_KEY}" \
+              -H "Content-Type: application/json" \
+              -d "$(python3 -c 'import json; print(json.dumps({"text": open("/tmp/note.txt").read(), "model_id": "eleven_multilingual_v2"}))')")
+            if [ "$HTTP" = "200" ]; then
+              curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendAudio" \
+                -F "chat_id=${TELEGRAM_CHAT_ID}" \
+                -F "audio=@/tmp/note.mp3" \
+                -F "title=${NOTE_TITLE}" > /dev/null && { echo "audio sent"; exit 0; }
+            fi
+            echo "elevenlabs http $HTTP — fallback a texto"
+            cat /tmp/note.mp3 || true
+          fi
+          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
+            --data-urlencode "text=🎙️ $(cat /tmp/note.txt)" > /dev/null && echo "text sent"
