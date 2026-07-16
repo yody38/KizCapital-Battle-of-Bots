@@ -1,0 +1,125 @@
+name: spread-sampler
+
+# Muestreo de spread ADN (solo lectura) durante el overlap Londres+NY.
+# Pedido 2026-07-16: medir spread real de USDJPY.b/EURJPY.b/USDCAD.b/NZDUSD.b
+# en la cuenta 32081 (VPS5) para calibrar Symbol Settings de EA Studio.
+# Patrón: gh-actions + tailscale + ssh one-shot (mismo que sampler-tick.yml).
+# Resultados: spread-samples/YYYY-MM-DD.json (commit al repo).
+
+on:
+  workflow_dispatch: {}
+  schedule:
+    - cron: "5 13 * * 1-5"   # 13:05 UTC lun-vie = 6:05 AM Las Vegas (PDT), dentro de la sesion 12:00-17:00 UTC
+
+concurrency:
+  group: spread-sampler
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  sample:
+    runs-on: ubuntu-latest
+    timeout-minutes: 28
+    env:
+      VPS_HOST: "100.70.228.19"   # VPS5 (cuenta real 32081)
+      DURATION_S: "1200"          # 20 minutos
+      INTERVAL_S: "5"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup SSH key
+        run: |
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_ed25519_ci
+          chmod 600 ~/.ssh/id_ed25519_ci
+
+      - name: Tailscale up
+        uses: tailscale/github-action@v3
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret:    ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:ci
+          version: latest
+
+      - name: Upload sampler script (read-only, attach a terminal 22972 = login 32081)
+        run: |
+          cat > /tmp/spread_sampler_ci.py <<'PYEOF'
+          import MetaTrader5 as mt5, json, time, statistics, os, datetime
+
+          SYMBOLS = ["USDJPY.b","EURJPY.b","USDCAD.b","NZDUSD.b"]
+          DURATION_S = int(os.environ.get("DURATION_S", "1200"))
+          INTERVAL_S = int(os.environ.get("INTERVAL_S", "5"))
+
+          ok = mt5.initialize(path=r"C:\Program Files\MetaTrader 5 22972\terminal64.exe", timeout=10000)
+          if not ok:
+              print(json.dumps({"error": str(mt5.last_error())}))
+              raise SystemExit(1)
+
+          ai = mt5.account_info()
+          samples = {s: [] for s in SYMBOLS}
+          t_end = time.time() + DURATION_S
+          while time.time() < t_end:
+              for s in SYMBOLS:
+                  info = mt5.symbol_info(s)
+                  if info:
+                      samples[s].append(info.spread)
+              time.sleep(INTERVAL_S)
+
+          mt5.shutdown()
+
+          result = {
+              "login": ai.login if ai else None,
+              "utc": datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+              "window": "london_ny_overlap",
+              "duration_s": DURATION_S,
+              "interval_s": INTERVAL_S,
+              "stats": {},
+          }
+          for s, vals in samples.items():
+              if vals:
+                  result["stats"][s] = {
+                      "min": min(vals),
+                      "max": max(vals),
+                      "mean": round(statistics.mean(vals), 2),
+                      "median": statistics.median(vals),
+                      "mode": statistics.mode(vals),
+                      "count": len(vals),
+                  }
+          print(json.dumps(result, indent=2))
+          PYEOF
+          B64=$(base64 -w0 /tmp/spread_sampler_ci.py)
+          ssh -i ~/.ssh/id_ed25519_ci \
+              -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15 \
+              "trader@${VPS_HOST}" \
+              "powershell -NoProfile -Command \"[System.IO.File]::WriteAllBytes('C:\mt5-mcp\spread_sampler_ci.py', [Convert]::FromBase64String('$B64'))\""
+
+      - name: Run 20-minute sampling (read-only)
+        run: |
+          ssh -i ~/.ssh/id_ed25519_ci \
+              -o StrictHostKeyChecking=accept-new \
+              -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=100 \
+              "trader@${VPS_HOST}" \
+              "powershell -NoProfile -Command \"\$env:DURATION_S='${DURATION_S}'; \$env:INTERVAL_S='${INTERVAL_S}'; & 'C:\mt5-mcp\venv\Scripts\python.exe' 'C:\mt5-mcp\spread_sampler_ci.py'\"" \
+              | tee /tmp/spread_result.json
+
+      - name: Cleanup remote script
+        if: always()
+        run: |
+          ssh -i ~/.ssh/id_ed25519_ci \
+              -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15 \
+              "trader@${VPS_HOST}" \
+              "powershell -NoProfile -Command \"Remove-Item C:\mt5-mcp\spread_sampler_ci.py -ErrorAction SilentlyContinue\"" || true
+
+      - name: Commit result
+        run: |
+          python3 -c "import json,sys; json.load(open('/tmp/spread_result.json'))" || { echo "invalid JSON, aborting commit"; exit 1; }
+          mkdir -p spread-samples
+          cp /tmp/spread_result.json "spread-samples/$(date -u +%F).json"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add spread-samples/
+          git commit -m "spread sample $(date -u +%F) (london+ny overlap)" || echo "nothing to commit"
+          git push
