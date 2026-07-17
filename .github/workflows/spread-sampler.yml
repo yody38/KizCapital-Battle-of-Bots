@@ -60,6 +60,10 @@ jobs:
               print(json.dumps({"error": str(mt5.last_error())}))
               raise SystemExit(1)
 
+          for s in SYMBOLS:
+              mt5.symbol_select(s, True)
+          time.sleep(2)
+
           ai = mt5.account_info()
           samples = {s: [] for s in SYMBOLS}
           t_end = time.time() + DURATION_S
