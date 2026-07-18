@@ -81,7 +81,8 @@ python3 'Battle of Bots/scripts/heartbeat_check.py' --no-email
 # 2. Simular un fail (envía email real si --no-email se omite):
 python3 'Battle of Bots/scripts/heartbeat_check.py' --simulate-lag-min 70 --no-email
 
-# 3. Ver el estado operativo en cualquier momento:
+# 3. Ver el estado operativo en cualquier momento (lo genera post_merge.py en
+#    cada cycle de CI; localmente puede no existir hasta clonar/pull reciente):
 cat 'Battle of Bots/SYNC_STATUS.md'
 
 # 4. Ver el historial de recuperaciones aprendidas:

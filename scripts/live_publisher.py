@@ -1,10 +1,11 @@
 """
-Kiz Capital LLC · Battle of Bots — Live equity publisher (VPS5)
+Kiz Capital LLC · Battle of Bots — Live equity publisher
 
-Loops every --interval seconds (default 3), queries MetaTrader5 for the 2 real
-accounts (#25425 and #32081 on VPS5), and UPSERTs the snapshot into Supabase
-table public.live_real_state. The dashboard subscribes to that table via
-Supabase Realtime for ~3s updates.
+Loops every --interval seconds (default 3), queries MetaTrader5 for this VPS's
+real accounts (roster set via REAL_LOGINS/LIVE_VPS_TAG in .live_publisher.env —
+#32081/#43306 on VPS5, #25425/#43411/#43414 on VPS6), and UPSERTs the snapshot
+into Supabase table public.live_real_state. The dashboard subscribes to that
+table via Supabase Realtime for ~3s updates.
 
 Auth pattern matches real_accounts.py / snapshot_builder.py — iterates
 installed MT5 terminals (`C:\\Program Files\\MetaTrader 5 *\\terminal64.exe`)

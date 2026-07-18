@@ -299,7 +299,7 @@ function renderStalenessBanner(snap) {
     const since = new Date(snap.generated_at);
     const hh = String(since.getUTCHours()).padStart(2,'0');
     const mm = String(since.getUTCMinutes()).padStart(2,'0');
-    msg = `Datos no actualizados desde ${hh}:${mm} UTC (${Math.floor(lagMin)} min). Pipeline en investigación — recuperación automática en curso.`;
+    msg = `Datos no actualizados desde ${hh}:${mm} UTC (${Math.floor(lagMin)} min). Pipeline degradado — ver el estado más reciente en GitHub Issues del repo.`;
   } else if (partial && lagMin <= 35) {
     msg = 'Datos parciales: el último cycle se completó pero al menos una VPS no respondió.';
   }
@@ -893,18 +893,32 @@ function renderRealHistoryChart(rows) {
     ptsByBucket.get(t).push(r);
   }
 
-  // Total con forward-fill: los buckets no siempre están alineados entre
-  // cuentas (publishers en VPS distintas), así que se suma la última equity
-  // conocida de cada una — y solo desde que TODAS tienen al menos un punto.
+  // Total con forward-fill ACOTADO: los buckets no siempre están alineados
+  // entre cuentas (publishers en VPS distintas), así que se suma la última
+  // equity conocida de cada una — solo desde que TODAS tienen al menos un
+  // punto, y solo mientras ninguna lleve más de 3× el gap mediano entre
+  // buckets (mín 5 min) sin reportar. Una cuenta cuyo publisher murió corta
+  // la línea Total (gap) en vez de congelar su equity a lo ancho del chart.
   const buckets = [...ptsByBucket.keys()].sort((a, b) => a - b);
+  const gaps = [];
+  for (let i = 1; i < buckets.length; i++) gaps.push(buckets[i] - buckets[i - 1]);
+  gaps.sort((a, b) => a - b);
+  const medGap = gaps.length ? gaps[Math.floor(gaps.length / 2)] : 0;
+  const staleMs = Math.max(5 * 60000, medGap * 3);
   const lastByLogin = new Map();
   const total = [];
   for (const t of buckets) {
-    ptsByBucket.get(t).forEach(r => lastByLogin.set(r.login, Number(r.equity)));
-    if (lastByLogin.size === byLogin.size) {
+    ptsByBucket.get(t).forEach(r => lastByLogin.set(r.login, { t, y: Number(r.equity) }));
+    let fresh = lastByLogin.size === byLogin.size;
+    if (fresh) {
+      lastByLogin.forEach(v => { if (t - v.t > staleMs) fresh = false; });
+    }
+    if (fresh) {
       let sum = 0;
-      lastByLogin.forEach(v => { sum += v; });
+      lastByLogin.forEach(v => { sum += v.y; });
       total.push({ x: t, y: sum });
+    } else if (total.length && total[total.length - 1].y !== null) {
+      total.push({ x: t, y: null }); // corta la línea, no arrastra valores viejos
     }
   }
 
@@ -917,10 +931,11 @@ function renderRealHistoryChart(rows) {
     pointRadius: 0,
     tension: 0.25,
   }));
-  if (byLogin.size > 1 && total.length) {
+  if (byLogin.size > 1 && total.some(p => p.y !== null)) {
     datasets.push({
       label: 'Total', data: total, borderColor: '#cfd5e6', borderDash: [6, 4],
       backgroundColor: 'transparent', borderWidth: 1.4, pointRadius: 0, tension: 0.25,
+      spanGaps: false,
     });
   }
 
