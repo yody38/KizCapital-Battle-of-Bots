@@ -1,0 +1,40 @@
+{
+  "login": 32081,
+  "utc": "2026-07-27T08:05:28Z",
+  "duration_s": 1200,
+  "interval_s": 5,
+  "stats": {
+    "USDJPY.b": {
+      "min": 3,
+      "max": 5,
+      "mean": 3.06,
+      "median": 3.0,
+      "mode": 3,
+      "count": 238
+    },
+    "EURJPY.b": {
+      "min": 5,
+      "max": 9,
+      "mean": 5.92,
+      "median": 5.0,
+      "mode": 5,
+      "count": 238
+    },
+    "USDCAD.b": {
+      "min": 4,
+      "max": 9,
+      "mean": 5.87,
+      "median": 6.0,
+      "mode": 7,
+      "count": 238
+    },
+    "NZDUSD.b": {
+      "min": 4,
+      "max": 7,
+      "mean": 5.69,
+      "median": 5.5,
+      "mode": 5,
+      "count": 238
+    }
+  }
+}
