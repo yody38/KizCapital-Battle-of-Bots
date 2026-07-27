@@ -60,12 +60,26 @@ HTTP_TIMEOUT = 5
 # VPS (REAL_LOGINS=comma-list, LIVE_VPS_TAG=vpsN, LOGIN_TERMINAL_MAP=
 # login=path;login=path). Este default solo aplica si el env file no lo trae.
 # Sync con verify_integrity.EXPECTED_REAL y post_merge.detect_real_accounts.
-REAL_LOGINS: set[int] = {25425, 32081, 43306}
+# Verificado contra las 6 VPS por SSH el 2026-07-27: 32081 en vps5; 25425, 43411 y
+# 43414 en vps6; 43306 en vps5 pero con su terminal caído. El default anterior
+# ({25425, 32081, 43306}) desconocía 43411/43414 — si una VPS perdía su
+# .live_publisher.env, esas dos reales ($15,029) se quedaban sin publicar en silencio.
+REAL_LOGINS: set[int] = {25425, 32081, 43306, 43411, 43414}
 TERMINAL_GLOB = r"C:\Program Files\MetaTrader 5 *\terminal64.exe"
 
 # Exit (so Railway restarts the SSH session) after a login is missing this many
 # consecutive cycles — indicates that terminal is unreachable / down.
-MAX_MISSING_STREAK = 6
+#
+# 10, no 6 (2026-07-27): en una VPS sin RAM (VPS6 pide 6.9GB y tiene 2.5GB, pagina a
+# disco) MT5 tarda de sobra en responder y 6 ciclos se agotaban en ~2min. El proceso se
+# suicidaba, el supervisor lo relanzaba, el arranque en frío volvía a ser lento y fallaba
+# otra vez: bucle mortal que dejó las 3 reales de VPS6 sin publicar 15.9h.
+# No se sube más porque publish_once_timed FILTRA un hilo daemon por cada ciclo que
+# vence (queda colgado en mt5.initialize); con el piso de 45s, 10 rachas ya son ~7min
+# de tolerancia y como mucho 10 hilos colgados antes de que el supervisor reinicie
+# limpio. Subirlo más alarga el hueco sin datos y acumula hilos en la VPS que menos
+# memoria tiene. Un terminal REALMENTE caído se sigue detectando, solo que más tarde.
+MAX_MISSING_STREAK = int(os.environ.get("LIVE_MAX_MISSING_STREAK", "10"))
 
 # Historia intradía persistente (F1): 1 de cada N ciclos publicados también se
 # INSERTa en public.live_real_history (~30s con interval=3). Best-effort: un
@@ -480,7 +494,15 @@ def main() -> None:
     )
 
     backoff = interval
-    cycle_timeout = max(10.0, interval * 4)
+    # Piso de 45s, no 10s (2026-07-27): el presupuesto por ciclo estaba acoplado solo
+    # al interval, así que con --interval 3 daba 12s. En una VPS que pagina a disco,
+    # mt5.initialize() sobre un terminal frío tarda más que eso y CADA ciclo moría con
+    # "publish cycle exceeded 12.0s (MT5 hung?)" → 0/3 cuentas publicadas. El piso es
+    # tolerancia a máquina lenta, no un cambio de cadencia: en una VPS sana el ciclo
+    # sigue tardando ~1s y publicando al ritmo de interval.
+    cycle_timeout = max(
+        float(os.environ.get("LIVE_CYCLE_TIMEOUT_MIN", "45")), interval * 4
+    )
     # Per-login miss streak: a login missing for MAX_MISSING_STREAK cycles trips
     # exit(1). Tracking per-login (not a global empty counter) catches the case
     # where one terminal is permanently dead while the other keeps publishing —
