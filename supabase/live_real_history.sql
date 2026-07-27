@@ -128,6 +128,13 @@ as $$
        limit 1
     ) ff on true
    group by bk.b
+  -- CESTA FIJA (2026-07-27): un bucket solo se emite cuando TODAS las cuentas del
+  -- roster de la semana ya tienen dato. El `join lateral` es INNER, asi que una
+  -- cuenta sin filas todavia se caia de la suma en silencio: los buckets tempranos
+  -- sumaban menos cuentas que los actuales y el "ingreso de la semana" contaba como
+  -- ganancia el equity de una cuenta que simplemente aparecio (caso real: apertura
+  -- con 4 cuentas = $27,325 vs cierre con 5 = $34,703 -> +$7,378 inventados).
+  having count(*) = (select count(*) from logins)
    order by bk.b asc;
 $$;
 

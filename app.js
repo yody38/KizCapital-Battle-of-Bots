@@ -230,6 +230,10 @@ const snapPush = { initialized: false, lastSha: null, channel: null, pollTimer: 
 
 function _snapPushApply(row) {
   if (!row || !row.manifest_sha) return;
+  // [VELOCIDAD F6] Alimenta la ruta de borde content-addressed (/d/<sha>/…).
+  // Se hace SIEMPRE, incluso en el primer valor visto (que no dispara recarga),
+  // porque el sha es justo lo que esa ruta necesita para servir este ciclo.
+  try { window.kizSetCycleSha && window.kizSetCycleSha(row.manifest_sha); } catch {}
   if (snapPush.lastSha === row.manifest_sha) return;
   const first = snapPush.lastSha === null;
   snapPush.lastSha = row.manifest_sha;
@@ -412,11 +416,16 @@ function render() {
    series missing). Single source of truth: the CI workflow blocks deploy
    when verify fails, so reaching the dashboard means the report exists. */
 async function auditBotHistoryCoverage() {
-  let report = null;
-  try {
-    const res = await fetch('data/integrity_report.json', { cache: 'no-cache' });
-    if (res.ok) report = await res.json();
-  } catch {}
+  // [VELOCIDAD F6] integrity_report y upload_health se piden EN PARALELO. Antes
+  // upload_health se pedía más abajo, dentro del mismo await chain, así que su
+  // round-trip se sumaba en serie al de integrity_report para pintar un badge
+  // que necesita los dos.
+  const [report, uploadHealth] = await Promise.all([
+    fetch('data/integrity_report.json', { cache: 'no-cache' })
+      .then(r => (r.ok ? r.json() : null)).catch(() => null),
+    fetch('data/upload_health.json', { cache: 'no-cache' })
+      .then(r => (r.ok ? r.json() : null)).catch(() => null),
+  ]);
 
   let banner = document.getElementById('bot-history-audit-banner');
   const main = document.querySelector('main.container');
@@ -445,8 +454,7 @@ async function auditBotHistoryCoverage() {
   // failover R2 (paridad write-then-read) + ledger notarizado del día.
   let extra = '';
   try {
-    const uh = await fetch('data/upload_health.json', { cache: 'no-cache' }).then(r => r.ok ? r.json() : null);
-    const r2 = uh && uh.r2;
+    const r2 = uploadHealth && uploadHealth.r2;   // ya resuelto arriba en paralelo
     if (r2 && r2.enabled) extra += r2.parity_ok ? ' · 🛟 R2 ✓' : ' · 🛟 R2 sin paridad';
   } catch {}
 
@@ -994,7 +1002,7 @@ async function renderSystemHealth() {
   const section = document.getElementById('system-health');
   if (!section) return;
 
-  const getJson = (p) => fetch(p, { cache: 'no-store' }).then(r => r.ok ? r.json() : null).catch(() => null);
+  const getJson = (p) => fetch(p).then(r => r.ok ? r.json() : null).catch(() => null);
   const [status, history] = await Promise.all([
     getJson('data/watchdog_status.json'),
     getJson('data/watchdog_history.json'),
@@ -1684,7 +1692,7 @@ async function openAccountModal(vps, login) {
       .sort((a, b) => b.net_profit - a.net_profit);
 
     // Cross-check against per-bot files availability via manifest.
-    const manifestRes = await fetch(`data/bots/_manifest.json?t=${Date.now()}`);
+    const manifestRes = await fetch('data/bots/_manifest.json');
     const manifest = manifestRes.ok ? await manifestRes.json() : { bots: {} };
     const availableMagics = new Set(
       Object.values(manifest.bots || {})
@@ -1763,7 +1771,7 @@ async function openBotModal(vps, login, magic) {
   document.querySelectorAll('.bot-tab').forEach(t => t.classList.toggle('active', t.dataset.tab === 'growth'));
 
   try {
-    const bot = await fetchBotHistoryWithRetry(vps, login, magic);
+    const bot = await loadPerBot(vps, login, magic);
     if (!bot) throw new Error(`No pude cargar el histórico de este bot tras reintentos. El archivo puede estar regenerándose en el VPS — espera 1 min y reabre.`);
     // [VELOCIDAD F1] El per-bot file trae bajo `detail` los campos modal-only
     // (regime, event_stress, promotion_radar, underwater, oos, institutional,
@@ -1800,13 +1808,46 @@ async function fetchBotHistoryWithRetry(vps, login, magic) {
   const delays = [180, 380, 750, 1500];
   for (let i = 0; i < delays.length; i++) {
     try {
-      const res = await fetch(`${url}?t=${Date.now()}_${i}`);
+      // [VELOCIDAD F6] El primer intento va SIN cache-buster para que el caché
+      // del navegador y del SW puedan servirlo. El buster se conserva solo en
+      // los reintentos, que es donde de verdad hacía falta: durante el swap
+      // atómico del mirror el archivo devuelve 404 un instante y no queremos
+      // que un intermediario nos devuelva ese hueco.
+      const res = await fetch(i === 0 ? url : `${url}?retry=${Date.now()}_${i}`);
       if (res.ok) return await res.json();
       if (res.status !== 404) return null; // permanent error
     } catch {}
     await new Promise(r => setTimeout(r, delays[i]));
   }
   return null;
+}
+
+/* [VELOCIDAD F6] Loader único y memoizado de los per-bot files.
+   Antes había NUEVE copias de este mismo fetch repartidas por app.js, todas con
+   `?t=${Date.now()}`, que garantiza descarga completa aunque el archivo no haya
+   cambiado — reabrir el mismo bot dos veces seguidas costaba dos descargas.
+   La clave del caché va atada al ciclo publicado: en cuanto el pipeline sube un
+   ciclo nuevo, `generated_at` cambia y el caché se invalida solo, así que nunca
+   puede servir datos de un ciclo viejo. */
+const perBotCache = new Map();      // "vps/login-magic" -> { cycle, data }
+const PER_BOT_CACHE_MAX = 60;       // techo de memoria: los per-bot traen histórico completo
+
+function currentCycleKey() {
+  const s = state.snapshot;
+  return (s && (s.manifest_sha || s.generated_at)) || '0';
+}
+
+async function loadPerBot(vps, login, magic) {
+  const key = `${vps}/${login}-${magic}`;
+  const cycle = currentCycleKey();
+  const hit = perBotCache.get(key);
+  if (hit && hit.cycle === cycle) return hit.data;
+  const data = await fetchBotHistoryWithRetry(vps, login, magic);
+  if (data) {
+    if (perBotCache.size >= PER_BOT_CACHE_MAX) perBotCache.delete(perBotCache.keys().next().value);
+    perBotCache.set(key, { cycle, data });
+  }
+  return data;
 }
 
 function closeBotModal() {
@@ -2435,7 +2476,7 @@ const portfolioState = { data: null, capital: 50000, method: 'inverse_volatility
 
 async function loadPortfolio() {
   try {
-    const res = await fetch(`data/portfolio.json?t=${Date.now()}`);
+    const res = await fetch('data/portfolio.json');
     if (!res.ok) return null;
     return await res.json();
   } catch { return null; }
@@ -2601,9 +2642,8 @@ function bldAccountBalance(vps, login) {
 async function bldLoadSeries(key, vps, login, magic) {
   if (builderState.seriesCache[key]) return builderState.seriesCache[key];
   try {
-    const res = await fetch(`data/bots/${vps}/${login}-${magic}.json?t=${Date.now()}`);
-    if (!res.ok) return null;
-    const data = await res.json();
+    const data = await loadPerBot(vps, login, magic);
+    if (!data) return null;
     builderState.seriesCache[key] = data;
     return data;
   } catch { return null; }
@@ -3807,7 +3847,7 @@ function hideAnalysisPanel() {
 
 async function loadCorrelations() {
   try {
-    const res = await fetch(`data/correlations.json?t=${Date.now()}`);
+    const res = await fetch('data/correlations.json');
     if (!res.ok) return null;
     return await res.json();
   } catch { return null; }
@@ -4578,7 +4618,7 @@ loadSnapshot();         // then revalidate from the network in the background
 // ----------------------- MCP Health chip + modal -----------------------
 async function fetchMcpHealth() {
   try {
-    const res = await fetch('data/mcp_health.json?ts=' + Date.now());
+    const res = await fetch('data/mcp_health.json');
     if (!res || !res.ok) return null;
     return await res.json();
   } catch (e) { return null; }
@@ -4707,7 +4747,7 @@ function fmtMs(ms) {
 
 async function fetchTiming() {
   try {
-    const res = await fetch('data/pipeline_timing.json?ts=' + Date.now());
+    const res = await fetch('data/pipeline_timing.json');
     if (!res || !res.ok) return null;
     return await res.json();
   } catch (e) { return null; }
@@ -4978,8 +5018,8 @@ async function drawUnderwaterChart(b) {
   // Load per-bot daily series
   let daily = [];
   try {
-    const res = await fetch(`data/bots/${b.vps}/${b.account_login}-${b.magic}.json?t=${Date.now()}`);
-    if (res.ok) { const j = await res.json(); daily = j.daily_equity_series || []; }
+    const j = await loadPerBot(b.vps, b.account_login, b.magic);
+    if (j) { daily = j.daily_equity_series || []; }
   } catch {}
   if (!daily.length) { canvas.parentElement.innerHTML = '<div class="empty-state">Sin daily_equity_series.</div>'; return; }
   const labels = daily.map(p => new Date(p.date));
@@ -5227,8 +5267,8 @@ async function drawViolinChart(b) {
   if (!td) return;
   let trades = [];
   try {
-    const res = await fetch(`data/bots/${b.vps}/${b.account_login}-${b.magic}.json?t=${Date.now()}`);
-    if (res.ok) { const j = await res.json(); trades = (j.trades || []).map(t => t.net).filter(n => typeof n === 'number'); }
+    const j = await loadPerBot(b.vps, b.account_login, b.magic);
+    if (j) { trades = (j.trades || []).map(t => t.net).filter(n => typeof n === 'number'); }
   } catch {}
   if (trades.length === 0) { canvas.parentElement.innerHTML = '<div class="empty-state">Sin trades disponibles.</div>'; return; }
 
@@ -5408,7 +5448,6 @@ async function drawPairsCharts(b) {
   const pr = b.pair_recommendations;
   if (!pr) return;
   // Load main bot series
-  const baseUrl = (k) => `data/bots/${k.vps}/${k.login}-${k.magic}.json?t=${Date.now()}`;
   const aSeries = await loadDailyNetMap({ vps: b.vps, login: b.account_login, magic: b.magic });
   if (!aSeries) return;
   for (let i = 0; i < pr.partners.length; i++) {
@@ -5423,9 +5462,8 @@ async function drawPairsCharts(b) {
 
 async function loadDailyNetMap({ vps, login, magic }) {
   try {
-    const res = await fetch(`data/bots/${vps}/${login}-${magic}.json?t=${Date.now()}`);
-    if (!res.ok) return null;
-    const j = await res.json();
+    const j = await loadPerBot(vps, login, magic);
+    if (!j) return null;
     const map = {};
     for (const row of (j.daily_equity_series || [])) {
       if (row.date) map[row.date] = row.daily_net || 0;
@@ -5546,8 +5584,8 @@ async function initTimeMachine(b) {
   if (!dateInput || !capInput) return;
   let daily = null;
   try {
-    const res = await fetch(`data/bots/${b.vps}/${b.account_login}-${b.magic}.json?t=${Date.now()}`);
-    if (res.ok) { const j = await res.json(); daily = j.daily_equity_series || []; }
+    const j = await loadPerBot(b.vps, b.account_login, b.magic);
+    if (j) { daily = j.daily_equity_series || []; }
   } catch {}
   if (!daily || daily.length < 2) {
     document.querySelector('.tm-canvas-wrap').innerHTML = '<div class="empty-state">Sin daily_equity_series suficiente.</div>';
@@ -5659,7 +5697,7 @@ let _survivalCache = null;
 async function loadSurvivalTable() {
   if (_survivalCache) return _survivalCache;
   try {
-    const res = await fetch(`data/survival.json?t=${Date.now()}`);
+    const res = await fetch('data/survival.json');
     if (!res.ok) return null;
     _survivalCache = await res.json();
     return _survivalCache;
@@ -6054,9 +6092,8 @@ function closeDNAModal() {
 async function drawDNAMiniCharts(b) {
   let daily = [];
   try {
-    const res = await fetch(`data/bots/${b.vps}/${b.account_login}-${b.magic}.json?t=${Date.now()}`);
-    if (res.ok) {
-      const j = await res.json();
+    const j = await loadPerBot(b.vps, b.account_login, b.magic);
+    if (j) {
       daily = j.daily_equity_series || [];
       // Equity
       const eqCtx = document.getElementById('dna-mini-equity');
@@ -6181,8 +6218,8 @@ async function addBotToCompareByIds(vps, login, magic, { source = 'modal' } = {}
   const snapBot = findBotInSnapshot(login, magic);
   let daily = [];
   try {
-    const res = await fetch(`data/bots/${vps}/${login}-${magic}.json?t=${Date.now()}`);
-    if (res.ok) { const j = await res.json(); daily = j.daily_equity_series || []; }
+    const j = await loadPerBot(vps, login, magic);
+    if (j) daily = j.daily_equity_series || [];
   } catch {}
   state.compareList.push({ key, vps, login, magic, bot: snapBot, daily });
   refreshCompareBadge();
@@ -7213,14 +7250,24 @@ function warWeeklyHistoryPrefix(cutoffMs) {
     if (!byTs.has(r.t)) byTs.set(r.t, []);
     byTs.get(r.t).push(r);
   }
+  // CESTA FIJA (2026-07-27): el mínimo exigido son TODAS las cuentas reales del
+  // roster actual (state.realLogins), no las que casualmente aparecieron en la
+  // ventana. Con `distinctLogins` la curva arrancaba sumando las cuentas que hubiera
+  // ese domingo y terminaba sumando las de hoy: si una real estuvo caída al abrir la
+  // semana (o vivía en otra VPS y aún no se leía), la apertura valía 4 cuentas y el
+  // cierre 5, y el "ingreso de la semana" mostraba como ganancia los ~$5,000 de la
+  // cuenta que apareció. Comparar cestas distintas inventa dinero que nadie ganó.
+  const required = (state.realLogins && state.realLogins.size)
+    ? state.realLogins.size
+    : distinctLogins.size;
   const last = new Map();
   const out = [];
   for (const t of [...byTs.keys()].sort((a, b) => a - b)) {
     byTs.get(t).forEach(r => last.set(r.login, r.equity));
-    if (last.size >= distinctLogins.size) {
+    if (last.size >= required) {
       let sum = 0;
       last.forEach(v => { sum += v; });
-      out.push({ x: t, y: sum });
+      out.push({ x: t, y: sum, n: last.size });
     }
   }
   return out;
@@ -7590,9 +7637,8 @@ async function wkLoadRealTrades() {
   try {
     const results = await Promise.all(bots.map(async (b) => {
       try {
-        const res = await fetch(`data/bots/${b.vps}/${b.account_login}-${b.magic}.json?t=${Date.now()}`);
-        if (!res.ok) return [];
-        const j = await res.json();
+        const j = await loadPerBot(b.vps, b.account_login, b.magic);
+        if (!j) return [];
         return (j.trades || []).map(t => ({ ...t, _key: botKey(b), _label: botLabel(b), _login: b.account_login }));
       } catch { return []; }
     }));
