@@ -2816,8 +2816,9 @@ def compute_vps_freshness(data_dir, vps_ids=None):
                 partial = True
         except Exception as e:
             # Corrupt/unreadable VPS snapshot: mark stale+corrupt so the freshness
-            # gate (verify_integrity.check_freshness) hard-fails for real accounts
-            # on this VPS instead of silently passing (present=True, stale absent).
+            # gate (verify_integrity.check_freshness) marca DEGRADED las cuentas
+            # reales de esa VPS (sus cifras vienen de carry-forward) en vez de
+            # pasar en silencio (present=True, stale absent).
             out[v] = {"present": True, "error": str(e), "stale": True, "corrupt": True}
             partial = True
     return out, partial

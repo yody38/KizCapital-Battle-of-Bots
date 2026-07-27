@@ -58,8 +58,14 @@ DEFAULT_TOLERANCE = 0.05  # USD
 # This constant is only the seed/fallback used when the persisted roster is unreachable,
 # guaranteeing these never silently drop even during a Supabase outage. Keyed by (vps,
 # login) for readability; the gate itself compares by login (survives VPS moves).
-EXPECTED_REAL = {("vps6", 25425), ("vps5", 32081),
-                 ("vps5", 43306)}  # #25425 movida a vps6 (slot limpio 40848) 2026-06-30
+# Verificado cuenta por cuenta contra las 6 VPS por SSH el 2026-07-27.
+EXPECTED_REAL = {
+    ("vps5", 32081),
+    ("vps6", 25425),   # movida de vps5 → vps6 (slot limpio 40848) 2026-06-30
+    ("vps6", 43411),   # faltaban en el floor: solo estaban protegidas por el roster
+    ("vps6", 43414),   # de Supabase — una caída de Supabase las dejaba sin gate
+    ("vps5", 43306),   # ausente de la flota desde 2026-07-27 → se publica DEGRADED
+}
 
 
 def load_env() -> dict[str, str]:
@@ -250,35 +256,54 @@ def check_bot(bot: dict, tolerance: float) -> list[str]:
     return fails
 
 
-def check_freshness(snap: dict, expected_logins: set[int]) -> tuple[list[str], list[str], dict]:
-    """5th check — real-account data authenticity (HARD gate) + demo staleness (WARN).
+def check_freshness(
+    snap: dict, expected_logins: set[int], roster: dict | None = None
+) -> tuple[list[str], list[str], list[dict], dict]:
+    """5th check — real-account data authenticity + demo staleness (WARN).
 
     Re-derivable from the snapshot itself (uses the `vps_freshness` block baked in
     by post_merge + `real_portfolio.account_count`) — no wall-clock here, so it is
-    Data-Integrity-DNA compliant. Hard-fails only for REAL accounts; demo is warn-only.
-    Note: mirror.sh already aborts the cycle at 30min snapshot age, so under normal
-    operation a VPS is never `stale` (>90min) here — this is a defense-in-depth
-    safety net that catches a real account served from a stale/absent VPS, or a
-    real account silently dropping out.
+    Data-Integrity-DNA compliant.
+
+    THREE channels, and the split is the whole point (owner rule 2026-07-27: "el
+    dashboard nunca debe parar de trabajar"):
+
+      hard[]      → aborta el ciclo. SOLO para datos que serían FALSOS: cifras
+                    equivocadas atribuidas a una cuenta que se presenta como sana.
+      degraded[]  → NO aborta: publica y marca la cuenta en su perfil. Para lo que
+                    es REPRESENTABLE con honestidad — la cuenta está ausente o sus
+                    datos son viejos. La UI lo dice; nadie lee un número inventado.
+      warn[]      → solo se muestra (demo).
+
+    Publicar cifras falsas de una cuenta real es peor que no publicar; mostrar
+    "DESCONECTADA" es honesto y deja los otros ~389 bots trabajando. Antes, una
+    sola real ausente congelaba el dashboard entero (incidente 2026-07-27: la
+    cuenta 43306 dejó 12h de datos sin subir).
     """
-    hard: list[str] = []   # contributes to ok=false (REAL accounts only)
-    warn: list[str] = []   # surfaced only, never gates (demo)
+    hard: list[str] = []       # aborta el ciclo (datos falsos)
+    warn: list[str] = []       # solo informativo (demo)
+    degraded: list[dict] = []  # publica marcando la cuenta (ausente / viejo)
     vps_fresh = snap.get("vps_freshness") or {}
     accounts = snap.get("accounts") or []
     real_accts = [a for a in accounts if a.get("is_real")]
     detail: dict = {"real_accounts": [], "demo_on_stale_vps": 0}
 
-    # (a) Each EXPECTED real account (login) must be present. `expected_logins` is the
-    #     auto-onboarding roster (persisted in Supabase, seeded by EXPECTED_REAL floor) —
-    #     keyed by login so a real surviving a VPS move is not seen as dropped. Missing =
-    #     a real silently dropped → hard gate. New reals are auto-enrolled in main().
+    # Dónde DEBERÍA vivir cada real, para poder decirle al owner en qué VPS buscarla.
+    expected_vps = {login: vps for (vps, login) in EXPECTED_REAL}
+    for lg, rec in (roster or {}).items():
+        if isinstance(rec, dict) and rec.get("vps"):
+            expected_vps.setdefault(int(lg), rec["vps"])
+
+    # (a) Cada real rostered debe estar presente. Ausente = terminal caído o cuenta
+    #     cerrada: no hay dato que falsear, así que se DEGRADA (se marca) y se publica.
     present_logins = {a.get("login") for a in real_accts}
-    missing_real = expected_logins - present_logins
-    if missing_real:
-        hard.append(
-            f"freshness: expected real account(s) ABSENT from snapshot: "
-            f"{sorted(missing_real)} (present reals: {sorted(present_logins)})"
-        )
+    for lg in sorted(expected_logins - present_logins):
+        degraded.append({
+            "login": lg,
+            "status": "disconnected",
+            "expected_vps": expected_vps.get(lg),
+            "detail": "ausente del snapshot de este ciclo — terminal caído o cuenta cerrada",
+        })
     # A rostered real that is present but drained to $0 is a retirement, not a drop —
     # surface it (dashboard hides $0 reals) without gating.
     for a in real_accts:
@@ -294,18 +319,27 @@ def check_freshness(snap: dict, expected_logins: set[int]) -> tuple[list[str], l
         if vf is None:
             status = "unknown"
             warn.append(f"freshness: real {login} on {vps} — no vps_freshness metadata (cannot verify)")
+        # Los 3 casos siguientes significan lo mismo para el lector: las cifras de esta
+        # cuenta vienen de carry-forward, no del ciclo actual. No son falsas, son VIEJAS
+        # → se marcan como stale en su perfil y el dashboard sigue publicando.
         elif vf.get("present") is False:
             status, live_feed = "vps_absent", False
-            hard.append(f"freshness: real {login} — hosting VPS {vps} ABSENT from this cycle")
+            degraded.append({
+                "login": login, "status": "stale", "expected_vps": vps,
+                "detail": f"la VPS {vps} no respondió en este ciclo — datos de carry-forward",
+            })
         elif vf.get("corrupt") or vf.get("error"):
             status, live_feed = "vps_corrupt", False
-            hard.append(
-                f"freshness: real {login} — hosting VPS {vps} snapshot CORRUPT/UNREADABLE "
-                f"({vf.get('error')})"
-            )
+            degraded.append({
+                "login": login, "status": "stale", "expected_vps": vps,
+                "detail": f"snapshot de {vps} ilegible ({vf.get('error')}) — datos de carry-forward",
+            })
         elif vf.get("stale"):
             status, live_feed = "vps_stale", False
-            hard.append(f"freshness: real {login} — hosting VPS {vps} STALE (lag={vf.get('lag_sec')}s)")
+            degraded.append({
+                "login": login, "status": "stale", "expected_vps": vps,
+                "detail": f"la VPS {vps} va atrasada (lag={vf.get('lag_sec')}s)",
+            })
         detail["real_accounts"].append(
             {"login": login, "vps": vps, "status": status, "live_feed": live_feed}
         )
@@ -320,7 +354,8 @@ def check_freshness(snap: dict, expected_logins: set[int]) -> tuple[list[str], l
     if detail["demo_on_stale_vps"]:
         warn.append(f"freshness: {detail['demo_on_stale_vps']} demo account(s) on a stale/absent VPS")
 
-    return hard, warn, detail
+    detail["degraded"] = degraded
+    return hard, warn, degraded, detail
 
 
 def remote_hash_diffs(
@@ -405,8 +440,11 @@ def main() -> int:
         if roster_changed:
             save_real_roster(env, roster)
 
-    # 5th check — real-account freshness/authenticity (hard) + demo staleness (warn).
-    freshness_hard, freshness_warn, freshness_detail = check_freshness(snap, expected_logins)
+    # 5th check — real-account freshness/authenticity. `degraded` NO aborta el ciclo:
+    # marca la cuenta y deja publicar el resto (ver docstring de check_freshness).
+    freshness_hard, freshness_warn, freshness_degraded, freshness_detail = check_freshness(
+        snap, expected_logins, roster
+    )
     all_fails.extend(freshness_hard)
 
     # Forward-tracker ledger health (post_merge surfaces tracker_health):
@@ -497,6 +535,7 @@ def main() -> int:
             "net_profit_mismatches": net_mismatches,
             "series_missing": series_missing,
             "freshness_hard_fails": len(freshness_hard),
+            "freshness_degraded": len(freshness_degraded),
             "candidate_bucket_fails": bucket_fails,
             "tracker_corrupt_lines": tracker_corrupt,
             "remote_check_run": args.check_remote,
@@ -504,6 +543,9 @@ def main() -> int:
         },
         "tolerance_usd": args.tolerance,
         "freshness": freshness_detail,
+        # Cuentas reales publicadas CON marca (ausentes o con datos viejos). El
+        # dashboard las pinta en su perfil; no bloquean el ciclo.
+        "degraded_real_accounts": freshness_degraded,
         "warnings": freshness_warn,
         "tracker_health": tracker_health,
         "failures_per_bot": per_bot_fails,
@@ -518,9 +560,16 @@ def main() -> int:
         f"net_mismatches={net_mismatches} "
         f"series_missing={series_missing} "
         f"freshness_hard={len(freshness_hard)} "
+        f"freshness_degraded={len(freshness_degraded)} "
         f"tracker_corrupt={tracker_corrupt} "
         f"remote_fails={len(remote_fails)}"
     )
+    for d in freshness_degraded:
+        vps = d.get("expected_vps") or "?"
+        print(
+            f"[verify]   DEGRADED real {d['login']} [{d['status']}] en {vps} — "
+            f"{d['detail']} (se publica marcada, el ciclo NO se aborta)"
+        )
     for w in freshness_warn:
         print(f"[verify]   WARN {w}", file=sys.stderr)
     if all_fails:
