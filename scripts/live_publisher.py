@@ -93,6 +93,11 @@ PRUNE_EVERY_SECS = 3600
 # init only the 2 real terminals instead of all ~12.
 _login_path_cache: dict[int, str] = {}
 
+# Logins omitidos porque SU TERMINAL ESTA CERRADO (no por fallo). Un cierre
+# deliberado del owner no es averia: si contara para missing_streak el proceso
+# saldria con exit(1) y el supervisor lo reiniciaria en bucle sin arreglar nada.
+_cerrados_ultimo_ciclo: set[int] = set()
+
 # --- Logging -------------------------------------------------------------
 
 _handler = RotatingFileHandler(str(LOG_PATH), maxBytes=2_000_000, backupCount=5, encoding="utf-8")
@@ -152,9 +157,45 @@ def configure(env: dict[str, str]) -> None:
 
 # --- MT5 helpers ---------------------------------------------------------
 
-def _snapshot_terminal(path: str) -> dict[str, Any] | None:
+def _terminales_corriendo() -> set[str]:
+    """Rutas de terminal64.exe EN EJECUCION (minusculas). pywin32, sin shell.
+
+    Necesario porque mt5.initialize(path=...) ARRANCA el terminal si esta cerrado.
+    Regla del owner (2026-07-27): sus cuentas reales las abre solo el. Este publisher
+    corre cada ~30s desde GitHub Actions por SSH, asi que sin esto reabria cualquier
+    cuenta que el cerrase. Se lee lo que ya esta abierto; no se abre nada.
+    """
+    rutas: set[str] = set()
+    try:
+        import win32api
+        import win32con
+        import win32process
+    except Exception as exc:  # noqa: BLE001
+        log.error("pywin32 no disponible (%s) - no se publica nada este ciclo", exc)
+        return rutas
+    for pid in win32process.EnumProcesses():
+        try:
+            h = win32api.OpenProcess(
+                win32con.PROCESS_QUERY_INFORMATION | win32con.PROCESS_VM_READ, False, pid)
+            try:
+                ruta = win32process.GetModuleFileNameEx(h, 0)
+                if ruta.lower().endswith("terminal64.exe"):
+                    rutas.add(ruta.lower())
+            finally:
+                win32api.CloseHandle(h)
+        except Exception:  # noqa: BLE001
+            continue
+    return rutas
+
+
+def _snapshot_terminal(path: str, corriendo: set[str] | None = None) -> dict[str, Any] | None:
     """Init one terminal, and if its live session is one of REAL_LOGINS return
     a state row. Returns None otherwise. Always shuts the connection down."""
+    # NUNCA ABRIR: si ese terminal no esta corriendo, no se toca. mt5.initialize
+    # lo arrancaria, y las cuentas reales solo las abre el owner.
+    if corriendo is not None and path.lower() not in corriendo:
+        log.info("terminal cerrado, se omite (no se abre): %s", path)
+        return None
     t0 = time.monotonic()
     if not mt5.initialize(path=path):
         log.debug("mt5.initialize failed for %s err=%s", path, mt5.last_error())
@@ -224,13 +265,19 @@ def collect_real_snapshots() -> list[dict[str, Any]]:
     2 inits); otherwise scans every installed terminal to (re)learn the paths."""
     rows: list[dict[str, Any]] = []
     seen: set[int] = set()
+    corriendo = _terminales_corriendo()
+    log.info("terminales_corriendo=%d", len(corriendo))
+    _cerrados_ultimo_ciclo.clear()
+    for _lg, _p in _login_path_cache.items():
+        if _lg in REAL_LOGINS and _p.lower() not in corriendo:
+            _cerrados_ultimo_ciclo.add(_lg)
 
     # Fast path: hit only the cached terminal for each real login.
     for login in list(REAL_LOGINS):
         path = _login_path_cache.get(login)
         if not path:
             continue
-        row = _snapshot_terminal(path)
+        row = _snapshot_terminal(path, corriendo)
         if row and row["login"] == login:
             rows.append(row)
             seen.add(login)
@@ -243,7 +290,7 @@ def collect_real_snapshots() -> list[dict[str, Any]]:
                 break
             if path in _login_path_cache.values():
                 continue  # already tried above
-            row = _snapshot_terminal(path)
+            row = _snapshot_terminal(path, corriendo)
             if row and row["login"] not in seen:
                 rows.append(row)
                 seen.add(row["login"])
@@ -513,7 +560,10 @@ def main() -> None:
         loop_start = time.monotonic()
         published = publish_once_timed(env, cycle_timeout)
         for lg in REAL_LOGINS:
-            missing_streak[lg] = 0 if lg in published else missing_streak[lg] + 1
+            if lg in published or lg in _cerrados_ultimo_ciclo:
+                missing_streak[lg] = 0   # cerrada por el owner != averiada
+            else:
+                missing_streak[lg] = missing_streak[lg] + 1
 
         cycle_ms = int((time.monotonic() - loop_start) * 1000)
         upsert_heartbeat(env, published, missing_streak, cycle_ms, interval)
