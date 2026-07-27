@@ -435,7 +435,8 @@ snapshot = {
 }
 
 with open(tmp_path, 'w') as f:
-    json.dump(snapshot, f, ensure_ascii=False, indent=2)
+    # [VELOCIDAD F2] Minificado, consistente con el write final en post_merge.py.
+    json.dump(snapshot, f, ensure_ascii=False, separators=(',', ':'))
 os.replace(tmp_path, out_path)
 
 # Append per-account rows to history.jsonl for time series sparklines

@@ -1,0 +1,28 @@
+{
+  "generated_at": "2026-07-13T17:46:46Z snapshot (edad 0.1h)",
+  "run_date": "2026-07-13",
+  "universe": {"demo_total": 261, "alive_cohort": 126, "candidates": 41, "reals_excluded": 14, "mode": "full (50 pares / 100 lentes)"},
+  "podium": [
+    {"rank": 1, "id": "vps4:22334:701789535", "sym": "GBPUSD.b", "status": "READY", "comp": 89.1, "pf": 1.56, "wr": 55.9, "dd_pct": 0.2, "trades": 68, "meses": 8.0, "tr30": 9, "calmar": 3.38, "sortino": 6.04, "life_r": 304.9, "mes_pos_pct": 75.0, "ruin_pct": 0, "decay": "no", "drift": 1.20, "ci_estables": "1/5", "dist": "BALANCEADO", "lote": 0.01},
+    {"rank": 2, "id": "vps1:25536:2011", "sym": "USDJPY", "status": "READY", "comp": 92.3, "pf": 1.93, "wr": 46.3, "dd_pct": 0.1, "trades": 41, "meses": 8.0, "tr30": 3, "calmar": 3.89, "sortino": 9.75, "life_r": 243.5, "mes_pos_pct": 75.0, "ruin_pct": 0, "decay": "no", "drift": "no", "ci_estables": "0/5", "dist": "GRINDER", "lote": 0.01},
+    {"rank": 3, "id": "vps3:30997:1275409816", "sym": "EURUSD", "status": "READY", "comp": 86.0, "pf": 1.67, "wr": 45.2, "dd_pct": 0.7, "trades": 42, "meses": 6.0, "tr30": 10, "calmar": 3.14, "life_r": 206.8, "mes_pos_pct": 83.3, "ruin_pct": 0, "decay": "no", "drift": 1.06, "ci_estables": "0/5", "dist": "GRINDER", "lote": 0.05, "lote_flag": "override no-estandar"}
+  ],
+  "suplentes": [
+    {"id": "vps4:22336:61896397", "sym": "GBPJPY.b", "comp": 93.2, "note": "Sharpe 6.52 y SQN 0.42 (los mas altos del expediente) pero gating FAIL min_trades (22 trades). Aporta diversificacion fuera de USD (GBPJPY)."},
+    {"id": "vps1:25530:701789535", "sym": "GBPUSD", "comp": 87.1, "note": "ShrinkConf HIGH, status NO. OJO: comparte magic 701789535 con el podio #1 (mismo EA, otra cuenta rated NO)."}
+  ],
+  "block_weights": {"A_dinero": 0.35, "B_supervivencia": 0.20, "C_consistencia": 0.15, "D_calidad_estadistica": 0.15, "E_longevidad": 0.10, "F_portafolio": 0.025, "G_operacional": 0.025},
+  "gate": {"deterministic": "PASS", "violations": 0, "rule": "ningun retador mejor en >=8/12 ejes nucleo con trades >=75% del ganador"},
+  "adversarial_validator": {"verdict_holds": true, "numeric_discrepancies": [], "hallucinations": []},
+  "registered_dissents_and_risks": [
+    "Podio = los 3 UNICOS bots status READY del pool → Devil's Advocate advierte riesgo de gate tautologico; mitigado por gate deterministico PASS (ningun no-READY los domina).",
+    "Los 3 tienen CI estables <=1/5: robustez out-of-sample aun no confirmada.",
+    "#1 y #3 tienen flag Drift (1.20 y 1.06); Decay=no en los tres.",
+    "#1 (magic 701789535) es el mismo EA que el suplente 25530:701789535, rated status NO en otra cuenta.",
+    "#2 tiene Tr30=3 (actividad reciente delgada tras el titular de 41 trades).",
+    "#3 corre lote demo 0.05 override no-estandar + CI 0/5 + mayor gap Raw->Shrunk del expediente (63.1->55.4): el mas fragil; re-auditar en lote 0.01 antes de escalar.",
+    "Diversificacion de simbolo real (GBPUSD/USDJPY/EURUSD) pero los 3 tocan USD: Domain Outsider advierte que un shock del dolar los golpea juntos.",
+    "Descartados con disenso: 657394997 (Comp 94.0/93.5, mejor Sharpe/Calmar/Sortino, pero 21 trades/4m duplicado en 2 VPS) y 24034:20251024 (304 trades, CI 2/5, la mayor muestra, pero DD 3.4%, dist LOTTERY, Comp 61.8). Ambos a watchlist, revision en 60-90 dias."
+  ],
+  "domain_outsider_recommendation": "Escalonar demo->real con lote 0.02 (no 0.05) 60-90 dias, kill-switch por DD real 3x el demo, correr matriz de correlacion Pearson de los 3 antes de asumir diversificacion, re-auditar #3 en lote 0.01."
+}

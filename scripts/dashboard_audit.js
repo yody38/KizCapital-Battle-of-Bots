@@ -199,24 +199,71 @@ class Audit {
   const watchCount = counts.WATCH || 0;
   console.log(`     status counts: READY=${readyCount} NEAR=${nearCount} WATCH=${watchCount} NO=${counts.NO || 0}`);
 
+  // Caps from backend rank_caps (single source of truth — mirrors renderCandidates)
+  const rankCaps = (snap.promotion_meta && snap.promotion_meta.rank_caps) || {};
+  const capReady = rankCaps.READY ?? 3, capNear = rankCaps.NEAR ?? 5, capWatch = rankCaps.WATCH ?? 15;
+
   // READY pill is default active
   const readyRows = await ev(ws, `document.querySelectorAll('#candidates-tbody tr').length`);
-  const expectedReady = Math.min(readyCount, 5);
-  A.assert(readyRows === expectedReady, `READY pill: ${readyRows} filas = min(${readyCount}, 5)`);
+  const expectedReady = Math.min(readyCount, capReady);
+  A.assert(readyRows === expectedReady, `READY pill: ${readyRows} filas = min(${readyCount}, ${capReady})`);
 
   // Click NEAR
   await ev(ws, `document.querySelector('#candidates-status-pills .pill[data-status="NEAR"]').click()`);
   await wait(150);
   const nearRows = await ev(ws, `document.querySelectorAll('#candidates-tbody tr').length`);
-  const expectedNear = Math.min(nearCount, 8);
-  A.assert(nearRows === expectedNear, `NEAR pill: ${nearRows} filas = min(${nearCount}, 8)`);
+  const expectedNear = Math.min(nearCount, capNear);
+  A.assert(nearRows === expectedNear, `NEAR pill: ${nearRows} filas = min(${nearCount}, ${capNear})`);
 
   // Click WATCH
   await ev(ws, `document.querySelector('#candidates-status-pills .pill[data-status="WATCH"]').click()`);
   await wait(150);
   const watchRows = await ev(ws, `document.querySelectorAll('#candidates-tbody tr').length`);
-  const expectedWatch = Math.min(watchCount, 10);
-  A.assert(watchRows === expectedWatch, `WATCH pill: ${watchRows} filas = min(${watchCount}, 10)`);
+  const expectedWatch = Math.min(watchCount, capWatch);
+  A.assert(watchRows === expectedWatch, `WATCH pill: ${watchRows} filas = min(${watchCount}, ${capWatch})`);
+
+  // ----- Ultra Tribunal strip + sello ✓✓ (solo si el snapshot trae tribunal_meta) -----
+  if (snap.tribunal_meta) {
+    const tm = snap.tribunal_meta;
+    const stripVisible = await ev(ws, `!document.getElementById('tribunal-strip')?.hidden`);
+    A.assert(stripVisible, `tribunal-strip visible (veredicto ${tm.run_date} · ${tm.verdict_state})`);
+    const stripText = await ev(ws, `document.getElementById('tribunal-strip')?.textContent || ''`);
+    A.assert(stripText.includes(`${tm.concordance.matches}/${tm.concordance.of}`),
+      `strip muestra concordancia ${tm.concordance.matches}/${tm.concordance.of}`);
+    if (tm.continuous_gate && tm.continuous_gate.verdict) {
+      A.assert(stripText.includes(tm.continuous_gate.verdict),
+        `strip muestra gate continuo ${tm.continuous_gate.verdict}`);
+    }
+    // Operaciones G/P en la celda TRIBUNAL de cada fila del podio (no en el strip).
+    // El READY pill queda activo tras los clicks previos → filas del podio visibles.
+    await ev(ws, `document.querySelector('#candidates-status-pills .pill[data-status="READY"]').click()`);
+    await wait(150);
+    const int = n => Number(n || 0).toLocaleString('en-US'); // = fmt.int de app.js
+    for (const p of (tm.podium || [])) {
+      const [vps, login, magic] = p.id.split(':');
+      const b = (snap.bots || []).find(x => x.vps === vps && String(x.account_login) === login && String(x.magic) === magic);
+      if (!b) continue;
+      const wins = b.wins || 0;
+      const losses = (b.trades || 0) - wins;
+      const expected = `${int(b.trades)} ops · ${int(wins)} G / ${int(losses)} P`;
+      const cellText = await ev(ws, `(() => {
+        const r = [...document.querySelectorAll('#candidates-tbody tr')].find(r => r.dataset.magic === ${JSON.stringify(magic)});
+        return r ? r.children[4].textContent.replace(/\\s+/g,' ').trim() : '';
+      })()`);
+      A.assert(cellText.includes(expected),
+        `celda TRIBUNAL fila magic ${magic} muestra ops "${expected}"`, `celda: "${cellText}"`);
+    }
+    // READY pill quedó activo tras los clicks de arriba → sellos ✓✓ visibles = bots confirmed
+    await ev(ws, `document.querySelector('#candidates-status-pills .pill[data-status="READY"]').click()`);
+    await wait(150);
+    const sealRows = await ev(ws,
+      `[...document.querySelectorAll('#candidates-tbody tr')].filter(r => r.textContent.includes('✓✓')).length`);
+    const confirmedReady = (snap.bots || []).filter(b => b.double_signature === 'confirmed').length;
+    A.assert(sealRows === confirmedReady,
+      `sellos ✓✓ en filas READY (${sealRows}) = bots double_signature confirmed (${confirmedReady})`);
+  } else {
+    console.log('     tribunal_meta ausente — fail-open OK (sin asserts de tribunal)');
+  }
 
   // Verify each rendered row has a confidence chip + click-able data attrs
   await ev(ws, `document.querySelector('#candidates-status-pills .pill[data-status="READY"]').click()`);
@@ -231,27 +278,14 @@ class Audit {
     A.assert(sampleRow.hasChip, `primera fila tiene chip de confianza shrinkage`);
   }
 
-  // ----- SECTION 5: Forward Tracker -----
-  A.begin('Forward Tracker');
-  const trackedBots = (snap.bots || []).filter(b => b.tracker && b.tracker.first_seen_date);
-  const trackerCounter = await ev(ws, `document.getElementById('tracker-count')?.textContent`);
-  A.assert(String(trackedBots.length) === trackerCounter || trackerCounter === '0', `tracker counter (${trackerCounter}) = bots con tracker (${trackedBots.length})`);
-
-  // ----- SECTION 6: Drift Watch -----
-  A.begin('Drift Watch (Page-Hinkley)');
-  const drifted = (snap.bots || []).filter(b => b.drift && b.drift.flag);
-  const driftCounter = await ev(ws, `document.getElementById('drift-count')?.textContent`);
-  A.assert(String(drifted.length) === driftCounter, `drift counter (${driftCounter}) = bots flagged (${drifted.length})`);
-  const driftRows = await ev(ws, `document.querySelectorAll('#drift-tbody tr').length`);
-  A.assert(driftRows === drifted.length, `tabla drift renderiza ${driftRows} = ${drifted.length} bots`);
-  // Severity filter — severo
-  await ev(ws, `document.querySelector('#drift-severity-pills .pill[data-sev="severe"]').click()`);
-  await wait(120);
-  const severeRows = await ev(ws, `document.querySelectorAll('#drift-tbody tr').length`);
-  const expectedSevere = drifted.filter(b => (b.drift.severity || 0) >= 2.0).length;
-  A.assert(severeRows === expectedSevere, `pill severe: ${severeRows} filas = ${expectedSevere} bots severidad ≥ 2.0`);
-  await ev(ws, `document.querySelector('#drift-severity-pills .pill[data-sev="all"]').click()`);
-  await wait(120);
+  // ----- SECTION 5+6: Forward Tracker / Drift Watch — secciones ELIMINADAS del
+  // dashboard el 2026-06-08 (NO re-agregar). Solo se valida que sigan ausentes;
+  // los campos backend (tracker/drift) siguen vivos y los usan modal + Query DSL.
+  A.begin('Forward Tracker / Drift Watch (removidas 2026-06-08)');
+  const trackerGone = await ev(ws, `document.getElementById('tracker-section') === null`);
+  A.assert(trackerGone, 'sección Forward Tracker sigue removida del DOM');
+  const driftGoneAudit = await ev(ws, `document.getElementById('drift-section') === null`);
+  A.assert(driftGoneAudit, 'sección Drift Watch sigue removida del DOM');
 
   // ----- SECTION 7: Balanced + New bots -----
   A.begin('Balanced + Bots Nuevos');
@@ -342,7 +376,9 @@ class Audit {
   const queries = [
     { q: 'is_real = true SORT BY net DESC', expected: isRealBots.length },
     { q: 'status = "READY"', expected: readyCount },
-    { q: 'drift_flag = true', expected: drifted.length },
+    { q: 'drift_flag = true', expected: (snap.bots || []).filter(b => b.drift && b.drift.flag).length },
+    { q: 'double_signature = "confirmed"', expected: (snap.bots || []).filter(b => b.double_signature === 'confirmed').length },
+    { q: 'in_podium = true', expected: (snap.bots || []).filter(b => b.tribunal && !b.tribunal.is_suplente && b.tribunal.rank != null).length },
     { q: 'capacity_usd >= 50000', expected: (snap.bots || []).filter(b => (b.capacity?.capacity_usd || 0) >= 50000 && b.magic && b.magic !== 0).length },
     { q: 'symbol IN ("EURUSD","GBPUSD") AND pf >= 1.5 SORT BY calmar DESC LIMIT 5', expected: null },
   ];

@@ -4381,3 +4381,65 @@ body.war-room-active { overflow: hidden; }
   .race-label { width: 120px; }
   .war-room { padding: 18px 14px; }
 }
+
+/* === Weekly Suite (v20260711a) — analítica semanal de cuentas reales ===== */
+
+#weekly-suite .wk-subtitle { font-size: 11px; font-weight: 400; color: var(--text-faint); margin-left: 6px; }
+#weekly-suite .wk-range-note { font-size: 12px; color: var(--text-dim); }
+#weekly-suite .positive { color: var(--green); }
+#weekly-suite .negative { color: var(--red); }
+
+/* W5 · Scorecard */
+.wk-health { font-size: 12px; font-weight: 500; margin-left: 10px; padding: 3px 9px; border-radius: 999px; border: 1px solid var(--border); }
+.wk-health.wkh-good { background: rgba(61,220,151,0.12); border-color: rgba(61,220,151,0.35); }
+.wk-health.wkh-warn { background: rgba(255,195,107,0.12); border-color: rgba(255,195,107,0.35); }
+.wk-health.wkh-bad { background: rgba(255,107,139,0.12); border-color: rgba(255,107,139,0.35); }
+.wk-health.wkh-neutral { background: rgba(154,163,187,0.10); }
+.wk-kpi-grid {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  gap: 10px;
+}
+.wk-kpi {
+  background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius-sm);
+  padding: 12px 14px; display: flex; flex-direction: column; gap: 4px; min-height: 92px;
+}
+.wk-kpi-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-faint); }
+.wk-kpi-value { font-size: 20px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.wk-kpi-delta { font-size: 11px; color: var(--text-dim); }
+.wk-kpi-delta.positive { color: var(--green); }
+.wk-kpi-delta.negative { color: var(--red); }
+.wk-spark { display: block; margin-top: auto; }
+.wk-mvp-row { display: flex; flex-wrap: wrap; gap: 10px 22px; margin-top: 12px; font-size: 13px; color: var(--text-dim); }
+
+/* W2 · Comparador + W3 waterfall + W4 riesgo: chart wraps */
+.wk-chart-wrap { position: relative; height: 260px; }
+.wk-week-detail {
+  margin-top: 10px; font-size: 13px; color: var(--text-dim);
+  background: rgba(124,156,255,0.06); border: 1px solid rgba(124,156,255,0.18);
+  border-radius: var(--radius-sm); padding: 9px 12px;
+}
+
+/* W1 · Reloj de trading */
+.wk-clock-pills { display: flex; gap: 6px; }
+.wk-clock-scroll { overflow-x: auto; }
+.wk-clock-grid {
+  display: grid; grid-template-columns: 38px repeat(24, 1fr);
+  gap: 3px; min-width: 700px; align-items: center;
+}
+.wkc { display: block; width: 100%; height: 20px; border-radius: 4px; }
+.wkc-lbl { font-size: 11px; color: var(--text-dim); text-align: right; padding-right: 6px; }
+.wkc-h { font-size: 10px; color: var(--text-faint); text-align: center; }
+.wk-session-note { color: var(--text-faint); margin-left: 8px; }
+
+/* W4 · Pulso de riesgo */
+.wk-risk-chips { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; }
+.wk-chip {
+  font-size: 12px; color: var(--text-dim); background: var(--bg-card);
+  border: 1px solid var(--border); border-radius: 999px; padding: 5px 12px;
+}
+.wk-chip strong { font-variant-numeric: tabular-nums; }
+
+@media (max-width: 720px) {
+  .wk-kpi-grid { grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); }
+  .wk-chart-wrap { height: 220px; }
+}

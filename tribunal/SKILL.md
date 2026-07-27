@@ -101,7 +101,7 @@ Producir **podio provisional top-3 + 2 suplentes** con justificación por caball
 ```bash
 python3 tribunal/scripts/verify_verdict.py "id1" "id2" "id3"
 ```
-`REJECT` si un bot fuera del podio con evidencia comparable gana en ≥9/12 ejes núcleo → swap con el
+`REJECT` si un bot fuera del podio con evidencia comparable gana en ≥8/12 ejes núcleo (DOMINANCE_FRACTION 0.70 — fuente única gate_lib.py) → swap con el
 retador o con un suplente y re-verificar (máx 2 iteraciones; si persiste, el retador ENTRA al podio).
 
 2. **Adversarial Validator** (subagente): recibe podio + digest de posiciones + expediente_digest.md.
@@ -113,8 +113,17 @@ Ataca la síntesis. Devuelve `{verdict_holds, unsupported_items[], hallucination
    `real_magics` del snapshot ni corresponde a cuenta con `is_real=true`/`trade_mode==2`. Si hay
    coincidencia, ABORTAR (no commitear, no notificar podio — reportar el bug).
 2. **Persistir:** escribir `tribunal/data/verdict_<YYYYMMDD>.json` (podio, suplentes, votos por
-   bloque, gate, validator, snapshot usado — NUNCA incluir secretos). `git add tribunal/data/verdict_*.json
-   && git commit -m "tribunal: veredicto semanal <fecha>" && git push origin HEAD:main`.
-3. **Notificar:** enviar una notificación push de 1 línea con el podio, ej.
+   bloque, gate, validator, snapshot usado — NUNCA incluir secretos). Esquema del podio: lista
+   `podium` de dicts con al menos `{rank, id: "vps:login:magic", sym, status, comp}` + métricas
+   núcleo (`pf`, `dd_pct`, `decay`, …) — post_merge.py las usa para detectar obsolescencia.
+3. **Sincronizar con el dashboard:** correr `python3 tribunal/scripts/sync_verdict.py`
+   (copia el/los veredictos a `tribunal/data/` del repo, commitea+push a `main` y sube
+   `tribunal_verdict.json` al bucket Supabase `dashboard-data`). En corridas locales el
+   script toma los veredictos de `~/.claude/skills/kiz-bot-tribunal/data/`; en la routine
+   remota exportar `TRIBUNAL_VERDICT_SRC` apuntando al dir donde se escribió el verdict.
+   El siguiente ciclo CI (≤30 min) ingiere el veredicto vía `apply_tribunal()` en
+   post_merge.py → doble firma ✓✓, concordancia, vigencia, gate continuo y racha en la
+   sección "Candidatos a Cuenta Real". El veredicto NUNCA mueve asientos (visual-only).
+4. **Notificar:** enviar una notificación push de 1 línea con el podio, ej.
    `🏆 Tribunal semanal <fecha>: 1) <id1> 2) <id2> 3) <id3>`.
-4. Repetir el recordatorio: este proceso fue 100% solo-lectura sobre cuentas demo; no se tocó ninguna cuenta real.
+5. Repetir el recordatorio: este proceso fue 100% solo-lectura sobre cuentas demo; no se tocó ninguna cuenta real.

@@ -1,0 +1,17 @@
+{
+  "snapshot": "2026-07-09T06:17:31Z",
+  "demo_total": 250, "alive_cohort": 120, "candidates": 42, "reals_excluded": true,
+  "mode": "full_50_pairs",
+  "podium": [
+    {"rank": 1, "id": "vps1:25536:2011", "sym": "USDJPY", "comp": 93.0},
+    {"rank": 2, "id": "vps3:30997:1275409816", "sym": "EURUSD", "comp": 90.08},
+    {"rank": 3, "id": "vps4:22334:701789535", "sym": "GBPUSD.b", "comp": 89.62}
+  ],
+  "suplentes": ["vps1:25530:701789535", "vps4:22336:1992809319"],
+  "alternativa_descorrelacionada": "vps1:25536:2009",
+  "gate_deterministico": "PASS",
+  "validator": "verdict_holds=true, hallucinations=0",
+  "correcciones_validator": ["Mes+ 83.3 y 'CI unico 1/5' son max solo dentro del podio, no de la mesa", "bronce NetComm==NetLife en .b: comision posiblemente no restada"],
+  "riesgos_transversales": ["ShrinkConf LOW/MEDIUM y CI 0-2/5 en toda la cohorte", "Tr30 3-11 (cadencia semanal delgada)", "mirror magic 701789535 (bronce vs suplente1) = misma estrategia", "demo != real: fills/slippage no probados", "survivorship: 130 de 250 muertos no auditados"],
+  "consenso": "trio aparecio en ~40-43 de 50 podios de eje; son los unicos 3 status READY de la mesa"
+}
