@@ -70,6 +70,24 @@ def main() -> int:
         print(f"carry_forward[{vps_id}]: cannot fetch last-good snapshot.json: {e}", file=sys.stderr)
         return 1
 
+    # GUARDA DE EPOCA (2026-07-27). El carry-forward rebana el ultimo snapshot por
+    # ETIQUETA, y una etiqueta no es una maquina: el dia que se renumero la flota a
+    # la numeracion del owner, 'vps3' paso a designar otra VPS fisica. Sin esta
+    # comprobacion, una VPS stale hereda los bots de una maquina distinta y el
+    # dashboard publica datos falsos bajo un numero que no les corresponde
+    # (paso de verdad ese dia). Preferimos NO carry-forward antes que mentir.
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    try:
+        from vps_registry import CUTOVER_DATE as current_epoch
+    except Exception:
+        current_epoch = None
+    snap_epoch = snap.get("numbering_epoch")
+    if current_epoch and snap_epoch != current_epoch:
+        print(f"carry_forward[{vps_id}]: el ultimo snapshot es de otra epoca de numeracion "
+              f"(snapshot={snap_epoch!r} actual={current_epoch!r}) — NO se hereda: la etiqueta "
+              f"pudo cambiar de maquina fisica. Esta VPS se publica como ausente.", file=sys.stderr)
+        return 1
+
     accounts = [a for a in snap.get("accounts", []) if a.get("vps") == vps_id]
     bots = [b for b in snap.get("bots", []) if b.get("vps") == vps_id]
     positions = [p for p in snap.get("open_positions", []) if p.get("vps") == vps_id]

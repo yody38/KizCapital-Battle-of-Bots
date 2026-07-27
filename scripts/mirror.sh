@@ -298,7 +298,16 @@ fetch_vps() {
 # Concurrency cap: VPS scp run in parallel but bounded. Keeps RAM/IO pressure
 # (VPS4 1.5GB, VPS2 slow) sane while collapsing the serial 6× transport that
 # telemetry proved is ~91% of the cycle. Throttle with `wait -n` (bash 4.3+).
-MAX_PARALLEL=${MIRROR_MAX_PARALLEL:-3}
+# [VELOCIDAD F6] Cap = tamaño del roster (antes 3 → dos oleadas para 6 VPS).
+# El cap se puso por presión de RAM, pero limita la concurrencia SALIENTE del
+# runner, no la carga de cada VPS: con cap 3 o con cap 6, cada VPS recibe
+# exactamente UNA sesión SSH (ControlMaster muxea sus 3 transferencias). Son 6
+# máquinas distintas, así que serializarlas no protege a ninguna — solo alarga
+# el ciclo. Telemetría del propio script: el transporte es ~91% del ciclo, y en
+# el log del 2026-07-27 vps6 tardó 4m07s él solo mientras otros ya habían acabado.
+# Si `mirror_ms` (pipeline_timing.json, p50/p95) no baja, se revierte con
+# MIRROR_MAX_PARALLEL=3 sin tocar código.
+MAX_PARALLEL=${MIRROR_MAX_PARALLEL:-${#VPS_ENTRIES[@]}}
 MIRROR_START_MS=$(now_ms)
 echo "[$(ts)] mirror starting (parallel, cap=$MAX_PARALLEL)" >> "$LOG"
 
@@ -378,6 +387,11 @@ for sid in "${STALE_IDS[@]}"; do
     FRESH_FILES+=("$sid:$DATA_DIR/snapshot_${sid}.json")
   else
     echo "[$(ts)] mirror FAIL — carry-forward of $sid failed (cannot safely degrade, no upload)" >> "$LOG"
+    echo "[$(ts)]   si el motivo es 'otra epoca de numeracion': la flota se renumero y el ultimo" >> "$LOG"
+    echo "[$(ts)]   snapshot publicado aun usa las etiquetas viejas, donde '$sid' era OTRA maquina." >> "$LOG"
+    echo "[$(ts)]   Heredarlo publicaria bots ajenos bajo ese numero. Arreglo: forzar un build" >> "$LOG"
+    echo "[$(ts)]   fresco en $sid (Start-ScheduledTask BattleOfBots_Snapshot) y relanzar el ciclo;" >> "$LOG"
+    echo "[$(ts)]   con las 6 frescas una vez, el snapshot queda sellado y el carry-forward vuelve." >> "$LOG"
     exit 1
   fi
 done
@@ -402,6 +416,14 @@ from datetime import datetime, timezone
 out_path, tmp_path, history_path, stale_csv = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
 stale_vps = set(x for x in stale_csv.split(',') if x)
 entries = sys.argv[5:]
+
+# Epoca de numeracion, leida del registry (fuente unica). Se sella en el snapshot
+# para que carry_forward_stale.py no pueda heredar datos de una numeracion vieja.
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(out_path)), '..', 'scripts'))
+try:
+    from vps_registry import CUTOVER_DATE as _numbering_epoch
+except Exception:
+    _numbering_epoch = None
 
 accounts, bots, positions, errors = [], [], [], []
 generated_times = []
@@ -462,6 +484,12 @@ real_portfolio = {
 ts = datetime.now(timezone.utc).isoformat()
 snapshot = {
     'generated_at': ts,
+    # Epoca de numeracion de VPS. Cambia el dia que se renumera la flota. El
+    # carry-forward compara este sello y se niega a heredar datos de una epoca
+    # distinta: la etiqueta 'vps3' de ayer puede ser OTRA maquina fisica hoy, y
+    # arrastrarla publicaria los bots de una VPS bajo el numero de otra
+    # (paso de verdad el 2026-07-27 al resincronizar a la numeracion del owner).
+    'numbering_epoch': _numbering_epoch,
     'oldest_source_generated_at': min(generated_times) if generated_times else None,
     'newest_source_generated_at': max(generated_times) if generated_times else None,
     'window_days': window_days,
