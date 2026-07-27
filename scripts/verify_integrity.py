@@ -65,12 +65,17 @@ DEFAULT_TOLERANCE = 0.05  # USD
 # guaranteeing these never silently drop even during a Supabase outage. Keyed by (vps,
 # login) for readability; the gate itself compares by login (survives VPS moves).
 # Verificado cuenta por cuenta contra las 6 VPS por SSH el 2026-07-27.
+# CONSOLIDADAS EN vps3 el 2026-07-27 (185.187.238.23): las 5 reales viven ahora en
+# instalaciones portables independientes bajo Desktop\CUENTAS-REALES\<login>\, una por
+# cuenta. Se retiraron de vps6 (terminales cerrados, carpetas fuera de Program Files,
+# roster y whitelist limpiados) para que ninguna cuenta real quede duplicada en dos
+# máquinas — una misma cuenta abierta en dos sitios con EAs activos duplica órdenes.
 EXPECTED_REAL = {
     ("vps3", 32081),
-    ("vps6", 25425),   # movida de vps3 → vps6 (slot limpio 40848) 2026-06-30
-    ("vps6", 43411),   # faltaban en el floor: solo estaban protegidas por el roster
-    ("vps6", 43414),   # de Supabase — una caída de Supabase las dejaba sin gate
-    ("vps3", 43306),   # ausente de la flota desde 2026-07-27 → se publica DEGRADED
+    ("vps3", 43306),
+    ("vps3", 25425),
+    ("vps3", 43411),
+    ("vps3", 43414),
 }
 
 
