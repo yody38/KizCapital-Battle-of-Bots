@@ -316,16 +316,19 @@ done
 
 # --- Quorum (fail-closed safety limits) ---
 MAX_STALE_VPS=${MAX_STALE_VPS:-1}     # at most this many VPS may be carried stale
-REQUIRED_VPS="${REQUIRED_VPS:-vps5}"  # the REAL-money VPS must always be fresh
 if [ ${#STALE_IDS[@]} -gt "$MAX_STALE_VPS" ]; then
   echo "[$(ts)] mirror FAIL — ${#STALE_IDS[@]} VPS down (> MAX_STALE_VPS=$MAX_STALE_VPS): ${STALE_IDS[*]} (no upload)" >> "$LOG"
   exit 1
 fi
+
+# NOTA (regla del owner, 2026-07-27): antes existía REQUIRED_VPS=vps5 — si la VPS
+# de las cuentas reales iba stale, el ciclo abortaba sin subir NADA y el dashboard
+# entero se congelaba (incidente del 2026-07-27). Ahora vps5 degrada como cualquier
+# otra: carry-forward + sus cuentas reales quedan marcadas con datos atrasados por
+# verify_integrity.check_freshness, que lo pinta en el perfil de cada cuenta.
+# Marcar es honesto; congelar los otros ~389 bots no lo era.
 for sid in "${STALE_IDS[@]}"; do
-  if [ "$sid" = "$REQUIRED_VPS" ]; then
-    echo "[$(ts)] mirror FAIL — required VPS $REQUIRED_VPS (real accounts) is down — not degrading (no upload)" >> "$LOG"
-    exit 1
-  fi
+  echo "[$(ts)] mirror DEGRADED — $sid stale, se publica con carry-forward y marca" >> "$LOG"
 done
 
 # --- Carry forward each stale VPS from last-good Supabase data ---
