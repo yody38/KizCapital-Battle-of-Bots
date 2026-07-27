@@ -41,7 +41,7 @@
       "package": "Lite VPS",
       "mcp_server": "mt5-portfolio-vps3",
       "legacy_id": "vps5",
-      "notes": "Cuentas reales 32081 y 43306. Corre live_publisher.py con LIVE_VPS_TAG=vps3."
+      "notes": "Las 5 cuentas reales (32081, 43306, 25425, 43411, 43414), consolidadas aqui el 2026-07-27 en instalaciones portables por cuenta. Corre live_publisher.py con LIVE_VPS_TAG=vps3."
     },
     {
       "id": "vps4",
@@ -74,7 +74,7 @@
       "package": "Lite VPS - TOP 20 Bots",
       "mcp_server": "mt5-portfolio-vps6",
       "legacy_id": "vps6",
-      "notes": "Cuentas reales 25425, 43411 y 43414. Host de compilacion MetaEditor del Gold Mine Lab."
+      "notes": "Host de compilacion MetaEditor del Gold Mine Lab. Ya NO tiene cuentas reales (retiradas 2026-07-27)."
     }
   ]
 }

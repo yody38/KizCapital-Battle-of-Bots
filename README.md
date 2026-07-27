@@ -6,7 +6,10 @@ Dashboard interactivo que rankea los EAs (bots por `magic number`) de **68 cuent
 
 ## Ubicación
 
-- **Repo runtime**: `~/battle-of-bots/` (esta carpeta) y symlink en `/Users/yodyiznaga/Documents/Claude/MT5 MCP/Battle of Bots/`.
+- **Repo runtime (el VIVO)**: `/Users/yodyiznaga/Documents/Claude/MT5 MCP/Battle of Bots/`.
+  ⚠️ `~/battle-of-bots/` es un **clon obsoleto** parado en el 2026-07-13 (lleva un
+  `STALE_DO_NOT_USE.md`), alcanzable por un symlink desde `04_Tech-AI/.../MT5 MCP/`.
+  Usa la numeración de VPS **antigua**: leerlo devuelve números que ya no corresponden.
 - **Repo GitHub**: `yody38/KizCapital-Battle-of-Bots` — **PÚBLICO** (verificado 2026-07-27;
   este documento decía "privado", que era falso). Todo lo que se commitea aquí es visible
   para cualquiera: nunca IPs públicas de las VPS, credenciales, logins ni claves.
@@ -31,10 +34,10 @@ verificadas por SSH contra su `hostname`.
 |-----|-----------|----------|---------|-------|
 | vps1 | 100.118.159.44 | fxut8627928 | Lite VPS | — |
 | vps2 | 100.125.237.26 | fxut8630464 | Lite VPS | — |
-| vps3 | 100.70.228.19 | fxut8647921 | Lite VPS | reales 32081, 43306 · `LIVE_VPS_TAG=vps3` |
+| vps3 | 100.70.228.19 | fxut8647921 | Lite VPS | **las 5 cuentas reales** · `LIVE_VPS_TAG=vps3` |
 | vps4 | 100.101.9.46 | fxut8649885 | Lite VPS | host de descarga del broker (`C:\botlab\mt5`) |
 | vps5 | 100.81.54.93 | fxut8717250 | Lite VPS · Dark Rea | dispara el CI (`dispatch_ci.ps1`) |
-| vps6 | 100.112.112.115 | fxut9165656 | Lite VPS · TOP 20 Bots | reales 25425, 43411, 43414 · compila MetaEditor |
+| vps6 | 100.112.112.115 | fxut9165656 | Lite VPS · TOP 20 Bots | demo · compila MetaEditor |
 
 > ⚠️ **Este repo es PÚBLICO.** Los endpoints RDP públicos de la flota **no se
 > commitean** — publicarlos es señalar dónde apuntar un ataque de fuerza bruta
