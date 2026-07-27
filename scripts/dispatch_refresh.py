@@ -4,7 +4,7 @@ dispatch_refresh.py — Auto-recovery executor.
 
 Called by heartbeat_check.py when sync lag exceeds FAIL threshold. Triggers
 GitHub Actions refresh-dashboard via repository_dispatch (same mechanism the
-VPS1 cron uses), waits, and re-checks Supabase. Retries N times.
+VPS5 cron uses), waits, and re-checks Supabase. Retries N times.
 
 Independent of GitHub Actions execution path BUT relies on gh CLI auth, which
 the user has configured. If GH Actions is blocked (e.g., billing), the dispatch

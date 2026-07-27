@@ -1,6 +1,6 @@
 # Kiz Capital LLC · Battle of Bots — live-bridge worker (Railway)
 #
-# Always-on container that holds a Tailscale (userspace) connection to VPS5 and
+# Always-on container that holds a Tailscale (userspace) connection to VPS3 and
 # keeps an SSH NetworkCleartext session open running live_publisher.py in loop
 # mode. This is the only context where mt5.initialize() does NOT hang when the
 # VPS RDP session is disconnected (see memory [vps-disconnected-rdp-mt5-hang]).
@@ -18,7 +18,7 @@ COPY --from=ts /usr/local/bin/tailscale  /usr/local/bin/tailscale
 COPY --from=ts /usr/local/bin/tailscaled /usr/local/bin/tailscaled
 
 COPY entrypoint.sh /entrypoint.sh
-# VPS5 SSH host key, pinned at build time (ssh-keyscan'd from the tailnet) so the
+# VPS3 SSH host key, pinned at build time (ssh-keyscan'd from the tailnet) so the
 # worker verifies it instead of trusting-on-first-use (no accept-new).
 COPY known_hosts /etc/kiz_known_hosts
 RUN chmod +x /entrypoint.sh \

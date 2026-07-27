@@ -7,7 +7,7 @@
 #
 # Steps:
 #   1. scp audit_direction.py to each VPS, run it (OPENBLAS_NUM_THREADS=1 to keep
-#      low-RAM VPS2/VPS3/VPS6 from OOMing), collect audit_<vps>.json.
+#      low-RAM VPS4/VPS1/VPS6 from OOMing), collect audit_<vps>.json.
 #   2. Run verify_trade_direction.py to compare each per-bot file's side against
 #      the independently re-derived MT5 direction (+ orthogonal price check).
 #
@@ -21,8 +21,17 @@ KEY="${SSH_KEY:-$HOME/.ssh/id_ed25519}"
 AUDIT_DIR=data/_audit
 mkdir -p "$AUDIT_DIR"
 
-declare -a NAMES=(vps1 vps2 vps3 vps4 vps5 vps6)
-declare -a IPS=(100.81.54.93 100.101.9.46 100.118.159.44 100.125.237.26 100.70.228.19 100.112.112.115)
+# Roster de config/vps_registry.json — fuente unica de verdad, nunca duplicar aqui.
+declare -a NAMES=() IPS=()
+while IFS= read -r _l; do
+  [ -n "$_l" ] && NAMES+=("$_l")
+done < <(python3 scripts/vps_registry.py ids)
+while IFS= read -r _l; do
+  [ -n "$_l" ] && IPS+=("$_l")
+done < <(python3 scripts/vps_registry.py ips)
+if [ "${#NAMES[@]}" -lt 1 ] || [ "${#NAMES[@]}" -ne "${#IPS[@]}" ]; then
+  echo "FAIL: no se pudo leer config/vps_registry.json" >&2; exit 1
+fi
 
 run_one() {
   local v=$1 ip=$2

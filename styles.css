@@ -467,6 +467,9 @@ td.num { text-align: right; }
   border: 1px solid transparent;
   vertical-align: middle;
 }
+/* Un color por VPS, en la numeracion del owner (vps1..vps6 = #N Package del
+   proveedor). Antes solo dos tenian color y las otras cuatro caian en el gris
+   de .vps-unk, que es el estado "desconocido" — indistinguibles entre si. */
 .vps-badge.vps-vps1 {
   background: rgba(124, 156, 255, 0.15);
   color: #9ab1ff;
@@ -477,6 +480,26 @@ td.num { text-align: right; }
   color: #d2a5ff;
   border-color: rgba(201, 132, 255, 0.35);
 }
+.vps-badge.vps-vps3 {
+  background: rgba(78, 214, 168, 0.15);
+  color: #6fe3bd;
+  border-color: rgba(78, 214, 168, 0.35);
+}
+.vps-badge.vps-vps4 {
+  background: rgba(255, 176, 92, 0.15);
+  color: #ffc078;
+  border-color: rgba(255, 176, 92, 0.35);
+}
+.vps-badge.vps-vps5 {
+  background: rgba(255, 122, 154, 0.15);
+  color: #ff9db4;
+  border-color: rgba(255, 122, 154, 0.35);
+}
+.vps-badge.vps-vps6 {
+  background: rgba(96, 205, 255, 0.15);
+  color: #85daff;
+  border-color: rgba(96, 205, 255, 0.35);
+}
 .vps-badge.vps-unk {
   background: rgba(255, 255, 255, 0.08);
   color: var(--text-dim);
@@ -485,6 +508,10 @@ td.num { text-align: right; }
 /* Filter pills colored per VPS when active */
 .vps-pill.vps-vps1.active { background: #7c9cff; border-color: #7c9cff; color: #0a0b12; }
 .vps-pill.vps-vps2.active { background: #c984ff; border-color: #c984ff; color: #0a0b12; }
+.vps-pill.vps-vps3.active { background: #4ed6a8; border-color: #4ed6a8; color: #0a0b12; }
+.vps-pill.vps-vps4.active { background: #ffb05c; border-color: #ffb05c; color: #0a0b12; }
+.vps-pill.vps-vps5.active { background: #ff7a9a; border-color: #ff7a9a; color: #0a0b12; }
+.vps-pill.vps-vps6.active { background: #60cdff; border-color: #60cdff; color: #0a0b12; }
 
 .winrate-bar {
   display: inline-flex;

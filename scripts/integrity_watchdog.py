@@ -63,12 +63,12 @@ VERCEL_URL = "https://kiz-capital-bots-kiz-capital-battle-of-bots-projects.verce
 # CI run finish → upload completes within ~30s. We allow up to 15 min just
 # in case the watchdog catches a moment when CI is mid-cycle.
 STALE_TOLERANCE_SEC = 15 * 60
-MCP_DEADMAN_SEC = 90 * 60  # mcp-health is dispatched ~every 30min (VPS1 dispatch_ci.ps1, like
+MCP_DEADMAN_SEC = 90 * 60  # mcp-health is dispatched ~every 30min (VPS5 dispatch_ci.ps1, like
                            # refresh/watchdog). GH free-tier cron */5 is throttled to ~2h and is
                            # only a backstop, so 20min was a guaranteed false positive. 90min =
                            # tolerate 2 missed dispatch cycles, still catch a dead monitor in <1.5h.
 LIVE_DEADMAN_SEC = 90      # live stream pushes every ~3s → >90s stale = worker/tailnet/MT5 dead
-LIVE_REAL_LOGINS = {25425, 32081, 43306, 43411, 43414}  # 5 reales en vivo: 32081/43306 (VPS5) + 25425/43411/43414 (VPS6); roster por VPS en C:\mt5-mcp\.live_publisher.env
+LIVE_REAL_LOGINS = {25425, 32081, 43306, 43411, 43414}  # 5 reales en vivo: 32081/43306 (VPS3) + 25425/43411/43414 (VPS6); roster por VPS en C:\mt5-mcp\.live_publisher.env
 
 
 # ---------- env / helpers ----------
@@ -473,12 +473,12 @@ def main() -> int:
                 fails.append(f"stale VPSs: {', '.join(stale_vps)}")
             # Carry-forward escalation: a VPS carried from last-good data is fine for
             # a few cycles (graceful degradation), but data frozen too long must alarm
-            # — it means the VPS never recovered. Demo: >3h. Real (vps5): >35min.
+            # — it means the VPS never recovered. Demo: >3h. Real (vps3): >35min.
             for v_id in sorted(vf.keys()):
                 v = vf[v_id] or {}
                 if v.get("carried_forward"):
                     lag = v.get("lag_sec") or 0
-                    cap = 35 * 60 if v_id == "vps5" else 3 * 3600
+                    cap = 35 * 60 if v_id == "vps3" else 3 * 3600
                     if lag > cap:
                         fails.append(f"carry-forward too long: {v_id} frozen {round(lag/60)}min (>{round(cap/60)}min — VPS never recovered)")
 
@@ -504,7 +504,7 @@ def main() -> int:
             info["steps"]["dormant_eas"] = {"count": len(dormant_eas), "samples": dormant_eas[:8]}
 
         # Step 4b — MCP-health monitor liveness. A stale checked_at means the
-        # MONITOR died (VPS1 dispatcher down + GH cron throttled), not the
+        # MONITOR died (VPS5 dispatcher down + GH cron throttled), not the
         # product: Step 4's pipeline dead-man (snapshot.generated_at > 90min)
         # already hard-fails when the DATA stops advancing, with no dispatcher
         # dependency. So monitor staleness is warn-only (surfaced in the issue

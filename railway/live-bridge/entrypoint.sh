@@ -5,7 +5,7 @@
 # 2. Hold an SSH session to the target VPS running live_publisher.py --loop.
 # 3. Reconnect forever if the session or the tailnet drops.
 #
-# One service per VPS with real accounts (kiz-live-bridge → VPS5,
+# One service per VPS with real accounts (kiz-live-bridge → VPS3,
 # kiz-live-bridge-vps6 → VPS6); same image, different VPS_HOST/VPS_LABEL.
 #
 # Required env (set ONLY in Railway, never committed):
@@ -15,12 +15,17 @@
 #   TS_AUTHKEY           Tailscale ephemeral reusable authkey (tag:ci)
 # Optional:
 #   VPS_HOST           Tailscale IP of the target VPS (default 100.70.228.19 =
-#                      VPS5; legacy VPS5_HOST honored for the existing service)
+#                      VPS3; legacy VPS5_HOST sigue honrado — es el nombre real
+#                      de la variable en Railway, que no se renombro)
 #   VPS_LABEL          hostname tag for the tailnet node (default kiz-live-bridge)
 #   LIVE_INTERVAL_SECS default 3
 set -u
 
-VPS_HOST="${VPS_HOST:-${VPS5_HOST:-100.70.228.19}}"
+# VPS3_HOST es el nombre nuevo (numeracion del owner desde 2026-07-27). VPS5_HOST
+# es el nombre LEGACY y sigue siendo el que existe en Railway: la variable no se
+# renombro alli, asi que hay que seguir honrandola o el bridge pierde su destino.
+# Misma maquina en los tres casos: 100.70.228.19 (vps3 en config/vps_registry.json).
+VPS_HOST="${VPS_HOST:-${VPS3_HOST:-${VPS5_HOST:-100.70.228.19}}}"
 VPS_LABEL="${VPS_LABEL:-kiz-live-bridge}"
 INTERVAL="${LIVE_INTERVAL_SECS:-3}"
 PY='C:\mt5-mcp\venv\Scripts\python.exe'

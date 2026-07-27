@@ -3,7 +3,7 @@ Kiz Capital LLC · Battle of Bots — Live equity publisher
 
 Loops every --interval seconds (default 3), queries MetaTrader5 for this VPS's
 real accounts (roster set via REAL_LOGINS/LIVE_VPS_TAG in .live_publisher.env —
-#32081/#43306 on VPS5, #25425/#43411/#43414 on VPS6), and UPSERTs the snapshot
+#32081/#43306 on VPS3, #25425/#43411/#43414 on VPS6), and UPSERTs the snapshot
 into Supabase table public.live_real_state. The dashboard subscribes to that
 table via Supabase Realtime for ~3s updates.
 
@@ -52,7 +52,7 @@ LOG_PATH = ROOT / "live_publisher.log"
 ENV_PATH = ROOT / ".live_publisher.env"
 
 DEFAULT_INTERVAL = int(os.environ.get("LIVE_INTERVAL_SECS", "3"))
-LIVE_VPS_TAG = os.environ.get("LIVE_VPS_TAG", "vps5")
+LIVE_VPS_TAG = os.environ.get("LIVE_VPS_TAG", "vps3")
 PUBLISHER_ID = f"{LIVE_VPS_TAG}-{socket.gethostname()}"
 HTTP_TIMEOUT = 5
 
@@ -60,8 +60,8 @@ HTTP_TIMEOUT = 5
 # VPS (REAL_LOGINS=comma-list, LIVE_VPS_TAG=vpsN, LOGIN_TERMINAL_MAP=
 # login=path;login=path). Este default solo aplica si el env file no lo trae.
 # Sync con verify_integrity.EXPECTED_REAL y post_merge.detect_real_accounts.
-# Verificado contra las 6 VPS por SSH el 2026-07-27: 32081 en vps5; 25425, 43411 y
-# 43414 en vps6; 43306 en vps5 pero con su terminal caído. El default anterior
+# Verificado contra las 6 VPS por SSH el 2026-07-27: 32081 en vps3; 25425, 43411 y
+# 43414 en vps6; 43306 en vps3 pero con su terminal caído. El default anterior
 # ({25425, 32081, 43306}) desconocía 43411/43414 — si una VPS perdía su
 # .live_publisher.env, esas dos reales ($15,029) se quedaban sin publicar en silencio.
 REAL_LOGINS: set[int] = {25425, 32081, 43306, 43411, 43414}

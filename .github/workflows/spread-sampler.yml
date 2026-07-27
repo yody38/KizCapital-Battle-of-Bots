@@ -2,7 +2,7 @@ name: spread-sampler
 
 # Muestreo de spread ADN (solo lectura) cada 2 horas en dias habiles.
 # Pedido 2026-07-16: perfil completo de spread de USDJPY.b/EURJPY.b/USDCAD.b/NZDUSD.b
-# en la cuenta 32081 (VPS5) para calibrar Symbol Settings de EA Studio.
+# en la cuenta 32081 (VPS3) para calibrar Symbol Settings de EA Studio.
 # Patron: gh-actions + tailscale + ssh one-shot (mismo que sampler-tick.yml).
 # Resultados: spread-samples/YYYY-MM-DD_HHMM.json (commit al repo).
 # Notificacion: Telegram tras cada corrida — audio via ElevenLabs si
@@ -25,7 +25,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 28
     env:
-      VPS_HOST: "100.70.228.19"   # VPS5 (cuenta 32081)
+      VPS_HOST: "100.70.228.19"   # VPS3 (cuenta 32081)
       DURATION_S: "1200"          # 20 minutos
       INTERVAL_S: "5"
 

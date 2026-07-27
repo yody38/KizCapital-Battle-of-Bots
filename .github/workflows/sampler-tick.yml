@@ -25,7 +25,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 29
     env:
-      # Canary scope: VPS3 only (48-72h + A/B observador gate before fleet rollout)
+      # Canary scope: VPS1 only (48-72h + A/B observador gate before fleet rollout)
       VPS_HOSTS: "100.118.159.44"
       TICK_SECS: "120"
       LOOP_MINUTES: "27"

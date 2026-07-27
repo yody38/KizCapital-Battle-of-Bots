@@ -66,11 +66,11 @@ DEFAULT_TOLERANCE = 0.05  # USD
 # login) for readability; the gate itself compares by login (survives VPS moves).
 # Verificado cuenta por cuenta contra las 6 VPS por SSH el 2026-07-27.
 EXPECTED_REAL = {
-    ("vps5", 32081),
-    ("vps6", 25425),   # movida de vps5 → vps6 (slot limpio 40848) 2026-06-30
+    ("vps3", 32081),
+    ("vps6", 25425),   # movida de vps3 → vps6 (slot limpio 40848) 2026-06-30
     ("vps6", 43411),   # faltaban en el floor: solo estaban protegidas por el roster
     ("vps6", 43414),   # de Supabase — una caída de Supabase las dejaba sin gate
-    ("vps5", 43306),   # ausente de la flota desde 2026-07-27 → se publica DEGRADED
+    ("vps3", 43306),   # ausente de la flota desde 2026-07-27 → se publica DEGRADED
 }
 
 

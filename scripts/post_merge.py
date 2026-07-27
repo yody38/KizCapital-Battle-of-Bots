@@ -38,6 +38,13 @@ from datetime import datetime, timezone, timedelta
 
 from _metrics import clamp01, pearson, percentile, stdev
 
+
+def _registry_ids():
+    """Flota canonica segun config/vps_registry.json (numeracion del owner)."""
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from vps_registry import ids
+    return ids()
+
 # gate_lib del Ultra Tribunal (fuente única del gate de dominancia — 12 ejes).
 # Fail-open: sin tribunal/ el gate continuo simplemente no corre.
 _TRIBUNAL_SCRIPTS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "tribunal", "scripts")
@@ -2874,7 +2881,7 @@ def compute_vps_freshness(data_dir, vps_ids=None):
     """For each snapshot_vpsN.json present, compute lag from now() vs its
     generated_at. Returns ({vps_id: {lag_sec, stale, generated_at}}, partial)."""
     if vps_ids is None:
-        vps_ids = ["vps1", "vps2", "vps3", "vps4", "vps5", "vps6"]
+        vps_ids = _registry_ids()
     now = datetime.now(timezone.utc)
     out = {}
     partial = False

@@ -9,7 +9,7 @@ Reads credentials from Battle of Bots/.env.local:
 
 Uploads only files that changed (sha256 manifest cached at data/.upload-manifest.json).
 Mirrors directory structure exactly (data/snapshot.json -> snapshot.json in bucket,
-data/bots/vps1/123-456.json -> bots/vps1/123-456.json, etc.).
+data/bots/vps5/123-456.json -> bots/vps5/123-456.json, etc.).
 """
 from __future__ import annotations
 

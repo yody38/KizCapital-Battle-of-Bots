@@ -1,22 +1,57 @@
 # ⚔️ Kiz Capital LLC — Battle of Bots
 
-Dashboard interactivo que rankea los EAs (bots por `magic number`) de **57 cuentas MT5 distribuidas en 5 VPS Windows**. **Actualización 100% always-on cada 30 min, independiente de la Mac del usuario.**
+Dashboard interactivo que rankea los EAs (bots por `magic number`) de **68 cuentas MT5 distribuidas en 6 VPS Windows**. **Actualización 100% always-on cada 30 min, independiente de la Mac del usuario.**
 
 ---
 
 ## Ubicación
 
 - **Repo runtime**: `~/battle-of-bots/` (esta carpeta) y symlink en `/Users/yodyiznaga/Documents/Claude/MT5 MCP/Battle of Bots/`.
-- **Repo GitHub**: `yody38/KizCapital-Battle-of-Bots` (privado).
+- **Repo GitHub**: `yody38/KizCapital-Battle-of-Bots` — **PÚBLICO** (verificado 2026-07-27;
+  este documento decía "privado", que era falso). Todo lo que se commitea aquí es visible
+  para cualquiera: nunca IPs públicas de las VPS, credenciales, logins ni claves.
 - **Dashboard público**: desplegado en **Vercel** desde la rama `main`. Login con Supabase Auth (magic link 6-digit OTP).
 - **Dashboard local opcional**: `http://127.0.0.1:8765` cuando la Mac está prendida (LaunchAgent del HTTP server sigue activo).
+
+---
+
+## La flota (numeración canónica)
+
+`config/vps_registry.json` es la **fuente única de verdad**. Ningún script vuelve a
+hardcodear esta lista: `mirror.sh`, `mcp_health.py`, `post_merge.py`,
+`verify_trade_direction.py` y `run_direction_audit.sh` la leen de ahí.
+
+La numeración es la del **owner** — el `#N Package` del proveedor (FXVM), que es como
+están anotadas y como se accede por RDP. Antes del 2026-07-27 la numeración interna
+seguía el orden de incorporación y **no coincidía** con la del owner en 5 de 6 máquinas;
+decir "hay un problema en VPS 3" mandaba a la máquina equivocada. Las 6 quedaron
+verificadas por SSH contra su `hostname`.
+
+| VPS | Tailscale | Hostname | Paquete | Notas |
+|-----|-----------|----------|---------|-------|
+| vps1 | 100.118.159.44 | fxut8627928 | Lite VPS | — |
+| vps2 | 100.125.237.26 | fxut8630464 | Lite VPS | — |
+| vps3 | 100.70.228.19 | fxut8647921 | Lite VPS | reales 32081, 43306 · `LIVE_VPS_TAG=vps3` |
+| vps4 | 100.101.9.46 | fxut8649885 | Lite VPS | host de descarga del broker (`C:\botlab\mt5`) |
+| vps5 | 100.81.54.93 | fxut8717250 | Lite VPS · Dark Rea | dispara el CI (`dispatch_ci.ps1`) |
+| vps6 | 100.112.112.115 | fxut9165656 | Lite VPS · TOP 20 Bots | reales 25425, 43411, 43414 · compila MetaEditor |
+
+> ⚠️ **Este repo es PÚBLICO.** Los endpoints RDP públicos de la flota **no se
+> commitean** — publicarlos es señalar dónde apuntar un ataque de fuerza bruta
+> contra RDP. Viven en `config/vps_registry.local.json` (gitignored) junto a
+> `vps-access.local.md`. Nada operativo los necesita: todo el acceso va por Tailscale.
+
+Artefactos anteriores al **2026-07-27** usan la numeración vieja. Traducción:
+`vps1→vps5, vps2→vps4, vps3→vps1, vps4→vps2, vps5→vps3, vps6→vps6`
+(en código: `vps_registry.from_legacy("vps5")` → `"vps3"`).
 
 ---
 
 ## Arquitectura (desde 2026-05-14)
 
 ```
-VPS Windows × 5 (siempre encendidos · Tailscale 100.x.x.x)
+VPS Windows × 6 (siempre encendidos · Tailscale 100.x.x.x)
+Numeracion vps1..vps6 = #N Package del proveedor (config/vps_registry.json)
   └── Task Scheduler "BattleOfBots_Snapshot" — cada XX:00 UTC, 24/7
         └── C:\mt5-mcp\venv\Scripts\python.exe snapshot_builder.py
               └── C:\mt5-mcp\snapshot.json + C:\mt5-mcp\bots\ (fuente de verdad)
@@ -117,7 +152,7 @@ Configurados en `Settings → Secrets and variables → Actions` del repo:
 
 | Secret | Origen |
 |---|---|
-| `SSH_PRIVATE_KEY` | `~/.ssh/id_ed25519_ci` (clave dedicada de CI, autorizada en los 5 VPS) |
+| `SSH_PRIVATE_KEY` | `~/.ssh/id_ed25519_ci` (clave dedicada de CI, autorizada en los 6 VPS) |
 | `TS_OAUTH_CLIENT_ID` | Tailscale admin → OAuth clients (cliente `kizcapital-ci-github`) |
 | `TS_OAUTH_SECRET` | idem (mostrado solo una vez al crear) |
 | `SUPABASE_URL` | igual que `.env.local` |
@@ -185,6 +220,6 @@ Al click en cualquier bot del dashboard se abre el bot modal con 20 tabs (15 ori
 
 ## ⚠️ Anti-pattern crítico — NUNCA uploadear local snapshot.json sobre el de CI
 
-Si corres `post_merge.py` localmente y luego `upload_to_supabase.py`, **sobrescribes la data fresca que la CI generó** desde las VPS y rompes la integridad. La CI tiene SSH+Tailscale a las 5 VPS y datos fresquísimos; tu Mac local solo tiene el último mirror que descargó (potencialmente días viejo).
+Si corres `post_merge.py` localmente y luego `upload_to_supabase.py`, **sobrescribes la data fresca que la CI generó** desde las VPS y rompes la integridad. La CI tiene SSH+Tailscale a las 6 VPS y datos fresquísimos; tu Mac local solo tiene el último mirror que descargó (potencialmente días viejo).
 
 **Regla:** después de cambios al pipeline o frontend, push al repo y deja que `gh workflow run refresh.yml` ejecute el ciclo completo. Solo uploadea local si es para test puntual y vas a re-trigger CI inmediatamente después.

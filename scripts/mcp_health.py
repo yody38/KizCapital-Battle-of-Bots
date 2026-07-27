@@ -13,7 +13,7 @@ Outputs:
 
 Side effects:
   - GitHub Issue (dedupe by UTC day + VPS) when a VPS has consecutive_fails >= 2.
-  - Stdout summary: 'ok 5/5' / 'fail 4/5 down=[vps2]'
+  - Stdout summary: 'ok 5/5' / 'fail 4/5 down=[vps4]'
 
 Env:
   SSH_KEY               path to private key (default ~/.ssh/id_ed25519_ci)
@@ -51,14 +51,12 @@ ENV_FILE = ROOT / ".env.local"
 BUCKET = "dashboard-data"
 GH_REPO = "yody38/KizCapital-Battle-of-Bots"
 
-VPS_ROSTER = [
-    ("vps1", "trader@100.81.54.93"),
-    ("vps2", "trader@100.101.9.46"),
-    ("vps3", "trader@100.118.159.44"),
-    ("vps4", "trader@100.125.237.26"),
-    ("vps5", "trader@100.70.228.19"),
-    ("vps6", "trader@100.112.112.115"),
-]
+# Roster leido de config/vps_registry.json (fuente unica de verdad). La numeracion
+# de la flota es la del owner (#N Package del proveedor) desde 2026-07-27.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from vps_registry import roster as _vps_roster  # noqa: E402
+
+VPS_ROSTER = _vps_roster()
 
 SSH_KEY = os.environ.get("SSH_KEY", str(Path.home() / ".ssh" / "id_ed25519_ci"))
 SSH_TIMEOUT = 8
@@ -135,7 +133,7 @@ def probe_vps(vps_id: str, host: str) -> dict:
     }
 
     # 1. SSH ping — con UN reintento a timeout más generoso antes de declarar
-    # down: una VPS lenta-pero-viva (VPS4 bajo presión de RAM responde en ~11s,
+    # down: una VPS lenta-pero-viva (VPS2 bajo presión de RAM responde en ~11s,
     # sobre el ConnectTimeout de 8s) no debe abrir incidente; una VPS muerta
     # sigue cayendo igual (2 checks consecutivos = ~10 min, FAIL_THRESHOLD).
     rc, stdout, stderr, ms = ssh_cmd(host, "echo pong")
@@ -181,7 +179,7 @@ def probe_vps(vps_id: str, host: str) -> dict:
         result["fail_reason"] = f"snapshot age {age}s > {STALE_SEC}s"
         return result
 
-    # 3. Memory telemetry (INFORMATIONAL — never sets status). The VPS3-freeze
+    # 3. Memory telemetry (INFORMATIONAL — never sets status). The VPS1-freeze
     #    failure mode is already gated above: if RAM is truly exhausted, the
     #    snapshot read fails (-> degraded). One SSH round-trip returns both
     #    free physical RAM and pagefile commit % (the latter is the earlier

@@ -4,7 +4,7 @@
 -- Idempotent: re-runs are safe.
 --
 -- Purpose: <5s push of equity / balance / floating P&L / open positions
--- for the 2 real accounts on VPS5 (#25425 and #32081). Written by
+-- for the 2 real accounts on VPS3 (#25425 and #32081). Written by
 -- C:\mt5-mcp\live_publisher.py via service_role key. Read by the dashboard
 -- via Supabase Realtime subscription using the anon key + RLS.
 -- =====================================================================
@@ -26,7 +26,7 @@ create table if not exists public.live_real_state (
 create index if not exists idx_live_real_state_ts on public.live_real_state (ts desc);
 
 -- Authoritative server-side timestamp: stamp ts = now() on every insert/update so
--- freshness is immune to the publisher's (VPS5 Windows) clock skew, and an
+-- freshness is immune to the publisher's (VPS3 Windows) clock skew, and an
 -- out-of-order/replayed write can't carry a misleading older ts. The dashboard
 -- pill derives age from this ts.
 create or replace function public.live_real_state_set_ts() returns trigger as $$

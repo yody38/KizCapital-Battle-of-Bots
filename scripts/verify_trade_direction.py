@@ -76,7 +76,10 @@ def main() -> int:
     ap.add_argument("--strict-count", action="store_true")
     args = ap.parse_args()
 
-    EXPECTED_VPS = {"vps1", "vps2", "vps3", "vps4", "vps5", "vps6"}
+    # Flota esperada segun config/vps_registry.json (numeracion del owner).
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from vps_registry import ids as _vps_ids
+    EXPECTED_VPS = set(_vps_ids())
     closed_by_key, open_by_key, audit_errors, vps_present = load_audit(args.audit_dir)
 
     bots_report = []
@@ -115,7 +118,7 @@ def main() -> int:
 
             # The builder stores per-bot trade.ticket = int(position_id) (verified in
             # snapshot_builder.py). Match on position_id (canonical); fall back to the
-            # entry deal's order only when position_id is unavailable (VPS3 via MCP,
+            # entry deal's order only when position_id is unavailable (VPS1 via MCP,
             # which lacks position_id). order == position_id for an entry deal in MT5;
             # we assert that wherever both are present.
             by_key = {}

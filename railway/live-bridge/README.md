@@ -1,17 +1,17 @@
 # live-bridge — Railway worker (live equity stream, real accounts)
 
-Always-on container that keeps the 2 real accounts (#25425, #32081 on VPS5)
+Always-on container that keeps the 2 real accounts (#25425, #32081 on VPS3)
 streaming to Supabase `public.live_real_state` every ~3s. The dashboard
 subscribes via Supabase Realtime and patches the real-account cards in place.
 
 ## Why this exists
 
-`live_publisher.py` (the MetaTrader5 reader) **must run on VPS5** — the MT5
+`live_publisher.py` (the MetaTrader5 reader) **must run on VPS3** — the MT5
 Python lib only talks to the local terminal. Under Windows Task Scheduler
 `mt5.initialize()` hangs when the RDP session is disconnected
 (`[vps-disconnected-rdp-mt5-hang]`); the only context that works is an SSH
 **NetworkCleartext** session. This worker is the always-on holder of that SSH
-session: it dials VPS5 over Tailscale (userspace) and runs
+session: it dials VPS3 over Tailscale (userspace) and runs
 `live_publisher.py --loop --interval 3`, reconnecting forever.
 
 ## Deploy
@@ -24,7 +24,7 @@ session: it dials VPS5 over Tailscale (userspace) and runs
    |---|---|
    | `SSH_PRIVATE_KEY_B64` | CI ed25519 private key, **base64-encoded** (preferred — survives single-line env storage). Set headless with: `base64 < ~/.ssh/id_ed25519_ci \| tr -d '\n' \| railway variables -s live-bridge --set-from-stdin SSH_PRIVATE_KEY_B64`. Fallback: `SSH_PRIVATE_KEY` (raw multiline). |
    | `TS_AUTHKEY` | Tailscale **ephemeral + reusable** authkey, tag `tag:ci` |
-   | `VPS5_HOST` | `100.70.228.19` (optional, this is the default) |
+   | `VPS3_HOST` | `100.70.228.19` (optional, this is the default) |
    | `LIVE_INTERVAL_SECS` | `3` (optional, default 3) |
 
 3. Deploy. The container brings up Tailscale, then opens the SSH loop.

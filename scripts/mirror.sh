@@ -1,7 +1,8 @@
 #!/bin/bash
 # Battle of Bots — multi-VPS mirror + merger.
-# Pulls per-VPS snapshots from VPS1 & VPS2, merges into a single snapshot.json
-# annotated with `vps` field on each account/bot.
+# Pulls the per-VPS snapshots of the whole fleet (roster en config/vps_registry.json)
+# y los fusiona en un unico snapshot.json anotando el campo `vps` en cada cuenta/bot.
+# La numeracion de la flota es la del owner (#N Package del proveedor) desde 2026-07-27.
 
 set -uo pipefail
 
@@ -20,10 +21,10 @@ BOTS_OUT_DIR="$DATA_DIR/bots"
 # Hard freshness gate: a VPS snapshot older than this is treated as a failure.
 # DEBE ser mayor que (periodo del builder + su tiempo de build), o el fallo es
 # matemáticamente inevitable: con builder cada 30min y umbral 30min, el snapshot
-# roza el límite justo antes de cada build nuevo. VPS5 además tarda ~21min por
+# roza el límite justo antes de cada build nuevo. VPS3 además tarda ~21min por
 # build (16 terminales en serie, 7 colgados a ~60s de IPC timeout cada uno), así
 # que su edad oscila hasta ~30min+ y tumbaba el ciclo (incidente 2026-07-27:
-# "vps5 snapshot_stale_1907s" con REQUIRED_VPS → sin upload).
+# "vps3 snapshot_stale_1907s" con REQUIRED_VPS → sin upload).
 # 45min da holgura sin perder honestidad: el dashboard muestra la edad por VPS y
 # el gate de reales sobre VPS stale (verify_integrity) sigue en pie.
 SNAPSHOT_MAX_AGE_SEC=${SNAPSHOT_MAX_AGE_SEC:-2700}
@@ -50,19 +51,48 @@ SCP_OPTS=(-i "$SSH_KEY" -o StrictHostKeyChecking=accept-new \
           -o ConnectTimeout=30 -o ServerAliveInterval=15 -o ServerAliveCountMax=4 \
           -C -o ControlMaster=auto -o "ControlPath=/tmp/cm-%r@%h:%p" -o ControlPersist=60)
 
-# VPS roster (format "id=host"). Add entries here to scale.
-VPS_ENTRIES=(
-  "vps1=trader@100.81.54.93"
-  "vps2=trader@100.101.9.46"
-  "vps3=trader@100.118.159.44"
-  "vps4=trader@100.125.237.26"
-  "vps5=trader@100.70.228.19"
-  "vps6=trader@100.112.112.115"
-)
+# VPS roster (format "id=host") — leido de config/vps_registry.json, la fuente
+# unica de verdad. Para escalar se anade el registro ALLI, nunca aqui.
+# Sin mapfile: /bin/bash en macOS es 3.2 y no lo tiene.
+VPS_ENTRIES=()
+while IFS= read -r _line; do
+  [ -n "$_line" ] && VPS_ENTRIES+=("$_line")
+done < <(python3 "$DIR/scripts/vps_registry.py" entries 2>/dev/null)
+if [ "${#VPS_ENTRIES[@]}" -lt 1 ]; then
+  echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] mirror FAIL — no se pudo leer config/vps_registry.json (roster vacio)" >> "$LOG"
+  exit 1
+fi
 
 mkdir -p "$DATA_DIR" "$BOTS_OUT_DIR"
 ts() { date -u +"%Y-%m-%dT%H:%M:%SZ"; }
 now_ms() { date -u +%s%3N; }   # epoch milliseconds (GNU date; CI runs on ubuntu)
+
+# --- [OBSERVABILIDAD] Que un ciclo fallido explique POR QUÉ falló -------------
+# Todo el detalle vive en $LOG, que solo viaja dentro del artifact `mirror-logs-*`.
+# Verificado el 2026-07-27 sobre tres runs rojos: `gh run view --log-failed`
+# devuelve literalmente "Process completed with exit code 1" y NADA más, mientras
+# la causa real ("vps5 snapshot.json STALE age=1907s threshold=1800s") estaba
+# enterrada en el artifact. Cada incidente costaba una descarga manual.
+# Este trap vuelca la cola del log a stdout y emite una anotación ::error:: con la
+# causa parseada, así el propio email de fallo de GitHub ya la lleva en el título.
+_on_exit() {
+  local rc=$?
+  [ "$rc" -eq 0 ] && exit 0
+  [ -f "$LOG" ] || exit "$rc"
+  echo "----- mirror.log · últimas 40 líneas (rc=$rc) -----"
+  tail -40 "$LOG"
+  echo "---------------------------------------------------"
+  local cause
+  cause="$(grep -aoE 'mirror FAIL — .*|[a-z0-9]+ FAIL \([^)]*\)|\[verify\] FAIL.*|[a-z0-9]+ snapshot\.json STALE age=[0-9]+s[^—]*' "$LOG" | tail -1)"
+  [ -z "$cause" ] && cause="rc=$rc sin causa reconocida — ver artifact mirror-logs-*"
+  if [ -n "${GITHUB_ACTIONS:-}" ]; then
+    echo "::error title=refresh-dashboard falló::${cause}"
+  else
+    echo "CAUSA: ${cause}"
+  fi
+  exit "$rc"
+}
+trap _on_exit EXIT
 
 # Per-stage wall-clock telemetry (Feature: pipeline latency). Captured here in the
 # orchestrator; emitted to pipeline_timing.json at the very end so a single source
@@ -266,7 +296,7 @@ fetch_vps() {
 }
 
 # Concurrency cap: VPS scp run in parallel but bounded. Keeps RAM/IO pressure
-# (VPS2 1.5GB, VPS4 slow) sane while collapsing the serial 6× transport that
+# (VPS4 1.5GB, VPS2 slow) sane while collapsing the serial 6× transport that
 # telemetry proved is ~91% of the cycle. Throttle with `wait -n` (bash 4.3+).
 MAX_PARALLEL=${MIRROR_MAX_PARALLEL:-3}
 MIRROR_START_MS=$(now_ms)
@@ -315,15 +345,24 @@ for id in "${VPS_IDS[@]}"; do
 done
 
 # --- Quorum (fail-closed safety limits) ---
-MAX_STALE_VPS=${MAX_STALE_VPS:-1}     # at most this many VPS may be carried stale
+# Regla del owner (2026-07-27), la misma que ya rige en verify_integrity.check_freshness:
+# el fallo de una fuente se MARCA en su perfil; solo los datos FALSOS abortan un ciclo.
+# Antes esto valía 1: con DOS VPS stale a la vez el ciclo abortaba y no se subía nada,
+# congelando el dashboard entero — los otros 4 VPS sanos incluidos. Eso es justo lo que
+# la regla prohíbe: un dato viejo y marcado es honesto, un dashboard congelado no.
+# El suelo que SÍ se conserva: al menos una VPS tiene que venir fresca. Si las 6 están
+# stale no hay nada nuevo que publicar (el merge sería 100% carry-forward) y eso sí es
+# un apagón real que debe fallar ruidosamente, no disfrazarse de ciclo bueno.
+# Derivado del roster, no hardcodeado: añadir una VPS7 no cambia la semántica en silencio.
+MAX_STALE_VPS=${MAX_STALE_VPS:-$(( ${#VPS_ENTRIES[@]} - 1 ))}
 if [ ${#STALE_IDS[@]} -gt "$MAX_STALE_VPS" ]; then
-  echo "[$(ts)] mirror FAIL — ${#STALE_IDS[@]} VPS down (> MAX_STALE_VPS=$MAX_STALE_VPS): ${STALE_IDS[*]} (no upload)" >> "$LOG"
+  echo "[$(ts)] mirror FAIL — las ${#STALE_IDS[@]} VPS del roster están stale (> MAX_STALE_VPS=$MAX_STALE_VPS): ${STALE_IDS[*]} — no hay ninguna fuente fresca (no upload)" >> "$LOG"
   exit 1
 fi
 
-# NOTA (regla del owner, 2026-07-27): antes existía REQUIRED_VPS=vps5 — si la VPS
+# NOTA (regla del owner, 2026-07-27): antes existía REQUIRED_VPS=vps3 — si la VPS
 # de las cuentas reales iba stale, el ciclo abortaba sin subir NADA y el dashboard
-# entero se congelaba (incidente del 2026-07-27). Ahora vps5 degrada como cualquier
+# entero se congelaba (incidente del 2026-07-27). Ahora vps3 degrada como cualquier
 # otra: carry-forward + sus cuentas reales quedan marcadas con datos atrasados por
 # verify_integrity.check_freshness, que lo pinta en el perfil de cada cuenta.
 # Marcar es honesto; congelar los otros ~389 bots no lo era.

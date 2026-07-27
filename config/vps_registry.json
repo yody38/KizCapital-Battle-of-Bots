@@ -1,0 +1,80 @@
+{
+  "_doc": [
+    "Fuente UNICA de verdad de la identidad de las VPS. Ningun script debe repetir esta lista.",
+    "La numeracion es la del owner: corresponde al '#N Package' del proveedor (FXVM), que es",
+    "como Yody las tiene anotadas y como se conecta por RDP. Antes del 2026-07-27 la numeracion",
+    "interna seguia el orden de incorporacion y NO coincidia con la del owner en 5 de 6 maquinas.",
+    "Cada registro fue verificado por SSH contra 'hostname' el 2026-07-27: las 6 coincidieron.",
+    "Para agregar una VPS: anadir el registro aqui y nada mas.",
+    "Los endpoints RDP publicos NO estan aqui a proposito: este repo es PUBLICO. Viven en config/vps_registry.local.json (gitignored). El acceso operativo es por Tailscale, que no requiere la IP publica."
+  ],
+  "cutover_date": "2026-07-27",
+  "legacy_permutation": "vieja -> nueva: vps1->vps5, vps2->vps4, vps3->vps1, vps4->vps2, vps5->vps3, vps6->vps6",
+  "ssh_user": "trader",
+  "vps": [
+    {
+      "id": "vps1",
+      "number": 1,
+      "tailscale_ip": "100.118.159.44",
+      "hostname": "fxut8627928",
+      "tailscale_name": "mt5vps1",
+      "package": "Lite VPS",
+      "mcp_server": "mt5-portfolio-vps1",
+      "legacy_id": "vps3"
+    },
+    {
+      "id": "vps2",
+      "number": 2,
+      "tailscale_ip": "100.125.237.26",
+      "hostname": "fxut8630464",
+      "tailscale_name": "mt5vps2",
+      "package": "Lite VPS",
+      "mcp_server": "mt5-portfolio-vps2",
+      "legacy_id": "vps4"
+    },
+    {
+      "id": "vps3",
+      "number": 3,
+      "tailscale_ip": "100.70.228.19",
+      "hostname": "fxut8647921",
+      "tailscale_name": "mt5vps3",
+      "package": "Lite VPS",
+      "mcp_server": "mt5-portfolio-vps3",
+      "legacy_id": "vps5",
+      "notes": "Cuentas reales 32081 y 43306. Corre live_publisher.py con LIVE_VPS_TAG=vps3."
+    },
+    {
+      "id": "vps4",
+      "number": 4,
+      "tailscale_ip": "100.101.9.46",
+      "hostname": "fxut8649885",
+      "tailscale_name": "mt5vps4",
+      "package": "Lite VPS",
+      "mcp_server": "mt5-portfolio-vps4",
+      "legacy_id": "vps2",
+      "notes": "Host de descarga de datos del broker: terminal portable headless C:\\botlab\\mt5."
+    },
+    {
+      "id": "vps5",
+      "number": 5,
+      "tailscale_ip": "100.81.54.93",
+      "hostname": "fxut8717250",
+      "tailscale_name": "mt5vps5",
+      "package": "Lite VPS - Dark Rea",
+      "mcp_server": "mt5-portfolio-vps5",
+      "legacy_id": "vps1",
+      "notes": "Dispara el CI externo cada 30min via tarea programada dispatch_ci.ps1."
+    },
+    {
+      "id": "vps6",
+      "number": 6,
+      "tailscale_ip": "100.112.112.115",
+      "hostname": "fxut9165656",
+      "tailscale_name": "mt5vps6",
+      "package": "Lite VPS - TOP 20 Bots",
+      "mcp_server": "mt5-portfolio-vps6",
+      "legacy_id": "vps6",
+      "notes": "Cuentas reales 25425, 43411 y 43414. Host de compilacion MetaEditor del Gold Mine Lab."
+    }
+  ]
+}

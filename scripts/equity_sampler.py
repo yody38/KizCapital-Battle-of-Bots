@@ -83,7 +83,7 @@ def load_json(path: Path, default: Any) -> Any:
 
 
 # --- Lock (overlapping one-shot invocations only; MT5 concurrency with the
-# builder is already proven safe by live_publisher on VPS5) -----------------
+# builder is already proven safe by live_publisher on VPS3) -----------------
 
 def acquire_lock() -> bool:
     # O_CREAT|O_EXCL = atómico (tribunal post-impl): dos one-shots simultáneos
