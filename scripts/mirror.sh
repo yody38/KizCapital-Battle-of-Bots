@@ -18,7 +18,15 @@ REMOTE_READY_FILE='C:/mt5-mcp/bots/.ready'
 BOTS_OUT_DIR="$DATA_DIR/bots"
 
 # Hard freshness gate: a VPS snapshot older than this is treated as a failure.
-SNAPSHOT_MAX_AGE_SEC=${SNAPSHOT_MAX_AGE_SEC:-1800}
+# DEBE ser mayor que (periodo del builder + su tiempo de build), o el fallo es
+# matemáticamente inevitable: con builder cada 30min y umbral 30min, el snapshot
+# roza el límite justo antes de cada build nuevo. VPS5 además tarda ~21min por
+# build (16 terminales en serie, 7 colgados a ~60s de IPC timeout cada uno), así
+# que su edad oscila hasta ~30min+ y tumbaba el ciclo (incidente 2026-07-27:
+# "vps5 snapshot_stale_1907s" con REQUIRED_VPS → sin upload).
+# 45min da holgura sin perder honestidad: el dashboard muestra la edad por VPS y
+# el gate de reales sobre VPS stale (verify_integrity) sigue en pie.
+SNAPSHOT_MAX_AGE_SEC=${SNAPSHOT_MAX_AGE_SEC:-2700}
 # Per-bot scp retries (kept as a defence-in-depth in case the .ready flag is
 # absent on a VPS that hasn't been upgraded to builder v3 yet).
 BOTS_SCP_MAX_ATTEMPTS=${BOTS_SCP_MAX_ATTEMPTS:-3}
