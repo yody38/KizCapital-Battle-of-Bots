@@ -88,6 +88,27 @@ window.kizStorage = {
     return data.signedUrl;
   },
 
+  // [VELOCIDAD F6] Firma N objetos en UNA sola petición (POST /object/sign con
+  // {paths:[...]}) en vez de una por archivo. El boot pide ~10 JSONs y cada
+  // firma costaba su propio round-trip a origen (175-524 ms medidos), así que
+  // eran ~10 RTT de puro protocolo antes del primer byte de datos.
+  // Devuelve [{path, signedUrl}] solo con los que la API firmó bien: un path
+  // ausente en Storage no invalida el lote, simplemente no viene en la lista y
+  // el llamador cae al camino de firma individual.
+  async signedUrls(paths, expiresIn = 600) {
+    if (!Array.isArray(paths) || !paths.length) return [];
+    const { data, error } = await window.kizSupabase.storage
+      .from("dashboard-data")
+      .createSignedUrls(paths, expiresIn);
+    if (error) {
+      console.error("[kiz] signedUrls error", error);
+      return [];
+    }
+    return (data || [])
+      .filter((r) => r && r.path && r.signedUrl && !r.error)
+      .map((r) => ({ path: r.path, url: r.signedUrl }));
+  },
+
   async fetchJson(path) {
     const url = await this.signedUrl(path);
     if (!url) return null;

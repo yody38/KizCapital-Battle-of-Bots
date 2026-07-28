@@ -45,6 +45,7 @@
     }
   ],
   "rewrites": [
-    { "source": "/", "destination": "/index.html" }
+    { "source": "/", "destination": "/index.html" },
+    { "source": "/d/:sha/:path*", "destination": "/api/d?sha=:sha&path=:path*" }
   ]
 }
