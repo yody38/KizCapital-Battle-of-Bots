@@ -619,6 +619,23 @@ DETAIL_SPLIT_FIELDS = [
     #   dominance   -> renderCandidates (tabla de candidatos)
     "trade_distribution", "promotion_gating", "stress", "promotion_fails",
     "pair_recommendations", "real_vs_demo", "floating_dd",
+    # [ESCALA E1] Tercera tanda (2026-07-28). Escalares de estadistica que solo
+    # pintan paneles del modal. Verificado con un barrido EXHAUSTIVO que esta vez
+    # incluye ambitos `const` — el barrido anterior solo miraba `function` y por
+    # eso se escapo QUERY_FIELDS, rompiendo el filtro is_real.
+    #   longest_losing_streak_months, longest_dd_duration_days,
+    #   monthly_net_stdev, monthly_net_cov  -> renderConsistencyPanel
+    #   slope_recent_90d, slope_lifetime    -> renderDecayPanel
+    #   max_consecutive_wins, stdev_per_trade -> sin consumidor en el arranque
+    # ~210 B/bot menos. NO se movio ningun otro escalar: el resto (calmar,
+    # sortino, sharpe_annualized, decay_ratio, dd_pct_of_balance, expectancy,
+    # recovery_factor, max_consecutive_losses, promotion_score_raw/_shrunk,
+    # months_positive_pct, net_after_commission) SI se usa al arrancar, en las
+    # tablas o en QUERY_FIELDS.
+    "longest_losing_streak_months", "longest_dd_duration_days",
+    "slope_recent_90d", "slope_lifetime",
+    "monthly_net_stdev", "monthly_net_cov",
+    "max_consecutive_wins", "stdev_per_trade",
 ]
 DETAIL_CANDIDATE_KEEP = {"shrinkage_meta", "promotion_components"}
 DETAIL_CANDIDATE_STATUSES = {"READY", "NEAR", "WATCH"}
