@@ -202,14 +202,33 @@ class Uploader:
             raise RuntimeError(f"http {exc.code}: {detail}") from None
 
     def list_prefix(self, prefix: str) -> set[str]:
-        """Return the set of object names under a folder prefix (one folder at a time)."""
+        """Return the set of object names under a folder prefix (one folder at a time).
+
+        [ESCALA E4] Pagina de verdad. Antes pedia `limit: 1000` de una sola vez,
+        que es el tope de la API: al pasar de 1.000 objetos en una carpeta el
+        listado se habria truncado EN SILENCIO y el audit habria creido que los
+        objetos sobrantes no existen, re-subiendolos enteros cada ciclo. Hoy la
+        carpeta mas poblada tiene ~144, pero la flota va a 2.000+ bots.
+        """
         endpoint = f"{self.base}/storage/v1/object/list/{BUCKET}"
-        body = json.dumps({"prefix": prefix, "limit": 1000}).encode()
         headers = self._headers("application/json")
-        req = urlrequest.Request(endpoint, data=body, headers=headers, method="POST")
-        with urlopen_retry(req, timeout=30) as resp:
-            data = json.loads(resp.read())
-        return {o["name"] for o in data if o.get("name")}
+        PAGE = 1000
+        nombres: set[str] = set()
+        offset = 0
+        while True:
+            body = json.dumps({"prefix": prefix, "limit": PAGE, "offset": offset}).encode()
+            req = urlrequest.Request(endpoint, data=body, headers=headers, method="POST")
+            with urlopen_retry(req, timeout=30) as resp:
+                data = json.loads(resp.read())
+            if not data:
+                break
+            nombres.update(o["name"] for o in data if o.get("name"))
+            if len(data) < PAGE:
+                break
+            offset += PAGE
+            if offset > 100_000:      # cinturon: nunca un bucle infinito
+                break
+        return nombres
 
 
 # ----------------------- R2 dual-write (Fase C, tribunal 2026-06-09) -----------------------

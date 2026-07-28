@@ -3051,7 +3051,10 @@ async function bldRecalc() {
       symbols: meta.symbols,
       status: meta.status,
       score: meta.score,
-      account_balance: data.account_balance,
+      // [E4] El saldo ya no viaja en el per-bot file (cambiaba en cada tick y
+      // hacia que el 95% de los archivos se re-subiera cada ciclo). Se toma de
+      // snapshot.accounts, que es su fuente autoritativa.
+      account_balance: data.account_balance ?? bldAccountBalance(meta.vps, meta.login),
       series: data.daily_equity_series || [],
     });
   }
