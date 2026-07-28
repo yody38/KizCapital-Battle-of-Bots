@@ -142,12 +142,86 @@ function intervalWhenVisible(fn, ms) {
   return setInterval(tick, ms);
 }
 
-function readSnapCache() {
-  try { const r = localStorage.getItem(SNAP_CACHE_KEY); return r ? JSON.parse(r) : null; }
-  catch { return null; }
+// [ESCALA E2] Caché del snapshot en IndexedDB, no en localStorage.
+//
+// POR QUÉ (medido 2026-07-28): cada bot cuesta ~1.798 B en el snapshot. Con
+// 402 bots la caché ocupa 1,6 MB, pero a ~1.200 bots supera los ~5 MB que
+// admite localStorage — y como el guardado vive en un try/catch, el pintado
+// instantáneo habría muerto EN SILENCIO, sin error visible, justo cuando la
+// flota crezca (5-10 bots/día → 2-3 meses). Además localStorage es SÍNCRONO:
+// escribir 3,6 MB congela la pestaña en cada ciclo.
+//
+// IndexedDB no tiene ese tope práctico y es asíncrono. Para no propagar el
+// async por todo el código, se mantiene un espejo EN MEMORIA: readSnapCache()
+// sigue siendo síncrono para sus llamadores, y la lectura de disco ocurre una
+// vez al arrancar (hydrateSnapCache).
+const SNAP_DB = 'kiz-cache';
+const SNAP_STORE = 'snapshots';
+const SNAP_SCHEMA = 2;          // subir esto descarta cachés de formato viejo
+let snapCacheMem = null;        // espejo en memoria del último snapshot bueno
+
+function idbOpen() {
+  return new Promise((resolve, reject) => {
+    if (!self.indexedDB) return reject(new Error('sin IndexedDB'));
+    const req = indexedDB.open(SNAP_DB, 1);
+    req.onupgradeneeded = () => {
+      const db = req.result;
+      if (!db.objectStoreNames.contains(SNAP_STORE)) db.createObjectStore(SNAP_STORE);
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
 }
+
+function idbGet(key) {
+  return idbOpen().then(db => new Promise((resolve, reject) => {
+    const tx = db.transaction(SNAP_STORE, 'readonly');
+    const r = tx.objectStore(SNAP_STORE).get(key);
+    r.onsuccess = () => resolve(r.result);
+    r.onerror = () => reject(r.error);
+  }));
+}
+
+function idbPut(key, value) {
+  return idbOpen().then(db => new Promise((resolve, reject) => {
+    const tx = db.transaction(SNAP_STORE, 'readwrite');
+    tx.objectStore(SNAP_STORE).put(value, key);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  }));
+}
+
+// Lee de disco una sola vez al arrancar y llena el espejo en memoria.
+async function hydrateSnapCache() {
+  try {
+    const rec = await idbGet(SNAP_CACHE_KEY);
+    // Formato viejo → se descarta en vez de pintar algo inconsistente.
+    if (rec && rec.schema === SNAP_SCHEMA && rec.data) snapCacheMem = rec.data;
+  } catch { /* modo privado / sin IndexedDB → se sigue sin caché, nunca con datos malos */ }
+  // Migración desde el localStorage anterior: aprovecha la caché que ya tenía
+  // el usuario para que su primer arranque tras el cambio siga siendo instantáneo.
+  if (!snapCacheMem) {
+    try {
+      const legacy = localStorage.getItem(SNAP_CACHE_KEY);
+      if (legacy) {
+        snapCacheMem = JSON.parse(legacy);
+        localStorage.removeItem(SNAP_CACHE_KEY);   // libera los MB del tope viejo
+        writeSnapCache(snapCacheMem);
+      }
+    } catch { /* nada que migrar */ }
+  }
+  return snapCacheMem;
+}
+
+function readSnapCache() {
+  return snapCacheMem;    // síncrono para los llamadores; el disco ya se leyó
+}
+
 function writeSnapCache(data) {
-  try { localStorage.setItem(SNAP_CACHE_KEY, JSON.stringify(data)); } catch { /* quota — non-fatal */ }
+  snapCacheMem = data;
+  // Sin await: el guardado no puede retrasar el pintado ni bloquear el hilo.
+  idbPut(SNAP_CACHE_KEY, { schema: SNAP_SCHEMA, savedAt: Date.now(), data })
+    .catch(() => { /* cuota o modo privado — no crítico, se sigue con memoria */ });
 }
 
 // Una cuenta real "vacía" (balance 0 y equity 0) no se muestra en la sección Cuentas Reales.
@@ -198,9 +272,17 @@ function applySnapshot(data) {
 
 // Paint the cached snapshot synchronously on boot (before any network), so the
 // dashboard is interactive instantly. No-op if there's no cache yet.
-function paintCachedSnapshot() {
-  const cached = readSnapCache();
-  if (cached) { try { applySnapshot(cached); } catch (e) { console.error('cache paint failed', e); } }
+// La lectura de disco ahora es asíncrona (IndexedDB), así que puede resolverse
+// DESPUÉS de que la red ya haya pintado datos frescos. `freshApplied` impide
+// ese caso: la caché nunca sobrescribe algo más nuevo que ella.
+let freshApplied = false;
+
+async function paintCachedSnapshot() {
+  try {
+    const cached = await hydrateSnapCache();
+    if (!cached || freshApplied) return;
+    applySnapshot(cached);
+  } catch (e) { console.error('cache paint failed', e); }
 }
 
 async function loadSnapshot() {
@@ -221,6 +303,7 @@ async function loadSnapshot() {
       data = await snapRes.json();
     }
     state.history = histRows || [];
+    freshApplied = true;      // [E2] a partir de aquí la caché ya no puede pisar
     applySnapshot(data);
     // "What moved" since the previous render (cache or prior cycle), derived
     // 100% in the browser — no backend file (Rule of Three: build it when a
@@ -4660,7 +4743,7 @@ wireDNAModal();
 wireCompareModal();
 wireMcpHealth();
 wireTiming();
-paintCachedSnapshot();  // instant first paint from localStorage (SWR)
+paintCachedSnapshot();  // [E2] pintado instantáneo desde IndexedDB (SWR); no bloquea
 loadSnapshot();         // then revalidate from the network in the background
 
 // ----------------------- MCP Health chip + modal -----------------------

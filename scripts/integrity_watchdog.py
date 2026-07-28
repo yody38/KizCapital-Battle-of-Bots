@@ -334,11 +334,19 @@ def upload_health_to_supabase(url: str, key: str, record: dict) -> None:
         _, history = supa_get_json(url, key, "watchdog_history.json")
         if not isinstance(history, list):
             history = []
+        # [ESCALA E5] Se guardan tambien las metricas de capacidad para poder
+        # PROYECTAR el crecimiento: sin serie historica no hay forma de avisar
+        # con semanas de antelacion, que es justo lo que fallo con la cuota de
+        # Supabase (nos enteramos el dia del aviso de restriccion).
+        cap = (record.get("steps") or {}).get("capacity") or {}
         history.append({
             "ts": record.get("ts"),
             "result": record.get("result"),
             "fails": record.get("fails") or [],
             "duration_ms": record.get("duration_ms"),
+            "bots": cap.get("bots"),
+            "snapshot_bytes": cap.get("snapshot_bytes"),
+            "max_objects_per_folder": cap.get("max_objects_per_folder"),
         })
         cutoff = datetime.now(timezone.utc).timestamp() - 30 * 86400
         pruned = []
@@ -657,6 +665,92 @@ def main() -> int:
                 )
         except Exception as e:  # noqa: BLE001 — check aditivo, nunca tumba el watchdog
             info["steps"]["compression"] = {"error": str(e)}
+
+    # Step 4b-cap — [ESCALA E5] Presupuesto de datos con alarma ANTICIPADA.
+    #
+    # El owner suma 5-10 bots/dia y proyecta 2.000+ en 90 dias. Cada limite del
+    # sistema tiene un techo conocido; lo que faltaba era avisar ANTES de
+    # llegar, no el dia que revienta (como paso con la cuota de Supabase).
+    # Se mide el consumo actual y se proyecta con el ritmo real de la serie
+    # historica: si un umbral se cruza en <30 dias, se avisa diciendo cuantos
+    # dias quedan.
+    CAP_LIMITS = {
+        # metrica -> (umbral de aviso, techo real, explicacion)
+        "snapshot_bytes": (3_000_000, None,
+                           "el navegador parsea el snapshot entero en cada carga"),
+        "max_objects_per_folder": (800, 1000,
+                                   "el listado de Storage pagina a 1000 por carpeta"),
+        "ci_duration_sec": (1200, 1800,
+                            "el ciclo debe caber en su ventana de 30 min"),
+    }
+    if url and key:
+        try:
+            cap: dict = {}
+            snap_bytes = None
+            code_c, _ = supa_request(url, key, "snapshot.json", "HEAD")
+            # HEAD no da tamaño fiable en Storage → se usa el listado de la raíz.
+            body = json.dumps({"prefix": "", "limit": 1000}).encode()
+            req = urlrequest.Request(
+                f"{url.rstrip('/')}/storage/v1/object/list/{BUCKET}",
+                data=body, method="POST",
+                headers={"Authorization": f"Bearer {key}", "apikey": key,
+                         "Content-Type": "application/json"})
+            with urlrequest.urlopen(req, timeout=25) as r:
+                for o in json.loads(r.read()):
+                    if o.get("name") == "snapshot.json":
+                        snap_bytes = (o.get("metadata") or {}).get("size")
+            cap["snapshot_bytes"] = snap_bytes
+            cap["bots"] = len(bots)
+            # Objetos por carpeta de bots (el techo de 1000 del listado).
+            peor = 0
+            for vps_id in sorted({b.get("vps") for b in bots if b.get("vps")}):
+                body = json.dumps({"prefix": f"bots/{vps_id}", "limit": 1000}).encode()
+                req = urlrequest.Request(
+                    f"{url.rstrip('/')}/storage/v1/object/list/{BUCKET}",
+                    data=body, method="POST",
+                    headers={"Authorization": f"Bearer {key}", "apikey": key,
+                             "Content-Type": "application/json"})
+                with urlrequest.urlopen(req, timeout=25) as r:
+                    peor = max(peor, len(json.loads(r.read())))
+            cap["max_objects_per_folder"] = peor
+            ci = (info.get("steps") or {}).get("ci") or {}
+            cap["ci_duration_sec"] = None
+
+            # Proyeccion sobre la serie historica (ritmo real, no supuesto).
+            avisos = []
+            _, hist = supa_get_json(url, key, "watchdog_history.json")
+            serie = [h for h in (hist or []) if isinstance(h, dict)]
+            for metrica, (umbral, techo, porque) in CAP_LIMITS.items():
+                actual = cap.get(metrica)
+                if not actual:
+                    continue
+                if actual >= umbral:
+                    avisos.append(f"{metrica}={actual} ya supera el umbral {umbral} ({porque})")
+                    continue
+                puntos = [(parse_iso(h.get("ts")), h.get(metrica))
+                          for h in serie if h.get(metrica) and parse_iso(h.get("ts"))]
+                if len(puntos) < 8:
+                    continue                      # sin serie suficiente no se inventa tendencia
+                puntos.sort(key=lambda p: p[0])
+                t0, v0 = puntos[0]
+                t1, v1 = puntos[-1]
+                dias = (t1 - t0).total_seconds() / 86400
+                if dias < 1 or v1 <= v0:
+                    continue                      # sin crecimiento medible
+                ritmo = (v1 - v0) / dias
+                faltan = (umbral - actual) / ritmo
+                if faltan < 30:
+                    avisos.append(
+                        f"{metrica}: {actual} → umbral {umbral} en ~{faltan:.0f} dias "
+                        f"al ritmo actual (+{ritmo:.0f}/dia) · {porque}")
+            cap["avisos"] = avisos
+            info["steps"]["capacity"] = cap
+            for a in avisos:
+                # Aviso, no fallo: el sistema aun funciona; el objetivo es actuar
+                # con semanas de margen.
+                freshness_warn.append(f"capacidad: {a}")
+        except Exception as e:  # noqa: BLE001 — check aditivo, nunca tumba el watchdog
+            info["steps"]["capacity"] = {"error": str(e)}
 
     # Step 4b-ter — [RESILIENCIA R2] Otros workflows en rojo.
     # El watchdog solo miraba refresh-dashboard: spread-sampler llevaba 3/3
