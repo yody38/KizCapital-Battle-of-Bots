@@ -662,15 +662,26 @@ def split_detail_to_per_bot(snap, data_dir):
             continue
         pb["detail"] = dict(moved)
         pb["detail"]["_fields"] = sorted(moved.keys())
-        # [ESCALA E4] Fuera el saldo de la CUENTA de los archivos por BOT.
-        # Es un dato de cuenta duplicado en cada bot suyo, y se mueve con cada
-        # tick de equity: por eso el 95% de los per-bot files cambiaba en CADA
-        # ciclo (416 de 439 subidos) aunque el bot no hubiera operado. A 2.000
-        # bots eso serian ~2,7M escrituras/mes en R2, por encima del millon
-        # gratuito. Quitandolo, el archivo solo cambia cuando el bot opera de
-        # verdad. El dato no se pierde: vive en snapshot.accounts[].balance y
-        # el frontend ya tiene el camino (bldAccountBalance).
-        pb.pop("account_balance", None)
+        # [ESCALA E4 — REVERTIDO 2026-07-28]
+        # Aqui se quitaba `account_balance` del per-bot file: es un dato de
+        # CUENTA duplicado en cada bot suyo que se mueve con cada tick de equity,
+        # y por eso el 95% de los archivos se re-subia en CADA ciclo (416 de 439)
+        # aunque el bot no hubiera operado. A 2.000 bots serian ~2,7M
+        # escrituras/mes en R2, por encima del millon gratuito.
+        #
+        # POR QUE SE REVIRTIO: el gate de determinismo (test_determinism.py)
+        # fallo en el primer ciclo con el cambio — 43 bots con enrichment
+        # distinto entre dos ejecuciones sobre la MISMA entrada. Habia pasado en
+        # todos los ciclos anteriores, asi que la causa es este cambio. No se
+        # identifico la dependencia exacta (ningun punto de post_merge lee
+        # account_balance del per-bot file; los cuatro consumidores lo toman de
+        # accounts_by_login), y un pipeline no reproducible que calcula
+        # puntuaciones de dinero real no es aceptable ni un ciclo.
+        #
+        # Para retomarlo: reproducir en local con
+        #   python3 scripts/test_determinism.py data
+        # sobre un data/ mirroreado, y diffear el bot ('vps1', 1663822308) entre
+        # las dos corridas para ver QUE campo diverge antes de volver a tocarlo.
         pb_path = os.path.join(data_dir, "bots", vps_b, f"{login_b}-{magic_b}.json")
         tmp_pb = pb_path + ".dt.tmp"
         try:
