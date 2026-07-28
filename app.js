@@ -125,6 +125,23 @@ async function loadHistoryRows() {
   }).filter(Boolean);
 }
 
+// [CUOTA] Temporizador que no trabaja con la pestaña oculta.
+// Los sondeos de 60s (snapshot_meta, mcp_health, timing) seguian pidiendo datos
+// con el dashboard en segundo plano: ~4.300 peticiones/dia por pestaña abierta,
+// egress puro contra la cuota de Supabase sin que nadie lo estuviera mirando.
+// Al volver a primera plano se refresca al instante, asi que no se pierde
+// frescura percibida — solo se deja de gastar mientras nadie mira.
+function intervalWhenVisible(fn, ms) {
+  const tick = () => {
+    if (document.visibilityState !== 'visible') return;
+    try { fn(); } catch (e) { console.error(e); }
+  };
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') tick();   // refresco inmediato al volver
+  });
+  return setInterval(tick, ms);
+}
+
 function readSnapCache() {
   try { const r = localStorage.getItem(SNAP_CACHE_KEY); return r ? JSON.parse(r) : null; }
   catch { return null; }
@@ -261,7 +278,7 @@ function initSnapshotPush() {
       (payload) => _snapPushApply(payload.new))
     .subscribe();
   _snapPushPoll();
-  snapPush.pollTimer = setInterval(_snapPushPoll, 60000);
+  snapPush.pollTimer = intervalWhenVisible(_snapPushPoll, 60000);
 }
 
 // --- Staleness banner (out-of-band sync alert) ---------------------------
@@ -4761,7 +4778,7 @@ function wireMcpHealth() {
     if (e.key === 'Escape' && overlay && !overlay.hidden) overlay.hidden = true;
   });
   refreshMcpHealth();
-  setInterval(refreshMcpHealth, 60000);
+  intervalWhenVisible(refreshMcpHealth, 60000);
 }
 
 // ----------------------- Pipeline latency chip + modal -----------------------
@@ -4923,7 +4940,7 @@ function wireTiming() {
     if (e.key === 'Escape' && overlay && !overlay.hidden) overlay.hidden = true;
   });
   refreshTiming();
-  setInterval(refreshTiming, 60000);
+  intervalWhenVisible(refreshTiming, 60000);
 }
 
 function wireNewBotsControls() {

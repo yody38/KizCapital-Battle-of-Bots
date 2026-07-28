@@ -171,10 +171,39 @@ def supa_get_json(url: str, key: str, path: str) -> tuple[int, dict | None]:
         return code, None
 
 
-def head_all_bot_files(url: str, key: str, bots: list[dict]) -> list[tuple[str, int]]:
-    """Returns list of (object_path, http_status) for any bot whose file did NOT return 200."""
+# [CUOTA] Muestreo rotatorio en vez de la flota entera cada ciclo.
+# Antes: 402 HEAD por corrida x 48 corridas/dia = ~19.000 peticiones diarias
+# contra la cuota del plan Free. Ahora cada corrida audita una rebanada distinta
+# y determinista, asi que la flota completa se cubre igual — solo que repartida
+# en el tiempo. Con 402 bots y rebanadas de 40, la cobertura total se completa
+# cada ~11 corridas (~5,5 h) y las peticiones bajan un 90%.
+# Las cuentas REALES quedan FUERA del muestreo: se comprueban SIEMPRE, todas y
+# en cada corrida — ahi no se reparte el riesgo en el tiempo.
+BOT_SAMPLE_SIZE = 40
+
+
+def head_all_bot_files(
+    url: str, key: str, bots: list[dict], sample: int = BOT_SAMPLE_SIZE,
+    real_logins: set[int] | None = None,
+) -> tuple[list[tuple[str, int]], int]:
+    """(fallos, nº comprobados). Fallo = archivo que no devolvio 200."""
+    reals = real_logins or set()
+    ordenados = sorted(bots, key=lambda b: f"{b['vps']}/{b['account_login']}-{b['magic']}")
+    siempre = [b for b in ordenados if int(b.get("account_login") or 0) in reals]
+    resto = [b for b in ordenados if int(b.get("account_login") or 0) not in reals]
+
+    if sample and sample < len(resto):
+        # Ventana determinista que avanza con el tiempo: sin estado en disco y
+        # sin aleatoriedad, asi que dos corridas seguidas nunca repiten rebanada.
+        turnos = (len(resto) + sample - 1) // sample
+        idx = (int(time.time()) // 1800) % turnos          # 1800s = cadencia del watchdog
+        elegidos = resto[idx * sample:(idx + 1) * sample]
+    else:
+        elegidos = resto
+
+    objetivo = siempre + elegidos
     missing: list[tuple[str, int]] = []
-    for b in bots:
+    for b in objetivo:
         path = f"bots/{b['vps']}/{b['account_login']}-{b['magic']}.json"
         try:
             code, _ = supa_request(url, key, path, "HEAD")
@@ -182,7 +211,7 @@ def head_all_bot_files(url: str, key: str, bots: list[dict]) -> list[tuple[str, 
             code = -1
         if code != 200:
             missing.append((path, code))
-    return missing
+    return missing, len(objetivo)
 
 
 # ---------- step 5: vercel ----------
@@ -443,14 +472,18 @@ def main() -> int:
             elif snap_age > 90 * 60:
                 fails.append(f"pipeline dead-man: snapshot {int(snap_age/60)}min old (>90min — cron/CI stalled)")
             bots = [b for b in snap.get("bots", []) if b.get("magic", 0) != 0]
-            missing = head_all_bot_files(url, key, bots)
+            missing, comprobados = head_all_bot_files(
+                url, key, bots, real_logins=LIVE_REAL_LOGINS)
             info["steps"]["files"] = {
                 "total": len(bots),
+                "checked": comprobados,
                 "missing": len(missing),
                 "samples": [f"{p}={c}" for p, c in missing[:5]],
             }
             if missing:
-                fails.append(f"supabase missing files: {len(missing)} of {len(bots)}")
+                fails.append(
+                    f"supabase missing files: {len(missing)} de {comprobados} comprobados "
+                    f"(flota {len(bots)}; muestreo rotatorio + todas las reales)")
             # Per-VPS freshness emitted by post_merge.py — surface stale VPSs
             # in the issue body so triage is one click instead of a grep.
             vf = snap.get("vps_freshness") or {}
