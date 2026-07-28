@@ -4359,7 +4359,7 @@ const QUERY_FIELDS = {
   // boolean
   drift_flag: b => !!(b.drift && b.drift.flag),
   decay_flag: b => !!b.decay_flag,
-  is_real: b => !!(b.real_vs_demo && b.real_vs_demo.is_real),
+  is_real: b => b.is_real ?? !!(b.real_vs_demo && b.real_vs_demo.is_real), // [F1] escalar en snapshot slim; objeto completo vive en per-bot detail
   in_podium: b => !!(b.tribunal && !b.tribunal.is_suplente && b.tribunal.rank != null),
   // strings (for IN / =)
   double_signature: b => b.double_signature || '',

@@ -660,10 +660,18 @@ def split_detail_to_per_bot(snap, data_dir):
         for fld in moved:
             if fld in DETAIL_CANDIDATE_KEEP and keep_candidate:
                 continue
+            # ESCALARES QUE SE QUEDAN: antes de mover un objeto al detalle hay
+            # que elevar los valores sueltos que el dashboard consulta SIN abrir
+            # el modal. Si se olvida uno, el campo desaparece en silencio.
+            # (Regresion real: al mover real_vs_demo se rompio el filtro
+            # `is_real` del Query DSL, que lo leia de ahi. Detectado y corregido
+            # el 2026-07-28 comparando QUERY_FIELDS contra el snapshot publicado.)
             if fld == "capacity":
                 cap_usd = (b.get("capacity") or {}).get("capacity_usd")
                 if cap_usd is not None:
                     b["capacity_usd"] = cap_usd
+            elif fld == "real_vs_demo":
+                b["is_real"] = bool((b.get("real_vs_demo") or {}).get("is_real"))
             del b[fld]
             fields_removed += 1
         b["detail_n"] = len(pb["detail"]["_fields"])

@@ -559,6 +559,42 @@ def main() -> int:
         # en el snapshot por fallo de write) — warn, no gate: la data está completa.
         for err in ds_meta.get("errors") or []:
             freshness_warn.append(f"detail_split: {err}")
+
+        # [ESCALA] Escalares que el dashboard consulta SIN abrir el modal.
+        # Al mover un objeto al detalle, su valor suelto TIENE que quedarse en el
+        # snapshot o el campo desaparece EN SILENCIO. Paso de verdad el
+        # 2026-07-28: al mover `real_vs_demo` se rompio el filtro `is_real` del
+        # Query DSL, que lo leia de ahi, y ninguna prueba lo detecto porque
+        # QUERY_FIELDS es un `const`, no una funcion. Este gate lo convierte en
+        # un fallo del ciclo. Al anadir un campo a DETAIL_SPLIT_FIELDS del que
+        # dependa algo del arranque: elevar su escalar y anotarlo aqui.
+        HOISTED = {
+            "capacity": "capacity_usd",   # QUERY_FIELDS.capacity_usd
+            "real_vs_demo": "is_real",    # QUERY_FIELDS.is_real
+        }
+        # Solo se exige el escalar a los bots que REALMENTE tenian el objeto:
+        # se comprueba contra `detail._fields` del per-bot file, no contra todos.
+        for campo_obj, escalar in HOISTED.items():
+            if campo_obj not in ds_fields:
+                continue
+            sin = []
+            for b in bots:
+                if (b.get("detail_n") or 0) <= 0 or escalar in b:
+                    continue
+                pb_path = BOTS_DIR / b.get("vps") / f"{b.get('account_login')}-{b.get('magic')}.json"
+                try:
+                    det = (json.loads(pb_path.read_text(encoding="utf-8")) or {}).get("detail") or {}
+                except Exception:
+                    continue          # per-bot ausente ya es hard-fail del check #1
+                if campo_obj in (det.get("_fields") or []):
+                    sin.append(f"{b.get('vps')}/{b.get('account_login')}-{b.get('magic')}")
+            if sin:
+                detail_fails.append(
+                    f"escalar '{escalar}' (de '{campo_obj}') ausente en {len(sin)} bots que SI "
+                    f"tenian ese objeto — el dashboard lo consulta sin abrir modal; "
+                    f"ejemplos: {sin[:3]}"
+                )
+
         all_fails.extend(detail_fails)
 
     remote_fails: list[str] = []
