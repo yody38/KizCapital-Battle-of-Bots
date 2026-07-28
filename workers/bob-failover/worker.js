@@ -14,10 +14,16 @@
 // uso, su egress es gratis y el dataset (~4 MB) cabe de sobra en los 10 GB
 // gratuitos.
 //
-// Variables (wrangler secret put):
-//   SUPABASE_JWT_SECRET   secreto HS256 del proyecto (Settings > API > JWT)
+// Variables:
 //   ALLOWED_EMAILS        lista separada por comas (espejo de allowed_emails)
+//   SUPABASE_JWT_SECRET   [opcional] solo si quedan tokens legacy HS256
 // Binding: BUCKET -> r2 bucket `bob-failover`
+//
+// El proyecto firma con claves ASIMETRICAS ES256 (ECC P-256), asi que aqui solo
+// hace falta la clave PUBLICA — va embebida abajo (es publica por diseño: la
+// sirve el propio Supabase en /auth/v1/.well-known/jwks.json). Embeberla, en
+// vez de descargarla, es lo que permite validar sesiones incluso con Supabase
+// caido, que es justo cuando este Worker tiene que funcionar.
 
 const CORS = {
   "Access-Control-Allow-Origin": "*",
@@ -41,25 +47,75 @@ function b64urlToBytes(s) {
   return out;
 }
 
-// Verifica un JWT HS256 emitido por Supabase: firma + exp. Sin red.
+// Clave PUBLICA de firma del proyecto (ES256 / ECC P-256). Publica por diseño.
+// Si algun dia rotas la clave en Supabase, actualiza este bloque desde
+//   https://sudnilwqhbfcjqnzzmhi.supabase.co/auth/v1/.well-known/jwks.json
+const JWKS = {
+  keys: [
+    {
+      alg: "ES256",
+      crv: "P-256",
+      ext: true,
+      key_ops: ["verify"],
+      kid: "91c9018e-d9c6-4826-b16b-2b6f03da114e",
+      kty: "EC",
+      use: "sig",
+      x: "-CPXGXzBR6PFXWUX6WuWFuvW5PAoJEUWPHXzVTrX6Rw",
+      y: "Ub59s5M1T55OM4jLIfaVXrbGVeqp_izPhNzcq8DIKBs",
+    },
+  ],
+};
+
+// Verifica un JWT de Supabase: firma + exp. Sin red — funciona con Supabase caido.
+// Soporta ES256 (el actual, asimetrico) y HS256 (legacy, solo si hay secreto).
 async function verifyJwt(token, secret) {
+  try {
+    return await _verifyJwt(token, secret);
+  } catch {
+    // Un token malformado (base64 invalido, curva rara, JWK que no importa) es
+    // un 401, nunca un 500: probado en vivo, `Bearer x.y.z` reventaba en
+    // b64urlToBytes fuera del try y devolvia error de servidor.
+    return null;
+  }
+}
+
+async function _verifyJwt(token, secret) {
   const parts = String(token || "").split(".");
   if (parts.length !== 3) return null;
   const [h, p, s] = parts;
-  const key = await crypto.subtle.importKey(
-    "raw",
-    new TextEncoder().encode(secret),
-    { name: "HMAC", hash: "SHA-256" },
-    false,
-    ["verify"],
-  );
-  const ok = await crypto.subtle.verify(
-    "HMAC",
-    key,
-    b64urlToBytes(s),
-    new TextEncoder().encode(`${h}.${p}`),
-  );
+  const signed = new TextEncoder().encode(`${h}.${p}`);
+  const sig = b64urlToBytes(s);
+
+  const header = JSON.parse(new TextDecoder().decode(b64urlToBytes(h)));
+
+  let ok = false;
+  if (header.alg === "ES256") {
+    const jwk = JWKS.keys.find((k) => !header.kid || k.kid === header.kid);
+    if (!jwk) return null;
+    const key = await crypto.subtle.importKey(
+      "jwk",
+      { kty: jwk.kty, crv: jwk.crv, x: jwk.x, y: jwk.y, ext: true },
+      { name: "ECDSA", namedCurve: "P-256" },
+      false,
+      ["verify"],
+    );
+    // En JWT la firma ECDSA es R||S en crudo, que es lo que espera WebCrypto.
+    ok = await crypto.subtle.verify({ name: "ECDSA", hash: "SHA-256" }, key, sig, signed);
+  } else if (header.alg === "HS256") {
+    if (!secret) return null;   // sin secreto legacy no se acepta HS256
+    const key = await crypto.subtle.importKey(
+      "raw",
+      new TextEncoder().encode(secret),
+      { name: "HMAC", hash: "SHA-256" },
+      false,
+      ["verify"],
+    );
+    ok = await crypto.subtle.verify("HMAC", key, sig, signed);
+  } else {
+    return null;   // 'none' y cualquier alg desconocido: rechazado
+  }
   if (!ok) return null;
+
   let claims;
   try {
     claims = JSON.parse(new TextDecoder().decode(b64urlToBytes(p)));
