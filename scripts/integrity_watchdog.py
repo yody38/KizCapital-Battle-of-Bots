@@ -597,6 +597,72 @@ def main() -> int:
                         f" (→ proceso/SSH/Railway) · ages_sec={hb_ages}"
                     )
 
+        # Step 4b-bis — [RESILIENCIA R2] Regresión de compresión.
+        # history_recent.jsonl viajó meses con 543 KB crudos porque se subió como
+        # application/octet-stream (mimetypes no conoce .jsonl) y el CDN no
+        # comprime binarios. Nadie lo vio. Este check falla si un archivo de datos
+        # vuelve a servirse sin content-encoding.
+        try:
+            comp_bad = []
+            for obj in ("snapshot.json", "history_recent.jsonl"):
+                ep = f"{url.rstrip('/')}/storage/v1/object/{BUCKET}/{obj}"
+                req = urlrequest.Request(
+                    ep, method="HEAD",
+                    headers={"Authorization": f"Bearer {key}", "apikey": key,
+                             "Accept-Encoding": "br, gzip"})
+                with urlrequest.urlopen(req, timeout=20) as r:
+                    enc = r.headers.get("content-encoding")
+                    ctype = (r.headers.get("content-type") or "").split(";")[0]
+                    if not enc:
+                        comp_bad.append(f"{obj}(type={ctype or '?'})")
+            info["steps"]["compression"] = {"uncompressed": comp_bad}
+            if comp_bad:
+                fails.append(
+                    f"compresion: {', '.join(comp_bad)} se sirve SIN comprimir "
+                    f"(content-type mal → el CDN no comprime; revisar _EXTRA_MIME "
+                    f"en upload_to_supabase.py)"
+                )
+        except Exception as e:  # noqa: BLE001 — check aditivo, nunca tumba el watchdog
+            info["steps"]["compression"] = {"error": str(e)}
+
+    # Step 4b-ter — [RESILIENCIA R2] Otros workflows en rojo.
+    # El watchdog solo miraba refresh-dashboard: spread-sampler llevaba 3/3
+    # fallos (KeyError 'utc') sin que nadie se enterara.
+    try:
+        import subprocess
+        wf_bad = []
+        for wf in ("spread-sampler", "sampler-tick", "mcp-health", "live-publisher-tick"):
+            out = subprocess.run(
+                ["gh", "run", "list", "--workflow", wf, "--repo", GH_REPO,
+                 "--limit", "3", "--json", "conclusion"],
+                capture_output=True, text=True, timeout=45)
+            if out.returncode != 0:
+                continue
+            concs = [r.get("conclusion") for r in json.loads(out.stdout or "[]")]
+            done = [c for c in concs if c]
+            if done and all(c == "failure" for c in done):
+                wf_bad.append(f"{wf}({len(done)}/{len(done)} fallos)")
+        info["steps"]["workflows"] = {"failing": wf_bad}
+        if wf_bad:
+            fails.append(f"workflows en rojo: {', '.join(wf_bad)}")
+    except Exception as e:  # noqa: BLE001
+        info["steps"]["workflows"] = {"error": str(e)}
+
+    # Step 4b-quater — [RESILIENCIA R2] Salud del respaldo R2.
+    # El espejo se escribe cada ciclo, pero hasta ahora nadie comprobaba que
+    # fuera USABLE. Un respaldo que no se puede leer no es un respaldo.
+    failover_url = os.environ.get("KIZ_FAILOVER_URL") or env.get("KIZ_FAILOVER_URL")
+    if failover_url:
+        try:
+            with urlrequest.urlopen(f"{failover_url.rstrip('/')}/health", timeout=20) as r:
+                hb = json.loads(r.read())
+            info["steps"]["failover"] = hb
+            if not hb.get("ok"):
+                fails.append("failover R2: /health dice que el espejo NO es utilizable")
+        except Exception as e:  # noqa: BLE001
+            info["steps"]["failover"] = {"error": str(e)}
+            fails.append(f"failover R2 inalcanzable: {e}")
+
     # Step 4c — Tuning shadow (aprendizaje continuo, warn-only): anota qué
     # recomendaría el adaptive_tuner vs los umbrales vigentes. NO cambia el
     # dead-man real — evidencia para el veredicto tras la semana de shadow.

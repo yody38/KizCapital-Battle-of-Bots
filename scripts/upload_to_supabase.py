@@ -40,6 +40,25 @@ TIMING_FILE = DATA_DIR / "pipeline_timing.json"
 BUCKET = "dashboard-data"
 STUCK_TRIES = 3  # tries >= this => surfaced as UPLOAD_STUCK (actionable signal)
 
+# [VELOCIDAD V1] Content-type explicito por extension.
+# mimetypes no conoce .jsonl -> guess_type() devolvia None -> se subia como
+# application/octet-stream, y el CDN NO comprime binarios: history_recent.jsonl
+# viajaba con 543 KB crudos en cada carga del dashboard (vs ~50 KB comprimido).
+# Este mapa evita que cualquier formato futuro vuelva a caer en octet-stream.
+_EXTRA_MIME = {
+    ".jsonl": "application/json",
+    ".ndjson": "application/json",
+    ".json": "application/json",
+    ".csv": "text/csv",
+    ".md": "text/markdown",
+    ".txt": "text/plain",
+    ".js": "application/javascript",
+    ".css": "text/css",
+    ".svg": "image/svg+xml",
+}
+for _ext, _mime in _EXTRA_MIME.items():
+    mimetypes.add_type(_mime, _ext)
+
 # Explicit CA bundle: certifi if available (no-regret), else system default.
 # The CERTIFICATE_VERIFY_FAILED upload failures (2026-06-07) motivated this.
 try:
@@ -351,6 +370,17 @@ def main() -> int:
         tries = (prev.get("tries", 0) + 1) if isinstance(prev, dict) else 1
         new_manifest[obj_path] = {"hash": "pending-retry", "tries": tries}
 
+    # [VELOCIDAD V1] Epoca de content-type. El manifest omite los archivos cuyo
+    # contenido no cambio, asi que un fichero estatico conservaria para siempre
+    # el Content-Type con el que se subio la primera vez. Al cambiar el mapa de
+    # tipos se sube esta constante: durante UN ciclo todo se re-sube con el tipo
+    # correcto y despues se vuelve al comportamiento incremental normal.
+    MIME_EPOCH = "2026-07-28-jsonl-json"
+    mime_epoch_changed = manifest.get("__mime_epoch__") != MIME_EPOCH
+    new_manifest["__mime_epoch__"] = MIME_EPOCH
+    if mime_epoch_changed:
+        print(f"[upload] mime epoch -> {MIME_EPOCH}: re-subida unica con Content-Type corregido")
+
     # Circuit breaker de Supabase Storage: OPEN (en cooldown) → cero requests,
     # todo directo a R2 + pending-retry; HALF-OPEN → si la sonda inicial falla
     # se corta el resto del ciclo. Además, fail-fast dentro del run: 5 fallos
@@ -368,7 +398,7 @@ def main() -> int:
     for abs_path, obj_path in files:
         digest = file_sha256(abs_path)
         new_manifest[obj_path] = digest
-        if manifest_get(obj_path) == digest:
+        if not mime_epoch_changed and manifest_get(obj_path) == digest:
             skipped += 1
             if r2_backfill:
                 r2_put(obj_path, abs_path)

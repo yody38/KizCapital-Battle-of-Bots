@@ -1597,6 +1597,37 @@ function rankBadge(n) {
   return `<span class="rank-badge">${n}</span>`;
 }
 
+// [VELOCIDAD V3] Render progresivo. Pintar 400+ filas de una sola asignacion a
+// innerHTML bloquea el hilo principal, y el coste crece linealmente con la
+// flota (402 bots hoy y subiendo). Se pinta YA el primer lote — lo unico que
+// cabe en pantalla — y el resto se anexa en trozos cuando el navegador esta
+// libre, asi la pagina responde al instante sin importar cuantos bots haya.
+// Los clics siguen funcionando en las filas tardias porque estan delegados en
+// document.body (ver L2200), no enganchados fila a fila.
+const _paintTokens = new WeakMap();  // tbody -> token del render vigente
+
+function paintRowsProgressive(tbody, items, rowHtml, firstChunk = 40, chunk = 80) {
+  // Token: si llega un render nuevo (refresh, filtro, orden), los trozos
+  // pendientes del anterior se descartan en vez de anexar filas obsoletas.
+  const token = (_paintTokens.get(tbody) || 0) + 1;
+  _paintTokens.set(tbody, token);
+
+  tbody.innerHTML = items.slice(0, firstChunk).map(rowHtml).join('');
+  if (items.length <= firstChunk) return;
+
+  const idle = window.requestIdleCallback || ((fn) => setTimeout(() => fn({ timeRemaining: () => 0 }), 16));
+  let i = firstChunk;
+  const step = () => {
+    if (_paintTokens.get(tbody) !== token) return;   // render superado: abortar
+    const slice = items.slice(i, i + chunk);
+    if (!slice.length) return;
+    tbody.insertAdjacentHTML('beforeend', slice.map((b, k) => rowHtml(b, i + k)).join(''));
+    i += chunk;
+    if (i < items.length) idle(step);
+  };
+  idle(step);
+}
+
 function renderTable() {
   const tbody = document.getElementById('bots-tbody');
   const empty = document.getElementById('empty-state');
@@ -1607,7 +1638,7 @@ function renderTable() {
     return;
   }
   empty.hidden = true;
-  tbody.innerHTML = bots.map((b, i) => `
+  paintRowsProgressive(tbody, bots, (b, i) => `
     <tr class="bot-row" data-vps="${b.vps}" data-login="${b.account_login}" data-magic="${b.magic}" style="animation-delay: ${Math.min(i * 15, 400)}ms">
       <td>${rankBadge(b._rank)}</td>
       <td>${b.magic}</td>
@@ -1631,7 +1662,7 @@ function renderTable() {
       <td class="num ${profitClass(b.net_profit)}">${fmt.usd(b.net_profit, true)}</td>
       <td>${fmt.shortTime(b.last_trade)}</td>
     </tr>
-  `).join('');
+  `);
 }
 
 function updateSortIndicators() {

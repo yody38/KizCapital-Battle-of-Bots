@@ -54,11 +54,61 @@ jobs:
           SYMBOLS = ["USDJPY.b","EURJPY.b","USDCAD.b","NZDUSD.b"]
           DURATION_S = int(os.environ.get("DURATION_S", "1200"))
           INTERVAL_S = int(os.environ.get("INTERVAL_S", "5"))
+          TARGET_LOGIN = int(os.environ.get("TARGET_LOGIN", "32081"))
+          UTC = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-          ok = mt5.initialize(path=r"C:\Program Files\MetaTrader 5 22972\terminal64.exe", timeout=10000)
-          if not ok:
-              print(json.dumps({"error": str(mt5.last_error())}))
-              raise SystemExit(1)
+          def salir(payload):
+              """Salida SIEMPRE con el mismo esquema (utc/login/stats) para que
+              ningun consumidor aguas abajo reviente con KeyError."""
+              payload.setdefault("utc", UTC)
+              payload.setdefault("login", None)
+              payload.setdefault("stats", {})
+              print(json.dumps(payload, indent=2))
+              raise SystemExit(0)
+
+          # NUNCA ABRIR UNA CUENTA REAL. mt5.initialize(path=...) ARRANCA el terminal
+          # si esta cerrado — el error historico "Process create failed" era justo ese
+          # intento sobre la cuenta real 32081. Regla del owner (2026-07-27): sus
+          # cuentas reales las abre solo el. Aqui solo se ATTACHea a terminales que YA
+          # estan corriendo; si no hay ninguno, no se toca nada (fail-closed).
+          def terminales_corriendo():
+              rutas = set()
+              try:
+                  import win32api, win32con, win32process
+              except Exception as exc:
+                  salir({"skipped": "pywin32 no disponible (%s) - fail-closed, no se abre nada" % exc})
+              for pid in win32process.EnumProcesses():
+                  try:
+                      h = win32api.OpenProcess(
+                          win32con.PROCESS_QUERY_INFORMATION | win32con.PROCESS_VM_READ, False, pid)
+                      try:
+                          ruta = win32process.GetModuleFileNameEx(h, 0)
+                          if ruta.lower().endswith("terminal64.exe"):
+                              rutas.add(ruta)
+                      finally:
+                          win32api.CloseHandle(h)
+                  except Exception:
+                      continue
+              return rutas
+
+          corriendo = sorted(terminales_corriendo())
+          if not corriendo:
+              salir({"skipped": "ningun terminal MT5 abierto - no se abre nada"})
+
+          # Attach (nunca arrancar) a los terminales ya vivos hasta hallar la cuenta.
+          path = None
+          for ruta in corriendo:
+              if not mt5.initialize(path=ruta, timeout=10000):
+                  continue
+              ai = mt5.account_info()
+              if ai and int(ai.login) == TARGET_LOGIN:
+                  path = ruta
+                  break
+              mt5.shutdown()
+
+          if path is None:
+              salir({"skipped": "cuenta %d no esta abierta - no se abre nada" % TARGET_LOGIN,
+                     "terminales_corriendo": len(corriendo)})
 
           for s in SYMBOLS:
               mt5.symbol_select(s, True)
@@ -78,7 +128,7 @@ jobs:
 
           result = {
               "login": ai.login if ai else None,
-              "utc": datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+              "utc": UTC,
               "duration_s": DURATION_S,
               "interval_s": INTERVAL_S,
               "stats": {},
@@ -103,6 +153,9 @@ jobs:
 
       - name: Run 20-minute sampling (read-only)
         run: |
+          # pipefail: sin esto el exit code era el de `tee` (siempre 0) y un fallo
+          # del muestreo se reportaba como paso exitoso.
+          set -o pipefail
           ssh -i ~/.ssh/id_ed25519_ci \
               -o StrictHostKeyChecking=accept-new \
               -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=100 \
@@ -121,6 +174,14 @@ jobs:
       - name: Commit result
         run: |
           python3 -c "import json,sys; json.load(open('/tmp/spread_result.json'))" || { echo "invalid JSON, aborting commit"; exit 1; }
+          # No commitear corridas sin datos (terminal cerrado / error): solo ensucian
+          # el repo. Hasta hoy se commiteaban 4 archivos de error al dia.
+          HAS_STATS=$(python3 -c "import json; d=json.load(open('/tmp/spread_result.json')); print('1' if d.get('stats') else '0')")
+          if [ "$HAS_STATS" != "1" ]; then
+            echo "sin muestras (skipped/error) — no se commitea"
+            echo "SKIPPED=1" >> "$GITHUB_ENV"
+            exit 0
+          fi
           git pull --rebase
           mkdir -p spread-samples
           cp /tmp/spread_result.json "spread-samples/$(date -u +%F_%H%M).json"
@@ -136,11 +197,22 @@ jobs:
           python3 <<'PYEOF'
           import json, datetime, os
           d = json.load(open("/tmp/spread_result.json"))
-          hh = d["utc"][11:16]
+          # Tolerante a corridas sin datos: antes `d["utc"]` reventaba con KeyError
+          # cuando el muestreo no producia stats, y el paso quedaba en rojo cada 2h.
+          utc = d.get("utc") or datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+          hh = utc[11:16]
+          stats = d.get("stats") or {}
+          if not stats:
+              motivo = d.get("skipped") or d.get("error") or "sin muestras"
+              text = f"Muestreo de spread ADN de las {hh} UTC sin datos: {motivo}"
+              with open("/tmp/summary.txt", "w") as f:
+                  f.write(text)
+              print(text)
+              raise SystemExit(0)
           nice = {"USDJPY.b": "dolar yen", "EURJPY.b": "euro yen", "USDCAD.b": "dolar canadiense", "NZDUSD.b": "neozelandes dolar"}
-          in_session = 12 <= int(d["utc"][11:13]) < 17
+          in_session = 12 <= int(utc[11:13]) < 17
           parts = [f"Muestreo de spread ADN de las {hh} UTC" + (", dentro de la sesion Londres Nueva York." if in_session else ", fuera de sesion.")]
-          for sym, st in d["stats"].items():
+          for sym, st in stats.items():
               parts.append(f"{nice.get(sym, sym)}: tipico {st['mode']} puntos, promedio {st['mean']}, rango {st['min']} a {st['max']}.")
           text = " ".join(parts)
           with open("/tmp/summary.txt", "w") as f:

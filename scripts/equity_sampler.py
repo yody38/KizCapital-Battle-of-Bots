@@ -172,6 +172,43 @@ def _read_terminal(path: str) -> dict[str, Any] | None:
         time.sleep(0.05)
 
 
+def terminales_corriendo() -> set[str]:
+    """Rutas de terminal64.exe EN EJECUCION (minusculas). pywin32, sin shell.
+
+    NUNCA ABRIR: mt5.initialize(path=...) ARRANCA el terminal si esta cerrado.
+    Regla del owner (2026-07-27): sus cuentas reales las abre solo el, y ningun
+    script automatico puede abrirlas "ni siquiera como efecto colateral". Este
+    sampler itera TERMINAL_GLOB (todas las instalaciones), asi que sin esta
+    guarda reabriria cualquier cuenta cerrada del VPS donde corra. Hoy corre
+    sobre VPS1 (solo demo), pero la guarda evita que un cambio de host lo
+    convierta en un abridor de cuentas reales.
+
+    Copia inline a proposito (misma logica que live_publisher.py): este script
+    se ejecuta suelto desde C:\\mt5-mcp\\ y no puede depender de que un modulo
+    compartido este desplegado en cada VPS.
+    """
+    rutas: set[str] = set()
+    try:
+        import win32api
+        import win32con
+        import win32process
+    except Exception:  # noqa: BLE001 — fail-closed: sin poder comprobar, no se toca nada
+        return rutas
+    for pid in win32process.EnumProcesses():
+        try:
+            h = win32api.OpenProcess(
+                win32con.PROCESS_QUERY_INFORMATION | win32con.PROCESS_VM_READ, False, pid)
+            try:
+                ruta = win32process.GetModuleFileNameEx(h, 0)
+                if ruta.lower().endswith("terminal64.exe"):
+                    rutas.add(ruta.lower())
+            finally:
+                win32api.CloseHandle(h)
+        except Exception:  # noqa: BLE001
+            continue
+    return rutas
+
+
 def read_terminal_timed(path: str) -> dict[str, Any] | None:
     box: dict[str, Any] = {}
     t = threading.Thread(target=lambda: box.update(v=_read_terminal(path)), daemon=True)
@@ -301,7 +338,14 @@ def run_cycle(cadence_secs: float) -> dict[str, Any]:
     skipped: list[dict[str, Any]] = []
     lines: list[str] = []
 
+    # Solo terminales YA ABIERTOS: lo cerrado no se toca (ver terminales_corriendo).
+    corriendo = terminales_corriendo()
+    cerrados = 0
     for path in sorted(glob.glob(TERMINAL_GLOB)):
+        if path.lower() not in corriendo:
+            cerrados += 1
+            skipped.append({"login": None, "why": "terminal cerrado — no se abre"})
+            continue
         row = read_terminal_timed(path)
         if not row:
             continue

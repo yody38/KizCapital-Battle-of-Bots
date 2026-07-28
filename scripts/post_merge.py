@@ -606,6 +606,19 @@ DETAIL_SPLIT_FIELDS = [
     "regime", "event_stress", "promotion_radar", "underwater",
     "oos", "institutional", "confidence_intervals", "capacity",
     "shrinkage_meta", "promotion_components",
+    # [VELOCIDAD V2] Segunda tanda (2026-07-28). Campos que aparecieron despues
+    # del primer split y solo los pintan paneles del modal — verificado uno a uno
+    # contra app.js: cada consumidor es una funcion de modal (renderScorePanel,
+    # renderViolinPanel, renderPairsPanel, renderCapacityPanel, renderStressPanel,
+    # renderModalHeader) y siempre sobre el bot abierto, nunca iterando la flota.
+    # ~172 KB menos en el arranque con 402 bots.
+    #
+    # NO mover (se usan al arrancar, sin abrir modal):
+    #   drift       -> applyQuery (el Query DSL filtra los 402 bots)
+    #   real_daily  -> renderRealBotCards (tarjetas de cuentas reales)
+    #   dominance   -> renderCandidates (tabla de candidatos)
+    "trade_distribution", "promotion_gating", "stress", "promotion_fails",
+    "pair_recommendations", "real_vs_demo", "floating_dd",
 ]
 DETAIL_CANDIDATE_KEEP = {"shrinkage_meta", "promotion_components"}
 DETAIL_CANDIDATE_STATUSES = {"READY", "NEAR", "WATCH"}
