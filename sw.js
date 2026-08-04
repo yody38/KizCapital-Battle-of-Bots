@@ -11,7 +11,7 @@
 // dos veces en la primera visita y el modo offline no funcionaba hasta la
 // segunda). Regla: este VERSION y el ?v= de index.html se bumpean JUNTOS.
 
-const VERSION = '20260804b';
+const VERSION = '20260804c';
 const SHELL_CACHE = `kiz-shell-${VERSION}`;
 const DATA_CACHE = 'kiz-data-v1';
 const FONT_CACHE = 'kiz-fonts-v1';

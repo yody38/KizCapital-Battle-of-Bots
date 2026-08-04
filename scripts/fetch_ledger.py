@@ -40,6 +40,14 @@ OBJ = "candidates_history.jsonl"
 
 HISTORY = DATA_DIR / "history.jsonl"
 HISTORY_OBJ = "history.jsonl"
+# [Fase 2 Decision Center] Ledgers de ciclo de vida — append-only, mismas
+# garantías anti-clobber que candidates_history (el runner de CI arranca vacío).
+LIFECYCLE_EVENTS = DATA_DIR / "lifecycle_events.jsonl"
+LIFECYCLE_EVENTS_OBJ = "lifecycle_events.jsonl"
+PROMOTION_EVENTS = DATA_DIR / "promotion_events.jsonl"
+PROMOTION_EVENTS_OBJ = "promotion_events.jsonl"
+LIFECYCLE_STATE = DATA_DIR / "lifecycle_state.json"
+LIFECYCLE_STATE_OBJ = "lifecycle_state.json"
 HISTORY_RECENT = DATA_DIR / "history_recent.jsonl"
 HISTORY_REAL_DAYS = 14   # equity rows for is_real accounts
 HISTORY_DEMO_HOURS = 48  # equity rows for demo accounts (unused by the UI today)
@@ -185,6 +193,56 @@ def main() -> int:
         body = "\n".join(json.dumps(r, ensure_ascii=False) for r in recent)
         HISTORY_RECENT.write_text(body + ("\n" if body else ""), encoding="utf-8")
         print(f"[fetch_ledger] history_recent.jsonl -> {len(recent)} real rows")
+
+    # [Fase 2] lifecycle_events / promotion_events: unión anti-clobber (ABORT en
+    # error de red — perder un evento PROMOTED sería reescribir la historia).
+    lev = hydrate(
+        url, skey, LIFECYCLE_EVENTS_OBJ, LIFECYCLE_EVENTS,
+        key_fn=lambda r: (r.get("ts"), r.get("magic"), r.get("from"), r.get("to")),
+        sort_key=lambda r: (str(r.get("ts", "")), str(r.get("magic"))),
+    )
+    if lev is None:
+        return 1
+    pev = hydrate(
+        url, skey, PROMOTION_EVENTS_OBJ, PROMOTION_EVENTS,
+        key_fn=lambda r: (r.get("magic"), r.get("promoted_at")),
+        sort_key=lambda r: (str(r.get("promoted_at", "")), str(r.get("magic"))),
+    )
+    if pev is None:
+        return 1
+
+    # lifecycle_state.json: estado previo (no ledger — se sobreescribe entero
+    # cada ciclo por post_merge). 404 = primer ciclo, arranque limpio; error de
+    # red = ABORT: sin estado previo cada transición se re-emitiría como nueva.
+    body = None
+    if r2_read.read_source() == "r2":
+        try:
+            body = r2_read.r2_get_bytes(LIFECYCLE_STATE_OBJ)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[fetch_ledger] r2 {LIFECYCLE_STATE_OBJ}: {exc} — fallback a Supabase", file=sys.stderr)
+    if body is None:
+        endpoint = f"{url.rstrip('/')}/storage/v1/object/{BUCKET}/{LIFECYCLE_STATE_OBJ}"
+        req = urlrequest.Request(endpoint, headers={"Authorization": f"Bearer {skey}", "apikey": skey})
+        try:
+            with urlrequest.urlopen(req, timeout=30, context=_CTX) as resp:
+                body = resp.read()
+        except urlerror.HTTPError as exc:
+            if exc.code == 404:
+                print("[fetch_ledger] lifecycle_state.json aún no existe (404) — primer ciclo")
+                body = None
+            else:
+                print(f"[fetch_ledger] HTTP {exc.code} en lifecycle_state — ABORT", file=sys.stderr)
+                return 1
+        except Exception as exc:  # noqa: BLE001
+            print(f"[fetch_ledger] error de red en lifecycle_state: {exc} — ABORT", file=sys.stderr)
+            return 1
+    if body is not None:
+        try:
+            json.loads(body)  # validación mínima antes de escribir
+            LIFECYCLE_STATE.write_bytes(body)
+            print("[fetch_ledger] lifecycle_state.json hidratado")
+        except json.JSONDecodeError:
+            print("[fetch_ledger] lifecycle_state corrupto en remoto — se ignora (arranque limpio)", file=sys.stderr)
     return 0
 
 

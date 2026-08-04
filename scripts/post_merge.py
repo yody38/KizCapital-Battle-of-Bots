@@ -3513,6 +3513,231 @@ def apply_science_pack(snap, data_dir, now):
     return meta
 
 
+# ----------------------------------------------------------------------------
+# Fase 2 Decision Center — máquina de estados del ciclo de vida + trazabilidad
+# de promoción. Etapa ÚNICA por bot (cadena if/elif, primera que aplica gana):
+#   REAL -> HISTORICAL -> NEW -> CANDIDATE -> OBSERVATION
+# Ledgers append-only (hidratados por fetch_ledger antes de este script):
+#   lifecycle_events.jsonl  — toda transición de etapa, con evidencia
+#   promotion_events.jsonl  — detección de promociones (acto 100% humano que
+#                             aquí solo se OBSERVA y documenta, jamás se ejecuta)
+# Determinista: el reloj de los eventos es generated_at del snapshot, no now().
+# ----------------------------------------------------------------------------
+
+LIFECYCLE_NEW_DAYS = 30
+LIFECYCLE_STAGES = ("REAL", "HISTORICAL", "NEW", "CANDIDATE", "OBSERVATION")
+
+
+def _lifecycle_deployed_at(b):
+    """(deployed_at_iso, source): deploy MEDIDO del lab > first_trade (proxy) > None."""
+    sci = b.get("science") or {}
+    since = sci.get("deployed_since")
+    if since:
+        return since, "MEASURED"
+    ft = b.get("first_trade")
+    if ft:
+        return ft, "INFERRED"
+    return None, "UNKNOWN"
+
+
+def _days_between(iso_str, now):
+    try:
+        d = datetime.fromisoformat(str(iso_str).replace("Z", "+00:00"))
+        return max(0, (now.date() - d.date()).days)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def compute_lifecycle(snap, data_dir, now, real_magics):
+    """Clasifica cada bot en una etapa, emite transiciones y detecta promociones.
+    Muta bots[] (lifecycle, dead) y escribe lifecycle_state.json + append de
+    ledgers. Bots con datos carry-forward NO emiten transiciones (anti-flapping)."""
+    snap_ts = snap.get("generated_at")
+    stale_vps = set(snap.get("stale_vps") or [])
+    state_path = os.path.join(data_dir, "lifecycle_state.json")
+    prev = {}
+    first_cycle = True
+    try:
+        with open(state_path) as f:
+            prev_root = json.load(f)
+        prev = prev_root.get("bots") or {}
+        first_cycle = not prev
+    except FileNotFoundError:
+        pass
+    except Exception as exc:  # noqa: BLE001
+        # Estado corrupto: arranque limpio pero SIN emitir transiciones este
+        # ciclo (first_cycle) para no inventar historia.
+        print(f"[post_merge] lifecycle_state corrupto — arranque limpio: {exc}", file=sys.stderr)
+
+    prev_real_magics = {r.get("magic") for r in prev.values() if r.get("stage") == "REAL"}
+    promoted_magics_prev = set()
+    prom_path = os.path.join(data_dir, "promotion_events.jsonl")
+    try:
+        with open(prom_path) as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    try:
+                        promoted_magics_prev.add(json.loads(line).get("magic"))
+                    except json.JSONDecodeError:
+                        pass
+    except FileNotFoundError:
+        pass
+
+    # Rank de candidatura (para congelar rank_at_promotion): posición por
+    # score_shrunk entre los bots demo con score. Determinista (sort estable).
+    ranked = sorted(
+        (b for b in snap.get("bots", [])
+         if b.get("magic") not in real_magics and b.get("promotion_score_shrunk") is not None),
+        key=lambda b: (-(b.get("promotion_score_shrunk") or 0), str(b.get("magic"))),
+    )
+    rank_by_key = {f"{b.get('vps')}-{b.get('account_login')}-{b.get('magic')}": i + 1
+                   for i, b in enumerate(ranked)}
+
+    new_state = {}
+    transitions = []
+    counts = {s: 0 for s in LIFECYCLE_STAGES}
+    for b in snap.get("bots", []):
+        magic = b.get("magic")
+        key = f"{b.get('vps')}-{b.get('account_login')}-{b.get('magic')}"
+        dead = _is_dead(b)
+        b["dead"] = dead  # por fin escrito al bot, no solo a survival.json
+        deployed_at, dep_src = _lifecycle_deployed_at(b)
+        age = _days_between(deployed_at, now) if deployed_at else None
+
+        if magic in real_magics:
+            stage = "REAL"
+        elif (magic in promoted_magics_prev and magic not in real_magics) or dead:
+            stage = "HISTORICAL"
+        elif age is not None and age < LIFECYCLE_NEW_DAYS:
+            stage = "NEW"
+        elif b.get("promotion_status") in ("READY", "NEAR"):
+            stage = "CANDIDATE"
+        else:
+            stage = "OBSERVATION"
+        counts[stage] += 1
+
+        prev_rec = prev.get(key)
+        frozen = bool(b.get("frozen_data")) or (b.get("vps") in stale_vps)
+        since = snap_ts
+        if prev_rec and prev_rec.get("stage") == stage and prev_rec.get("since"):
+            since = prev_rec["since"]
+        elif prev_rec and prev_rec.get("stage") != stage and not frozen and not first_cycle:
+            transitions.append({
+                "ts": snap_ts, "magic": magic, "vps": b.get("vps"),
+                "login": b.get("account_login"),
+                "from": prev_rec.get("stage"), "to": stage,
+                "evidence": {
+                    "score_shrunk": b.get("promotion_score_shrunk"),
+                    "scientific_score": b.get("scientific_score"),
+                    "gap_verdict": ((b.get("science") or {}).get("expectation_gap") or {}).get("verdict"),
+                    "dead": dead,
+                },
+            })
+        elif prev_rec and prev_rec.get("stage") != stage and frozen and prev_rec.get("since"):
+            # carry-forward: conservar la etapa previa registrada, sin transición
+            stage = prev_rec.get("stage")
+            since = prev_rec["since"]
+            counts[stage] = counts.get(stage, 0)
+
+        b["lifecycle"] = {"stage": stage, "since": since,
+                          "deployed_at": deployed_at, "deployed_at_source": dep_src}
+        new_state[key] = {
+            "magic": magic, "stage": stage, "since": since,
+            "deployed_at": deployed_at, "deployed_at_source": dep_src,
+            "score_shrunk": b.get("promotion_score_shrunk"),
+            "scientific_score": b.get("scientific_score"),
+            "gap_verdict": ((b.get("science") or {}).get("expectation_gap") or {}).get("verdict"),
+            "rank": rank_by_key.get(key),
+        }
+
+    # Bots ausentes del snapshot conservan su último estado (registro histórico).
+    for key, rec in prev.items():
+        if key not in new_state:
+            new_state[key] = rec
+
+    # Detección de promociones: magic que HOY es real y en el estado previo no
+    # lo era. Primer ciclo NO detecta (sin estado previo sería inventar fechas).
+    promotions = []
+    if not first_cycle:
+        for magic in sorted(real_magics):
+            if magic in prev_real_magics or magic in promoted_magics_prev:
+                continue
+            demo_prev = [(k, r) for k, r in prev.items()
+                         if r.get("magic") == magic and r.get("stage") != "REAL"]
+            if not demo_prev:
+                continue  # nunca visto en demo: cuenta nueva ajena al lab, no promoción
+            demo_prev.sort(key=lambda kr: kr[0])
+            k0, r0 = demo_prev[0]
+            days_demo = _days_between(r0.get("deployed_at"), now) if r0.get("deployed_at") else None
+            ev = {
+                "magic": magic, "promoted_at": snap_ts,
+                "from_key": k0,
+                "rank_at_promotion": r0.get("rank"),
+                "score_shrunk_at_promotion": r0.get("score_shrunk"),
+                "scientific_score": r0.get("scientific_score"),
+                "gap_verdict": r0.get("gap_verdict"),
+                "days_in_demo": days_demo,
+                "human_action": True,  # el despliegue en real lo hizo el humano; aquí solo se observa
+            }
+            promotions.append(ev)
+            # Archivo demo-final: congelar la curva demo del gemelo una sola vez.
+            try:
+                vps_login = k0.rsplit(f"-{magic}", 1)[0]
+                vps, login = vps_login.split("-", 1)
+                src = os.path.join(data_dir, "bots", vps, f"{login}-{magic}.json")
+                dst_dir = os.path.join(data_dir, "promoted")
+                dst = os.path.join(dst_dir, f"{magic}_demo_final.json")
+                if os.path.exists(src) and not os.path.exists(dst):
+                    os.makedirs(dst_dir, exist_ok=True)
+                    with open(src, "rb") as fs, open(dst, "wb") as fd:
+                        fd.write(fs.read())
+            except Exception as exc:  # noqa: BLE001
+                print(f"[post_merge] demo-final archive {magic}: {exc}", file=sys.stderr)
+
+    # Append-only con dedupe (unión contra lo ya hidratado en el archivo local).
+    def _append_jsonl(path, rows, key_fn):
+        if not rows:
+            return 0
+        seen = set()
+        try:
+            with open(path) as f:
+                for line in f:
+                    line = line.strip()
+                    if line:
+                        try:
+                            seen.add(key_fn(json.loads(line)))
+                        except json.JSONDecodeError:
+                            pass
+        except FileNotFoundError:
+            pass
+        added = 0
+        with open(path, "a") as f:
+            for r in rows:
+                if key_fn(r) in seen:
+                    continue
+                f.write(json.dumps(r, ensure_ascii=False, sort_keys=True) + "\n")
+                added += 1
+        return added
+
+    n_trans = _append_jsonl(
+        os.path.join(data_dir, "lifecycle_events.jsonl"), transitions,
+        lambda r: (r.get("ts"), r.get("magic"), r.get("from"), r.get("to")))
+    n_prom = _append_jsonl(prom_path, promotions,
+                           lambda r: (r.get("magic"), r.get("promoted_at")))
+
+    tmp = state_path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump({"schema": 1, "generated_at": snap_ts, "bots": new_state},
+                  f, separators=(",", ":"), sort_keys=True)
+    os.replace(tmp, state_path)
+
+    meta = {"stages": counts, "transitions": n_trans, "promotions_detected": n_prom,
+            "first_cycle": first_cycle, "tracked_keys": len(new_state)}
+    snap["lifecycle_meta"] = meta
+    return meta
+
+
 def main():
     if len(sys.argv) < 2:
         print("usage: post_merge.py <data_dir>", file=sys.stderr)
@@ -3999,6 +4224,13 @@ def main():
     print(f"[post_merge] science pack: available={sci_meta['available']} "
           f"joined={sci_meta['joined']} measured={sci_meta['measured']} "
           f"stale={sci_meta['stale']}")
+
+    # Fase 2 — ciclo de vida + trazabilidad de promoción (tras science: el
+    # deployed_at MEASURED sale del pack; tras drift/decay: _is_dead los usa).
+    lc_meta = compute_lifecycle(snap, data_dir, now, real_magics)
+    print(f"[post_merge] lifecycle: stages={lc_meta['stages']} "
+          f"transitions={lc_meta['transitions']} promotions={lc_meta['promotions_detected']} "
+          f"first_cycle={lc_meta['first_cycle']}")
 
     snap["enrichment_meta"] = {
         "stress_runs": MC_RUNS,

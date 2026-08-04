@@ -611,6 +611,32 @@ def main() -> int:
         remote_fails = remote_hash_diffs(local_paths, env)
         all_fails.extend(remote_fails)
 
+    # [Fase 2 Decision Center] Checks de lifecycle — LOG-ONLY durante la primera
+    # semana (shadow-first): se reportan pero NO fallan el ciclo. Para hacerlos
+    # bloqueantes: añadir lifecycle_warns a all_fails.
+    lifecycle_warns: list[str] = []
+    _valid_stages = {"REAL", "HISTORICAL", "NEW", "CANDIDATE", "OBSERVATION"}
+    for b in bots:
+        lc = b.get("lifecycle")
+        _key = f"{b.get('vps')}-{b.get('account_login')}-{b.get('magic')}"
+        if not isinstance(lc, dict) or lc.get("stage") not in _valid_stages:
+            lifecycle_warns.append(f"{_key}: sin etapa válida ({(lc or {}).get('stage')!r})")
+    _lev = DATA_DIR / "lifecycle_events.jsonl"
+    if _lev.exists():
+        for i, line in enumerate(_lev.read_text(encoding="utf-8").splitlines(), 1):
+            if not line.strip():
+                continue
+            try:
+                r = json.loads(line)
+                if r.get("from") == r.get("to"):
+                    lifecycle_warns.append(f"lifecycle_events:{i}: transición degenerada {r.get('from')}→{r.get('to')}")
+            except json.JSONDecodeError:
+                lifecycle_warns.append(f"lifecycle_events:{i}: línea corrupta")
+    if lifecycle_warns:
+        print(f"[verify] lifecycle (log-only): {len(lifecycle_warns)} avisos")
+        for w in lifecycle_warns[:10]:
+            print(f"[verify]   lifecycle: {w}")
+
     dur = round(time.time() - started, 2)
     ok = not all_fails
 
@@ -632,7 +658,9 @@ def main() -> int:
             "tracker_corrupt_lines": tracker_corrupt,
             "remote_check_run": args.check_remote,
             "remote_failures": len(remote_fails),
+            "lifecycle_warnings": len(lifecycle_warns),
         },
+        "lifecycle_warnings": lifecycle_warns[:50],
         "tolerance_usd": args.tolerance,
         "freshness": freshness_detail,
         # Cuentas reales publicadas CON marca (ausentes o con datos viejos). El

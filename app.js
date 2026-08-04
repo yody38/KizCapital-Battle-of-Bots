@@ -4404,6 +4404,7 @@ const QUERY_FIELDS = {
   is_real: b => b.is_real ?? !!(b.real_vs_demo && b.real_vs_demo.is_real), // [F1] escalar en snapshot slim; objeto completo vive en per-bot detail
   in_podium: b => !!(b.tribunal && !b.tribunal.is_suplente && b.tribunal.rank != null),
   // strings (for IN / =)
+  stage: b => (b.lifecycle && b.lifecycle.stage) || '', // REAL / HISTORICAL / NEW / CANDIDATE / OBSERVATION (etapa única, fase 2)
   evidence_tier: b => b.evidence_tier || 'UNKNOWN', // MEASURED (forward demo) / INFERRED (solo backtest) / UNKNOWN (EA legacy)
   gap_verdict: b => (b.science && b.science.expectation_gap && b.science.expectation_gap.verdict) || '',
   gm_id: b => b.gm_id || '',

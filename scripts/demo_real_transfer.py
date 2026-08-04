@@ -25,7 +25,18 @@ import re
 import sys
 
 TOLERANCE_SEC = 120
-REAL_LOGINS = {25425, 32081, 3446}
+
+
+def detect_real_logins(snap: dict) -> set:
+    """Deriva las cuentas reales del snapshot (is_real del builder, trade_mode==2)
+    — misma regla que post_merge.detect_real_accounts. Sustituye al viejo
+    REAL_LOGINS hardcodeado {25425, 32081, 3446}, que quedó stale y dejaba la
+    trazabilidad ciega a 43306/43411/43414 (fase 2 del Decision Center)."""
+    logins = {a.get("login") for a in snap.get("accounts", []) if a.get("is_real")}
+    for a in (snap.get("real_portfolio") or {}).get("accounts", []):
+        logins.add(a.get("login"))
+    logins.discard(None)
+    return logins
 
 
 def base_symbol(s: str) -> str:
@@ -117,16 +128,18 @@ def main() -> None:
     with open(snap_path) as f:
         snap = json.load(f)
 
+    real_logins = detect_real_logins(snap)
+
     bots = snap.get("bots", [])
     demo_by_magic: dict[int, list] = {}
     for b in bots:
-        if b.get("account_login") not in REAL_LOGINS and b.get("magic"):
+        if b.get("account_login") not in real_logins and b.get("magic"):
             demo_by_magic.setdefault(b["magic"], []).append(b)
 
     results = []
     decorated = 0
     for b in bots:
-        if b.get("account_login") not in REAL_LOGINS or not b.get("magic"):
+        if b.get("account_login") not in real_logins or not b.get("magic"):
             continue
         twins = demo_by_magic.get(b["magic"], [])
         per_real = load_per_bot(data_dir, b.get("vps"), b.get("account_login"), b.get("magic"))
@@ -161,7 +174,7 @@ def main() -> None:
     out = {
         "schema_version": "transfer-v1-2026-06-10",
         "tolerance_sec": TOLERANCE_SEC,
-        "real_logins": sorted(REAL_LOGINS),
+        "real_logins": sorted(real_logins),
         "comparisons": sorted(results, key=lambda r: (str(r["magic"]), r["real"], r["demo_twin"])),
     }
     tmp = os.path.join(data_dir, "demo_real_transfer.json.tmp")
