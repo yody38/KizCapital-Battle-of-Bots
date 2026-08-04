@@ -1,7 +1,9 @@
 /* [VELOCIDAD F7 2026-08-04] Fuentes self-hosted. Antes venian de
    fonts.googleapis.com como CSS render-blocking de tercero y con FOIT:
-   en carga fria el texto era invisible hasta ~2.5s. Mismos woff2 que
-   servia Google (subsets latin + latin-ext), font-display: swap. */
+   en carga fria el texto era invisible hasta ~2.5s. Mismos woff2
+   estaticos que sirve Google (subsets latin + latin-ext, un archivo
+   por peso), font-display: swap. Regenerar: pedir css2 POR PESO
+   individual — el CSS multipeso servia archivos mal apareados. */
 
 /* latin-ext */
 @font-face {
