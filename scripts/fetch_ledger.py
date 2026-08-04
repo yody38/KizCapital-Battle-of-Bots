@@ -72,6 +72,23 @@ def load_env() -> dict[str, str]:
     return env
 
 
+def _is_not_found(exc: "urlerror.HTTPError") -> bool:
+    """Supabase Storage responde 400 (no 404) para objetos inexistentes, con
+    statusCode 404 / not_found en el body. Ambos son 'aún no existe' — primer
+    ciclo de un objeto nuevo — y NO deben abortar el pipeline (bug real
+    2026-08-04: lifecycle_events.jsonl nuevo abortó el cron en producción)."""
+    if exc.code == 404:
+        return True
+    if exc.code == 400:
+        try:
+            body = exc.read().decode("utf-8", errors="replace")[:300]
+        except Exception:  # noqa: BLE001
+            return False
+        low = body.lower()
+        return "not_found" in low or "object not found" in low or '"statuscode":"404"' in low or '"statuscode": "404"' in low
+    return False
+
+
 def parse_lines(text: str) -> list[dict]:
     out = []
     for line in text.splitlines():
@@ -110,8 +127,8 @@ def hydrate(url: str, skey: str, obj: str, local_path: Path, key_fn, sort_key) -
             with urlrequest.urlopen(req, timeout=30, context=_CTX) as resp:
                 body = resp.read()
         except urlerror.HTTPError as exc:
-            if exc.code == 404:
-                print(f"[fetch_ledger] {obj} not on Supabase yet (404) — first run, leaving local as-is")
+            if _is_not_found(exc):
+                print(f"[fetch_ledger] {obj} not on Supabase yet (http {exc.code} not-found) — first run, leaving local as-is")
                 return []
             print(f"[fetch_ledger] HTTP {exc.code} fetching {obj} — ABORT (won't risk clobber)", file=sys.stderr)
             return None
@@ -227,8 +244,8 @@ def main() -> int:
             with urlrequest.urlopen(req, timeout=30, context=_CTX) as resp:
                 body = resp.read()
         except urlerror.HTTPError as exc:
-            if exc.code == 404:
-                print("[fetch_ledger] lifecycle_state.json aún no existe (404) — primer ciclo")
+            if _is_not_found(exc):
+                print(f"[fetch_ledger] lifecycle_state.json aún no existe (http {exc.code} not-found) — primer ciclo")
                 body = None
             else:
                 print(f"[fetch_ledger] HTTP {exc.code} en lifecycle_state — ABORT", file=sys.stderr)
