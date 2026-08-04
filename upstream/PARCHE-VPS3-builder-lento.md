@@ -1,5 +1,25 @@
 # Parche VPS3 (#3 Package) · el builder tarda ~21 min y su snapshot nace con 32 min de edad
 
+> ## ✅ RESUELTO SIN PARCHE — verificado por medición el 2026-08-04
+>
+> La consolidación del 2026-07-27 (16 terminales → **5 portables de cuentas
+> reales, ya corriendo**) eliminó la causa raíz sola. Medido en
+> `C:\mt5-mcp\snapshot.log` (8 ciclos consecutivos):
+>
+> - build completo: **~1.3 s** (run start 20:30:02.65 → `.ready` 20:30:03.93)
+> - `reales_vistas=5/5`, `errors=0` en todos los ciclos
+> - el `age=341s` que ve el mirror es **desfase de crons** (builder :00/:30,
+>   mirror `*/15` + ~3 min de scp), no lentitud del builder
+> - el guard attach-only del 27-07 está en el archivo real de VPS3
+>   (`_terminales_corriendo()` — las reales se leen, jamás se abren)
+>
+> Con RAM libre de 170 MB (bajo el umbral de 400 MB de la skill
+> `vps-trading-safe-access`) y un build de 1.3 s, aplicar el ProcessPool sería
+> riesgo sin ganancia. **No se tocó la VPS.** El archivo real fetcheado quedó en
+> `upstream/snapshot_builder.vps3.py` como referencia.
+>
+> Lo de abajo se conserva como registro histórico del diagnóstico.
+
 > **OJO CON EL NÚMERO.** El log que sirve de evidencia es anterior al recorte de
 > numeración del 2026-07-27 (`config/vps_registry.json`, `legacy_permutation`),
 > donde esta máquina se llamaba **vps5**. Hoy es **vps3**, tu *#3 Package*.

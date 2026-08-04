@@ -7,11 +7,15 @@ name: sampler-tick
 # kiz-live-bridge worker (pull SSH); migrate this loop there once Railway
 # auth is restored, then disable this workflow.
 
-# SINGLE-WRITER (tribunal post-impl): Railway sampler-bridge es el ÚNICO driver
-# primario. Este workflow queda como respaldo MANUAL (workflow_dispatch) o por
-# repository_dispatch puntual — el cron */30 se eliminó porque su
-# cancel-in-progress mataba el loop activo y duplicaba muestras.
+# REVIVIDO 2026-08-04: el driver Railway nunca quedó activo y el sampler llevaba
+# MUERTO en toda la flota desde el 2026-07-28 (sampler_status.json de vps1:
+# last_sample 07-28). Cron */25 con LOOP_MINUTES=27 — el MISMO patrón que
+# live-publisher-tick.yml lleva corriendo en producción sin duplicados (el lock
+# local del sampler, LOCK_STALE_SECS=300, absorbe cualquier solape breve).
+# Si Railway vuelve como single-writer: quitar este cron, no el workflow.
 on:
+  schedule:
+    - cron: "*/25 * * * *"
   workflow_dispatch: {}
   repository_dispatch:
     types: [sampler-tick]
@@ -25,8 +29,12 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 29
     env:
-      # Canary scope: VPS1 only (48-72h + A/B observador gate before fleet rollout)
-      VPS_HOSTS: "100.118.159.44"
+      # Flota 2026-08-04: vps1 (canary original) + vps4 + vps6 (RAM medida: 660/710
+      # MB libres; el tick usa ~29 MB transitorios). DIFERIDOS por RAM bajo el
+      # umbral de la skill vps-trading-safe-access: vps2 (110 MB) y vps5 (40 MB).
+      # vps3 (reales) diferido además hasta que Yody declare initial_balances.json
+      # — sin denominador declarado el DD% de las reales saldría inventado.
+      VPS_HOSTS: "100.118.159.44 100.101.9.46 100.112.112.115"
       TICK_SECS: "120"
       LOOP_MINUTES: "27"
 
