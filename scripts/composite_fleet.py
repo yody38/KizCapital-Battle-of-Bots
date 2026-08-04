@@ -109,13 +109,12 @@ def pearson(xs, ys):
     return sum((x - mx) * (y - my) for x, y in zip(xs, ys)) / (sx * sy)
 
 
-def mar_oos(daily_by_key, keys, dates, oos_start_idx):
-    """MAR del segmento OOS de la cesta = net / max_dd (dd piso $1)."""
-    oos = dates[oos_start_idx:]
+def mar_segment(daily_by_key, keys, segment_dates):
+    """MAR de la cesta sobre un segmento de fechas = net / max_dd (dd piso $1)."""
     cum = peak = 0.0
     max_dd = 0.0
     net = 0.0
-    for d in oos:
+    for d in segment_dates:
         x = sum(daily_by_key[k].get(d, 0.0) for k in keys)
         net += x
         cum += x
@@ -190,7 +189,20 @@ def main() -> int:
         except Exception:  # noqa: BLE001
             continue
         daily = {r["date"]: (r.get("daily_net") or 0.0) for r in sr if r.get("date")}
-        if len(daily) >= MIN_SERIES_DAYS:
+        # La serie es SPARSE (solo días con trades): la elegibilidad se mide por
+        # span de calendario, no por filas — un bot de 2 trades/semana con 1 año
+        # de historia es perfectamente elegible (bug real: exigir 60 filas
+        # dejaba 4/21 elegibles el 2026-08-04).
+        span_ok = False
+        if len(daily) >= 20:
+            d0, d1 = min(daily), max(daily)
+            try:
+                from datetime import date
+                span = (date.fromisoformat(d1) - date.fromisoformat(d0)).days
+                span_ok = span >= MIN_SERIES_DAYS
+            except ValueError:
+                span_ok = False
+        if span_ok:
             daily_by_key[key] = daily
             meta_by_key[key] = {"vps": b.get("vps"), "login": b.get("account_login"),
                                 "magic": b.get("magic"), "symbols": b.get("symbols") or [],
@@ -237,7 +249,9 @@ def main() -> int:
                     if k in combo or not compatible(combo, k):
                         continue
                     cand = tuple(sorted(combo + (k,)))
-                    m, net, dd = mar_oos(daily_by_key, cand, dates, oos_idx)
+                    # La búsqueda optimiza SOLO in-sample: el OOS queda virgen
+                    # para el veredicto (mismo protocolo que el lab).
+                    m, _net, _dd = mar_segment(daily_by_key, cand, dates[:oos_idx])
                     nxt.append((cand, m))
             seen = set()
             uniq = []
@@ -250,7 +264,8 @@ def main() -> int:
                 break
         if not beam or len(beam[0][0]) < size:
             continue
-        best, best_mar = beam[0]
+        best = beam[0][0]
+        best_mar = mar_segment(daily_by_key, best, dates[oos_idx:])[0]
 
         # Modelo nulo: combos aleatorios del mismo tamaño, SIN restricción de ρ
         # (el nulo debe ser fácil de ganar solo si hay señal real).
@@ -258,7 +273,7 @@ def main() -> int:
         null_mars = []
         for _ in range(NULL_COMBOS):
             combo = tuple(sorted(rng.sample(keys, size)))
-            null_mars.append(mar_oos(daily_by_key, combo, dates, oos_idx)[0])
+            null_mars.append(mar_segment(daily_by_key, combo, dates[oos_idx:])[0])
         null_sorted = sorted(null_mars)
         pct = sum(1 for x in null_sorted if x < best_mar) / len(null_sorted) * 100
 
@@ -278,7 +293,7 @@ def main() -> int:
             nets.sort()
             mc_pass = nets[int(0.05 * len(nets))] > 0
 
-        _, net, dd = mar_oos(daily_by_key, best, dates, oos_idx)
+        _, net, dd = mar_segment(daily_by_key, best, dates[oos_idx:])
         status = "BASKET_SENAL" if (pct >= NULL_PERCENTILE and mc_pass) else "BASKET_NO_CONCLUYENTE"
         results.append({
             "size": size,
