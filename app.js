@@ -4412,6 +4412,7 @@ const QUERY_FIELDS = {
   in_podium: b => !!(b.tribunal && !b.tribunal.is_suplente && b.tribunal.rank != null),
   // strings (for IN / =)
   stage: b => (b.lifecycle && b.lifecycle.stage) || '', // REAL / HISTORICAL / NEW / CANDIDATE / OBSERVATION (etapa única, fase 2)
+  historical_reason: b => (b.lifecycle && b.lifecycle.historical_reason) || '', // DEAD (retiro) vs POST_REAL (historia)
   evidence_tier: b => b.evidence_tier || 'UNKNOWN', // MEASURED (forward demo) / INFERRED (solo backtest) / UNKNOWN (EA legacy)
   gap_verdict: b => (b.science && b.science.expectation_gap && b.science.expectation_gap.verdict) || '',
   gm_id: b => b.gm_id || '',

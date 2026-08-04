@@ -42,6 +42,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -636,6 +637,10 @@ def main() -> int:
         print(f"[verify] lifecycle (log-only): {len(lifecycle_warns)} avisos")
         for w in lifecycle_warns[:10]:
             print(f"[verify]   lifecycle: {w}")
+    # Flip a enforcing: LIFECYCLE_ENFORCE=1 en refresh.yml (tras ~1 semana
+    # log-only sin avisos espurios). Hasta entonces, jamás bloquea el ciclo.
+    if os.environ.get("LIFECYCLE_ENFORCE") == "1" and lifecycle_warns:
+        all_fails.extend(f"lifecycle: {w}" for w in lifecycle_warns)
 
     dur = round(time.time() - started, 2)
     ok = not all_fails

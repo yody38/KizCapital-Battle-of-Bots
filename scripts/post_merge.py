@@ -3634,10 +3634,15 @@ def compute_lifecycle(snap, data_dir, now, real_magics):
         deployed_at, dep_src = _lifecycle_deployed_at(b)
         age = _days_between(deployed_at, now) if deployed_at else None
 
+        historical_reason = None
         if magic in real_magics:
             stage = "REAL"
         elif (magic in promoted_magics_prev and magic not in real_magics) or dead:
             stage = "HISTORICAL"
+            # Sub-razón: POST_REAL (fue promovida y salió de reales) pesa muy
+            # distinto que DEAD (retirada por decay/DD/negativa) — misma etapa,
+            # semántica separada para no mezclar historia con retiro.
+            historical_reason = "POST_REAL" if magic in promoted_magics_prev else "DEAD"
         elif age is not None and age < LIFECYCLE_NEW_DAYS:
             stage = "NEW"
         elif b.get("promotion_status") in ("READY", "NEAR"):
@@ -3668,9 +3673,13 @@ def compute_lifecycle(snap, data_dir, now, real_magics):
             stage = prev_rec.get("stage")
             since = prev_rec["since"]
             counts[stage] = counts.get(stage, 0)
+            if stage != "HISTORICAL":
+                historical_reason = None
 
         b["lifecycle"] = {"stage": stage, "since": since,
                           "deployed_at": deployed_at, "deployed_at_source": dep_src}
+        if historical_reason:
+            b["lifecycle"]["historical_reason"] = historical_reason
         new_state[key] = {
             "magic": magic, "stage": stage, "since": since,
             "deployed_at": deployed_at, "deployed_at_source": dep_src,
@@ -4399,6 +4408,13 @@ def main():
         wr = b.get("win_rate_pct")
         if wr is None or wr < TRUST["min_win_rate"]:
             soft.append("wr<min")
+        # [Fase 3, flip] gap CONTRADICE como SOFT-fail — SOLO con el env
+        # GAP_CONTRADICE_ENFORCE=1 (en refresh.yml). Hasta el flip corre en
+        # shadow_gates (record-only) durante la semana de calibración.
+        if os.environ.get("GAP_CONTRADICE_ENFORCE") == "1":
+            _gv = ((b.get("science") or {}).get("expectation_gap") or {}).get("verdict")
+            if _gv == "CONTRADICE":
+                soft.append("gap_contradice")
         return (len(hard) == 0), (len(hard) == 0 and len(soft) == 0), hard + soft
 
     # Annotate freshness + corr + trust on every deduped candidate (surfaced to the UI).

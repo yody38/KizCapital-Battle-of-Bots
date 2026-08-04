@@ -64,13 +64,64 @@
     anchor.parentNode.insertBefore(host, anchor);
   }
 
+  // --- Sub-nav de Cuentas Reales: 16 paneles apilados necesitaban índice ---
+  const REAL_NAV = [
+    { id: 'live-ticker-panel', label: '⚡ Live' },
+    { id: 'real-history-panel', label: '📈 Historia' },
+    { id: 'real-daily-panel', label: '🏆 Hoy' },
+    { id: 'real-bot-cards', label: '🤖 Bots' },
+    { id: 'real-heatmap-panel', label: '🗓️ Heatmap' },
+    { id: 'real-race-panel', label: '🏁 Race' },
+    { id: 'weekly-scorecard-panel', label: '📋 Semana' },
+    { id: 'weekly-clock-panel', label: '🕐 Reloj' },
+    { id: 'weekly-waterfall-panel', label: '💧 Waterfall' },
+    { id: 'weekly-risk-panel', label: '⚠️ Riesgo' },
+    { id: 'real-positions-table', label: '📌 Posiciones' },
+    { id: 'real-bots-table', label: '📊 Bots 365d' },
+  ];
+
+  const NAV_CSS = `
+    #real-subnav { position:sticky; top:0; z-index:30; display:flex; flex-wrap:wrap; gap:5px;
+      padding:8px 0; margin-bottom:6px; backdrop-filter:blur(8px);
+      background:color-mix(in srgb, canvas 82%, transparent); }
+    .rn-chip { font-size:.72rem; padding:3px 9px; border-radius:999px; cursor:pointer;
+      border:1px solid rgba(128,128,128,.3); background:rgba(128,128,128,.07); color:inherit; }
+    .rn-chip:hover { border-color:#e0a552; color:#e0a552; }
+  `;
+
+  function renderRealNav() {
+    const section = document.getElementById('real-accounts');
+    if (!section || document.getElementById('real-subnav')) return;
+    const targets = REAL_NAV.filter((t) => document.getElementById(t.id));
+    if (targets.length < 4) return;
+    const nav = document.createElement('nav');
+    nav.id = 'real-subnav';
+    for (const t of targets) {
+      const chip = document.createElement('button');
+      chip.className = 'rn-chip';
+      chip.type = 'button';
+      chip.textContent = t.label;
+      chip.addEventListener('click', () => {
+        const el = document.getElementById(t.id);
+        // El panel puede estar hidden hasta que lleguen datos; scroll igual al contenedor.
+        (el.hidden ? section : el).scrollIntoView({ behavior: 'smooth', block: 'start' });
+        if (!el.hidden) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      });
+      nav.appendChild(chip);
+    }
+    const header = section.querySelector('.real-header');
+    if (header && header.nextSibling) section.insertBefore(nav, header.nextSibling);
+    else section.prepend(nav);
+  }
+
   const style = document.createElement('style');
-  style.textContent = CSS;
+  style.textContent = CSS + NAV_CSS;
   document.head.appendChild(style);
 
+  function boot() { render(); renderRealNav(); }
   if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', render, { once: true });
+    document.addEventListener('DOMContentLoaded', boot, { once: true });
   } else {
-    render();
+    boot();
   }
 })();
