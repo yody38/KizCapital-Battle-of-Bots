@@ -1,0 +1,45 @@
+name: composite-fleet
+
+# Búsqueda SEMANAL de cestas 4-6 sobre la flota demo con modelo nulo honesto
+# (fase 4 del Decision Center). Fuera del loop de 15 min a propósito: es caro
+# y su verdad no cambia intra-día. Consultivo — jamás despliega nada.
+
+on:
+  schedule:
+    - cron: "30 6 * * 1"   # lunes 06:30 UTC, tras el fin de semana completo
+  workflow_dispatch: {}
+
+concurrency:
+  group: composite-fleet
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  search:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      PYTHONHASHSEED: "0"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build .env.local
+        run: |
+          umask 077
+          cat > .env.local <<EOF2
+          SUPABASE_URL=${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY=${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          EOF2
+
+      - name: Deps (certifi + boto3 para R2)
+        run: python3 -m pip install --quiet --upgrade certifi boto3
+
+      - name: Buscar cestas (R2-first)
+        env:
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          CI_READ_SOURCE: r2
+        run: python3 scripts/composite_fleet.py

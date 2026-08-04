@@ -1330,7 +1330,7 @@ def institutional_metrics(daily_series, trades, account_balance):
 
 # --- 4. Portfolio Optimizer (Risk Parity / Inv-Vol / Equal) -------------
 
-def build_portfolio(snap, data_dir, real_accounts=None, real_magics=None):
+def build_portfolio(snap, data_dir, real_accounts=None, real_magics=None, corr=None):
     """Compute risk-parity, inverse-volatility, and equal-weight allocations
     over the top N (READY/NEAR) candidates by promotion_score.
 
@@ -1391,6 +1391,30 @@ def build_portfolio(snap, data_dir, real_accounts=None, real_magics=None):
     score_sum = sum((b["score"] or 0) for b in bot_data) or 1.0
     score_weights = [(b["score"] or 0) / score_sum for b in bot_data]
 
+    # [Fase 4] Corr-penalized: inverse-vol × (1 − |ρ̄| media contra el resto),
+    # con piso 0.2 — usa la matriz que el pipeline YA calcula (hasta hoy el
+    # optimizador era ciego a ella). Sin dato de ρ para un bot → sin penalizar.
+    matrix = (corr or {}).get("matrix") or {}
+    corr_pen = []
+    corr_covered = 0
+    for i, b in enumerate(bot_data):
+        rhos = []
+        row = matrix.get(b["key"]) or {}
+        for j, other in enumerate(bot_data):
+            if i == j:
+                continue
+            r = row.get(other["key"])
+            if r is not None:
+                rhos.append(abs(r))
+        if rhos:
+            corr_covered += 1
+            pen = max(0.2, 1.0 - sum(rhos) / len(rhos))
+        else:
+            pen = 1.0
+        corr_pen.append(inv_vols[i] * pen)
+    s_pen = sum(corr_pen) or 1.0
+    corr_weights = [w / s_pen for w in corr_pen]
+
     allocations = {}
     for cap in PORTFOLIO_CAPITALS:
         allocations[str(cap)] = {
@@ -1406,6 +1430,10 @@ def build_portfolio(snap, data_dir, real_accounts=None, real_magics=None):
                 {**bot_data[i], "weight": round(w, 4), "capital_usd": round(cap * w, 2)}
                 for i, w in enumerate(score_weights)
             ],
+            "corr_penalized": [
+                {**bot_data[i], "weight": round(w, 4), "capital_usd": round(cap * w, 2)}
+                for i, w in enumerate(corr_weights)
+            ],
         }
 
     return {
@@ -1414,7 +1442,8 @@ def build_portfolio(snap, data_dir, real_accounts=None, real_magics=None):
         "method_default": "inverse_volatility",
         "capitals": PORTFOLIO_CAPITALS,
         "allocations": allocations,
-        "notes": "Risk parity ≈ inverse volatility when correlation ≈ 0. Equal weight = naive baseline. Score weighted = bias toward Promotion Score.",
+        "corr_coverage": corr_covered,
+        "notes": "Risk parity ≈ inverse volatility when correlation ≈ 0. Equal weight = naive baseline. Score weighted = bias toward Promotion Score. Corr-penalized = inverse-vol castigado por |ρ| media contra el resto (piso 0.2; sin ρ = sin castigo).",
     }
 
 
@@ -3739,6 +3768,109 @@ def compute_lifecycle(snap, data_dir, now, real_magics):
 
 
 # ----------------------------------------------------------------------------
+# Fase 4 — la cesta real COMO portafolio: métricas de cesta, ρ intra-cesta y
+# contribución marginal por miembro (métricas con/sin él). Solo lectura de la
+# realidad ya publicada; nada aquí mueve capital.
+# ----------------------------------------------------------------------------
+
+def compute_real_basket(snap, data_dir, real_accounts):
+    """Escribe data/real_basket.json: la cesta de bots reales tratada como UN
+    portafolio. Devuelve meta para el log."""
+    snap_ts = snap.get("generated_at")
+    real_logins = {login for (_v, login) in real_accounts}
+    promoted_at = {}
+    try:
+        with open(os.path.join(data_dir, "promotion_events.jsonl")) as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    try:
+                        r = json.loads(line)
+                        promoted_at.setdefault(r.get("magic"), r.get("promoted_at"))
+                    except json.JSONDecodeError:
+                        pass
+    except FileNotFoundError:
+        pass
+
+    members = []
+    series_by_key = {}
+    for b in snap.get("bots", []):
+        if b.get("account_login") not in real_logins:
+            continue
+        sr = load_per_bot_series(data_dir, b.get("vps"), b.get("account_login"), b.get("magic"))
+        daily = {row["date"]: (row.get("daily_net") or 0.0) for row in sr if row.get("date")}
+        key = f"{b.get('vps')}-{b.get('account_login')}-{b.get('magic')}"
+        m_sharpe, m_dd = _series_stats([daily[d] for d in sorted(daily)])
+        members.append({
+            "key": key, "vps": b.get("vps"), "login": b.get("account_login"),
+            "magic": b.get("magic"), "symbols": b.get("symbols") or [],
+            "since": (b.get("lifecycle") or {}).get("since"),
+            "promoted_at": promoted_at.get(b.get("magic")),
+            "days": len(daily),
+            "net_total": round(sum(daily.values()), 2),
+            "sharpe": round(m_sharpe, 3) if m_sharpe is not None else None,
+            "max_dd_usd": round(m_dd, 2) if m_dd is not None else None,
+        })
+        if daily:
+            series_by_key[key] = daily
+    meta = {"members": len(members), "with_series": len(series_by_key)}
+    if not members:
+        return meta
+
+    def agg_stats(keys):
+        agg = {}
+        for k in keys:
+            for d, v in series_by_key.get(k, {}).items():
+                agg[d] = agg.get(d, 0.0) + v
+        daily = [agg[d] for d in sorted(agg)]
+        sharpe, dd = _series_stats(daily)
+        return {"days": len(daily), "net_total": round(sum(daily), 2),
+                "sharpe": round(sharpe, 3) if sharpe is not None else None,
+                "max_dd_usd": round(dd, 2) if dd is not None else None}
+
+    all_keys = sorted(series_by_key)
+    basket_stats = agg_stats(all_keys)
+
+    rho = {}
+    for i, a in enumerate(all_keys):
+        for bkey in all_keys[i + 1:]:
+            sa, sb = series_by_key[a], series_by_key[bkey]
+            common = sorted(set(sa) & set(sb))
+            if len(common) >= BASKET_MIN_OVERLAP_DAYS:
+                r = pearson([sa[d] for d in common], [sb[d] for d in common])
+                if r is not None:
+                    rho[f"{a}|{bkey}"] = round(r, 3)
+
+    marginal = {}
+    if len(all_keys) >= 2 and basket_stats["sharpe"] is not None:
+        for k in all_keys:
+            rest = agg_stats([x for x in all_keys if x != k])
+            marginal[k] = {
+                "sharpe_without": rest["sharpe"],
+                "dd_without_usd": rest["max_dd_usd"],
+                "sharpe_contribution": round(basket_stats["sharpe"] - rest["sharpe"], 3)
+                    if rest["sharpe"] is not None else None,
+                "dd_contribution_usd": round(basket_stats["max_dd_usd"] - rest["max_dd_usd"], 2)
+                    if rest["max_dd_usd"] is not None else None,
+            }
+
+    out = {
+        "schema": 1, "generated_at": snap_ts,
+        "basket": basket_stats,
+        "members": sorted(members, key=lambda m: str(m["key"])),
+        "rho": rho,
+        "marginal": marginal,
+        "note": "la cesta real observada como UN portafolio; contribución marginal = métricas con/sin cada miembro",
+    }
+    tmp = os.path.join(data_dir, "real_basket.json.tmp")
+    with open(tmp, "w") as f:
+        json.dump(out, f, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+    os.replace(tmp, os.path.join(data_dir, "real_basket.json"))
+    meta.update({"basket_days": basket_stats["days"], "rho_pairs": len(rho)})
+    return meta
+
+
+# ----------------------------------------------------------------------------
 # Fase 3 Decision Center — impacto sobre la cesta real + próximas mejores
 # acciones. TODO consultivo: cada acción lleva human_veto_required=True y el
 # gate de expectation_gap corre en SHADOW (record-only) hasta calibrarlo.
@@ -4448,6 +4580,11 @@ def main():
     print(f"[post_merge] decision center: basket_impact evaluated={bi_meta['evaluated']} "
           f"(basket_days={bi_meta['basket_days']}) actions={dc_meta['actions']} kinds={dc_meta['kinds']}")
 
+    # Fase 4 — la cesta real como UN portafolio (real_basket.json).
+    rb_meta = compute_real_basket(snap, data_dir, real_accounts)
+    print(f"[post_merge] real basket: members={rb_meta.get('members')} "
+          f"days={rb_meta.get('basket_days')} rho_pairs={rb_meta.get('rho_pairs')}")
+
     snap["enrichment_meta"] = {
         "stress_runs": MC_RUNS,
         "oos_folds_max": OOS_FOLDS_MAX,
@@ -4494,7 +4631,7 @@ def main():
         json.dump(corr, f, ensure_ascii=False, separators=(",", ":"))
     os.replace(tmp2, corr_path)
 
-    portfolio = build_portfolio(snap, data_dir, real_accounts, real_magics)
+    portfolio = build_portfolio(snap, data_dir, real_accounts, real_magics, corr=corr)
     if portfolio:
         port_path = os.path.join(data_dir, "portfolio.json")
         tmp3 = port_path + ".tmp"
