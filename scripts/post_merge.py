@@ -606,6 +606,36 @@ DETAIL_SPLIT_FIELDS = [
     "regime", "event_stress", "promotion_radar", "underwater",
     "oos", "institutional", "confidence_intervals", "capacity",
     "shrinkage_meta", "promotion_components",
+    # [VELOCIDAD V2] Segunda tanda (2026-07-28). Campos que aparecieron despues
+    # del primer split y solo los pintan paneles del modal — verificado uno a uno
+    # contra app.js: cada consumidor es una funcion de modal (renderScorePanel,
+    # renderViolinPanel, renderPairsPanel, renderCapacityPanel, renderStressPanel,
+    # renderModalHeader) y siempre sobre el bot abierto, nunca iterando la flota.
+    # ~172 KB menos en el arranque con 402 bots.
+    #
+    # NO mover (se usan al arrancar, sin abrir modal):
+    #   drift       -> applyQuery (el Query DSL filtra los 402 bots)
+    #   real_daily  -> renderRealBotCards (tarjetas de cuentas reales)
+    #   dominance   -> renderCandidates (tabla de candidatos)
+    "trade_distribution", "promotion_gating", "stress", "promotion_fails",
+    "pair_recommendations", "real_vs_demo", "floating_dd",
+    # [ESCALA E1] Tercera tanda (2026-07-28). Escalares de estadistica que solo
+    # pintan paneles del modal. Verificado con un barrido EXHAUSTIVO que esta vez
+    # incluye ambitos `const` — el barrido anterior solo miraba `function` y por
+    # eso se escapo QUERY_FIELDS, rompiendo el filtro is_real.
+    #   longest_losing_streak_months, longest_dd_duration_days,
+    #   monthly_net_stdev, monthly_net_cov  -> renderConsistencyPanel
+    #   slope_recent_90d, slope_lifetime    -> renderDecayPanel
+    #   max_consecutive_wins, stdev_per_trade -> sin consumidor en el arranque
+    # ~210 B/bot menos. NO se movio ningun otro escalar: el resto (calmar,
+    # sortino, sharpe_annualized, decay_ratio, dd_pct_of_balance, expectancy,
+    # recovery_factor, max_consecutive_losses, promotion_score_raw/_shrunk,
+    # months_positive_pct, net_after_commission) SI se usa al arrancar, en las
+    # tablas o en QUERY_FIELDS.
+    "longest_losing_streak_months", "longest_dd_duration_days",
+    "slope_recent_90d", "slope_lifetime",
+    "monthly_net_stdev", "monthly_net_cov",
+    "max_consecutive_wins", "stdev_per_trade",
 ]
 DETAIL_CANDIDATE_KEEP = {"shrinkage_meta", "promotion_components"}
 DETAIL_CANDIDATE_STATUSES = {"READY", "NEAR", "WATCH"}
@@ -632,6 +662,26 @@ def split_detail_to_per_bot(snap, data_dir):
             continue
         pb["detail"] = dict(moved)
         pb["detail"]["_fields"] = sorted(moved.keys())
+        # [ESCALA E4 — REVERTIDO 2026-07-28]
+        # Aqui se quitaba `account_balance` del per-bot file: es un dato de
+        # CUENTA duplicado en cada bot suyo que se mueve con cada tick de equity,
+        # y por eso el 95% de los archivos se re-subia en CADA ciclo (416 de 439)
+        # aunque el bot no hubiera operado. A 2.000 bots serian ~2,7M
+        # escrituras/mes en R2, por encima del millon gratuito.
+        #
+        # POR QUE SE REVIRTIO: el gate de determinismo (test_determinism.py)
+        # fallo en el primer ciclo con el cambio — 43 bots con enrichment
+        # distinto entre dos ejecuciones sobre la MISMA entrada. Habia pasado en
+        # todos los ciclos anteriores, asi que la causa es este cambio. No se
+        # identifico la dependencia exacta (ningun punto de post_merge lee
+        # account_balance del per-bot file; los cuatro consumidores lo toman de
+        # accounts_by_login), y un pipeline no reproducible que calcula
+        # puntuaciones de dinero real no es aceptable ni un ciclo.
+        #
+        # Para retomarlo: reproducir en local con
+        #   python3 scripts/test_determinism.py data
+        # sobre un data/ mirroreado, y diffear el bot ('vps1', 1663822308) entre
+        # las dos corridas para ver QUE campo diverge antes de volver a tocarlo.
         pb_path = os.path.join(data_dir, "bots", vps_b, f"{login_b}-{magic_b}.json")
         tmp_pb = pb_path + ".dt.tmp"
         try:
@@ -647,10 +697,18 @@ def split_detail_to_per_bot(snap, data_dir):
         for fld in moved:
             if fld in DETAIL_CANDIDATE_KEEP and keep_candidate:
                 continue
+            # ESCALARES QUE SE QUEDAN: antes de mover un objeto al detalle hay
+            # que elevar los valores sueltos que el dashboard consulta SIN abrir
+            # el modal. Si se olvida uno, el campo desaparece en silencio.
+            # (Regresion real: al mover real_vs_demo se rompio el filtro
+            # `is_real` del Query DSL, que lo leia de ahi. Detectado y corregido
+            # el 2026-07-28 comparando QUERY_FIELDS contra el snapshot publicado.)
             if fld == "capacity":
                 cap_usd = (b.get("capacity") or {}).get("capacity_usd")
                 if cap_usd is not None:
                     b["capacity_usd"] = cap_usd
+            elif fld == "real_vs_demo":
+                b["is_real"] = bool((b.get("real_vs_demo") or {}).get("is_real"))
             del b[fld]
             fields_removed += 1
         b["detail_n"] = len(pb["detail"]["_fields"])
@@ -3360,6 +3418,101 @@ def apply_tribunal(snap, data_dir, now, real_logins, real_magics):
     }
 
 
+# ----------------------------------------------------------------------------
+# Science Bridge (fase 1) — join por magic contra science_pack.json del lab.
+# SOLO DISPLAY: ningún campo de aquí entra en compute_score, TRUST ni asientos.
+# Dos scores lado a lado, nunca mezclados: promotion_score (flota, forward demo)
+# y scientific_score (lab, backtest completo). evidence_tier usa el vocabulario
+# del propio lab: MEASURED (hay muestra forward en expectation_gap) / INFERRED
+# (GM certificada pero solo backtest) / UNKNOWN (EA legacy sin validación de lab).
+# ----------------------------------------------------------------------------
+
+SCIENCE_STALE_DAYS = 7  # lab offline >7d => science_stale (degrada confianza, no rompe)
+_MEASURED_VERDICTS = {"CONFIRMA", "POSITIVA_DEBIL", "CONTRADICE"}
+
+
+def apply_science_pack(snap, data_dir, now):
+    """Anota bots[] con la verdad científica del lab. Fail-open: sin pack o pack
+    inválido => evidence_tier=UNKNOWN para todos y science_meta.available=False."""
+    bots = snap.get("bots", [])
+    meta = {"available": False, "joined": 0, "measured": 0, "inferred": 0,
+            "unknown": len(bots), "stale": False, "age_days": None}
+    pack = None
+    path = os.path.join(data_dir, "science_pack.json")
+    try:
+        with open(path) as f:
+            pack = json.load(f)
+        if pack.get("schema") != 1 or not isinstance(pack.get("gms"), dict):
+            print(f"[post_merge] science_pack schema inesperado — ignorado", file=sys.stderr)
+            pack = None
+    except FileNotFoundError:
+        pass
+    except Exception as exc:  # noqa: BLE001
+        print(f"[post_merge] science_pack ilegible — ignorado: {exc}", file=sys.stderr)
+        pack = None
+
+    if pack is None:
+        for b in bots:
+            b["evidence_tier"] = "UNKNOWN"
+        snap["science_meta"] = meta
+        return meta
+
+    age_days = None
+    try:
+        gen = datetime.fromisoformat(pack["generated_at"])
+        age_days = max(0, (now.date() - gen.date()).days)  # entero => determinista intra-día
+    except Exception:  # noqa: BLE001
+        pass
+    stale = age_days is None or age_days > SCIENCE_STALE_DAYS
+
+    gms = pack["gms"]
+    joined = measured = inferred = 0
+    for b in bots:
+        gm = gms.get(str(b.get("magic")))
+        if not gm:
+            b["evidence_tier"] = "UNKNOWN"
+            continue
+        gap = gm.get("expectation_gap") or {}
+        verdict = gap.get("verdict")
+        tier = "MEASURED" if verdict in _MEASURED_VERDICTS else "INFERRED"
+        b["evidence_tier"] = tier
+        b["scientific_score"] = gm.get("scientific_score")
+        b["gm_id"] = gm.get("gm_id")
+        dep = gm.get("deployment") or {}
+        b["science"] = {
+            "economic_status": gm.get("economic_status"),
+            "expectation_gap": gap or None,
+            "holdout": gm.get("holdout"),  # lleva contaminated:true del lab
+            "deployed_since": dep.get("since"),
+            "do_not_deploy": gm.get("do_not_deploy"),
+            "series": gm.get("series"),
+            "age_days": age_days,
+            "stale": stale,
+        }
+        joined += 1
+        if tier == "MEASURED":
+            measured += 1
+        else:
+            inferred += 1
+
+    meta.update({
+        "available": True,
+        "generated_at": pack.get("generated_at"),
+        "age_days": age_days,
+        "stale": stale,
+        "joined": joined,
+        "measured": measured,
+        "inferred": inferred,
+        "unknown": len(bots) - joined,
+        "honesty": pack.get("honesty"),
+        "counts_lab": pack.get("counts"),
+        "composites_n": len(pack.get("composites") or []),
+        "saturated_slots": (pack.get("shadow_saturation") or {}).get("saturated_slots"),
+    })
+    snap["science_meta"] = meta
+    return meta
+
+
 def main():
     if len(sys.argv) < 2:
         print("usage: post_merge.py <data_dir>", file=sys.stderr)
@@ -3841,6 +3994,12 @@ def main():
         "shadow_pending": ["demo_real_gap"],
         "dominance": dominance_meta,  # P75/Pareto thoroughbred diagnostic (badges only)
     }
+    # Science Bridge — join display-only por magic (fail-open sin el pack).
+    sci_meta = apply_science_pack(snap, data_dir, now)
+    print(f"[post_merge] science pack: available={sci_meta['available']} "
+          f"joined={sci_meta['joined']} measured={sci_meta['measured']} "
+          f"stale={sci_meta['stale']}")
+
     snap["enrichment_meta"] = {
         "stress_runs": MC_RUNS,
         "oos_folds_max": OOS_FOLDS_MAX,

@@ -125,12 +125,103 @@ async function loadHistoryRows() {
   }).filter(Boolean);
 }
 
-function readSnapCache() {
-  try { const r = localStorage.getItem(SNAP_CACHE_KEY); return r ? JSON.parse(r) : null; }
-  catch { return null; }
+// [CUOTA] Temporizador que no trabaja con la pestaña oculta.
+// Los sondeos de 60s (snapshot_meta, mcp_health, timing) seguian pidiendo datos
+// con el dashboard en segundo plano: ~4.300 peticiones/dia por pestaña abierta,
+// egress puro contra la cuota de Supabase sin que nadie lo estuviera mirando.
+// Al volver a primera plano se refresca al instante, asi que no se pierde
+// frescura percibida — solo se deja de gastar mientras nadie mira.
+function intervalWhenVisible(fn, ms) {
+  const tick = () => {
+    if (document.visibilityState !== 'visible') return;
+    try { fn(); } catch (e) { console.error(e); }
+  };
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') tick();   // refresco inmediato al volver
+  });
+  return setInterval(tick, ms);
 }
+
+// [ESCALA E2] Caché del snapshot en IndexedDB, no en localStorage.
+//
+// POR QUÉ (medido 2026-07-28): cada bot cuesta ~1.798 B en el snapshot. Con
+// 402 bots la caché ocupa 1,6 MB, pero a ~1.200 bots supera los ~5 MB que
+// admite localStorage — y como el guardado vive en un try/catch, el pintado
+// instantáneo habría muerto EN SILENCIO, sin error visible, justo cuando la
+// flota crezca (5-10 bots/día → 2-3 meses). Además localStorage es SÍNCRONO:
+// escribir 3,6 MB congela la pestaña en cada ciclo.
+//
+// IndexedDB no tiene ese tope práctico y es asíncrono. Para no propagar el
+// async por todo el código, se mantiene un espejo EN MEMORIA: readSnapCache()
+// sigue siendo síncrono para sus llamadores, y la lectura de disco ocurre una
+// vez al arrancar (hydrateSnapCache).
+const SNAP_DB = 'kiz-cache';
+const SNAP_STORE = 'snapshots';
+const SNAP_SCHEMA = 2;          // subir esto descarta cachés de formato viejo
+let snapCacheMem = null;        // espejo en memoria del último snapshot bueno
+
+function idbOpen() {
+  return new Promise((resolve, reject) => {
+    if (!self.indexedDB) return reject(new Error('sin IndexedDB'));
+    const req = indexedDB.open(SNAP_DB, 1);
+    req.onupgradeneeded = () => {
+      const db = req.result;
+      if (!db.objectStoreNames.contains(SNAP_STORE)) db.createObjectStore(SNAP_STORE);
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+function idbGet(key) {
+  return idbOpen().then(db => new Promise((resolve, reject) => {
+    const tx = db.transaction(SNAP_STORE, 'readonly');
+    const r = tx.objectStore(SNAP_STORE).get(key);
+    r.onsuccess = () => resolve(r.result);
+    r.onerror = () => reject(r.error);
+  }));
+}
+
+function idbPut(key, value) {
+  return idbOpen().then(db => new Promise((resolve, reject) => {
+    const tx = db.transaction(SNAP_STORE, 'readwrite');
+    tx.objectStore(SNAP_STORE).put(value, key);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  }));
+}
+
+// Lee de disco una sola vez al arrancar y llena el espejo en memoria.
+async function hydrateSnapCache() {
+  try {
+    const rec = await idbGet(SNAP_CACHE_KEY);
+    // Formato viejo → se descarta en vez de pintar algo inconsistente.
+    if (rec && rec.schema === SNAP_SCHEMA && rec.data) snapCacheMem = rec.data;
+  } catch { /* modo privado / sin IndexedDB → se sigue sin caché, nunca con datos malos */ }
+  // Migración desde el localStorage anterior: aprovecha la caché que ya tenía
+  // el usuario para que su primer arranque tras el cambio siga siendo instantáneo.
+  if (!snapCacheMem) {
+    try {
+      const legacy = localStorage.getItem(SNAP_CACHE_KEY);
+      if (legacy) {
+        snapCacheMem = JSON.parse(legacy);
+        localStorage.removeItem(SNAP_CACHE_KEY);   // libera los MB del tope viejo
+        writeSnapCache(snapCacheMem);
+      }
+    } catch { /* nada que migrar */ }
+  }
+  return snapCacheMem;
+}
+
+function readSnapCache() {
+  return snapCacheMem;    // síncrono para los llamadores; el disco ya se leyó
+}
+
 function writeSnapCache(data) {
-  try { localStorage.setItem(SNAP_CACHE_KEY, JSON.stringify(data)); } catch { /* quota — non-fatal */ }
+  snapCacheMem = data;
+  // Sin await: el guardado no puede retrasar el pintado ni bloquear el hilo.
+  idbPut(SNAP_CACHE_KEY, { schema: SNAP_SCHEMA, savedAt: Date.now(), data })
+    .catch(() => { /* cuota o modo privado — no crítico, se sigue con memoria */ });
 }
 
 // Una cuenta real "vacía" (balance 0 y equity 0) no se muestra en la sección Cuentas Reales.
@@ -181,9 +272,17 @@ function applySnapshot(data) {
 
 // Paint the cached snapshot synchronously on boot (before any network), so the
 // dashboard is interactive instantly. No-op if there's no cache yet.
-function paintCachedSnapshot() {
-  const cached = readSnapCache();
-  if (cached) { try { applySnapshot(cached); } catch (e) { console.error('cache paint failed', e); } }
+// La lectura de disco ahora es asíncrona (IndexedDB), así que puede resolverse
+// DESPUÉS de que la red ya haya pintado datos frescos. `freshApplied` impide
+// ese caso: la caché nunca sobrescribe algo más nuevo que ella.
+let freshApplied = false;
+
+async function paintCachedSnapshot() {
+  try {
+    const cached = await hydrateSnapCache();
+    if (!cached || freshApplied) return;
+    applySnapshot(cached);
+  } catch (e) { console.error('cache paint failed', e); }
 }
 
 async function loadSnapshot() {
@@ -204,6 +303,7 @@ async function loadSnapshot() {
       data = await snapRes.json();
     }
     state.history = histRows || [];
+    freshApplied = true;      // [E2] a partir de aquí la caché ya no puede pisar
     applySnapshot(data);
     // "What moved" since the previous render (cache or prior cycle), derived
     // 100% in the browser — no backend file (Rule of Three: build it when a
@@ -261,7 +361,7 @@ function initSnapshotPush() {
       (payload) => _snapPushApply(payload.new))
     .subscribe();
   _snapPushPoll();
-  snapPush.pollTimer = setInterval(_snapPushPoll, 60000);
+  snapPush.pollTimer = intervalWhenVisible(_snapPushPoll, 60000);
 }
 
 // --- Staleness banner (out-of-band sync alert) ---------------------------
@@ -1417,7 +1517,9 @@ function renderNewBots() {
   }
   if (empty) empty.hidden = true;
 
-  tbody.innerHTML = allBots.map((b, i) => {
+  // [ESCALA E6] Antes: innerHTML de TODA la ventana de bots nuevos de golpe
+  // (452 filas medidas con 1.000 bots). Ahora: progresivo con tope + scroll.
+  paintRowsProgressive(tbody, allBots, (b, i) => {
     const symbols = (b.symbols || []).join(', ') || '—';
     const netCls = b.net_profit >= 0 ? 'profit-positive' : 'profit-negative';
     const wins = b.wins || 0;
@@ -1442,7 +1544,7 @@ function renderNewBots() {
         <td class="num"><strong>${days}d</strong></td>
       </tr>
     `;
-  }).join('');
+  }, 30, 60, 90);
 }
 
 // --- Podium --------------------------------------------------------------
@@ -1597,6 +1699,72 @@ function rankBadge(n) {
   return `<span class="rank-badge">${n}</span>`;
 }
 
+// [VELOCIDAD V3] Render progresivo. Pintar 400+ filas de una sola asignacion a
+// innerHTML bloquea el hilo principal, y el coste crece linealmente con la
+// flota (402 bots hoy y subiendo). Se pinta YA el primer lote — lo unico que
+// cabe en pantalla — y el resto se anexa en trozos cuando el navegador esta
+// libre, asi la pagina responde al instante sin importar cuantos bots haya.
+// Los clics siguen funcionando en las filas tardias porque estan delegados en
+// document.body (ver L2200), no enganchados fila a fila.
+const _paintTokens = new WeakMap();  // tbody -> token del render vigente
+
+// [ESCALA E6 2026-08-04] Tope de DOM + carga al scroll. Con 1.000 bots el
+// progresivo puro seguia pintando la tabla ENTERA (~22 nodos/fila = ~22.000
+// nodos que nadie ve). Ahora los trozos en idle paran en `idleCap` filas y el
+// resto se anexa solo cuando el usuario se acerca al final (centinela con
+// IntersectionObserver, margen 600px para que nunca se vea el hueco). El token
+// sigue abortando trozos pendientes cuando llega un render nuevo.
+function paintRowsProgressive(tbody, items, rowHtml, firstChunk = 40, chunk = 80, idleCap = 120) {
+  // Token: si llega un render nuevo (refresh, filtro, orden), los trozos
+  // pendientes del anterior se descartan en vez de anexar filas obsoletas.
+  const token = (_paintTokens.get(tbody) || 0) + 1;
+  _paintTokens.set(tbody, token);
+
+  tbody.innerHTML = items.slice(0, firstChunk).map(rowHtml).join('');
+  if (items.length <= firstChunk) return;
+
+  const idle = window.requestIdleCallback || ((fn) => setTimeout(() => fn({ timeRemaining: () => 0 }), 16));
+  let i = firstChunk;
+  const append = () => {
+    const slice = items.slice(i, i + chunk);
+    if (!slice.length) return false;
+    tbody.insertAdjacentHTML('beforeend', slice.map((b, k) => rowHtml(b, i + k)).join(''));
+    i += chunk;
+    return i < items.length;
+  };
+  const armSentinel = () => {
+    if (typeof IntersectionObserver === 'undefined') {
+      // Sin IO (navegador viejo): comportamiento anterior — todo en idle.
+      const stepAll = () => {
+        if (_paintTokens.get(tbody) !== token) return;
+        if (append()) idle(stepAll);
+      };
+      idle(stepAll);
+      return;
+    }
+    const cols = (tbody.previousElementSibling?.querySelectorAll('th') || []).length || 1;
+    const sentinel = document.createElement('tr');
+    sentinel.className = 'rows-sentinel';
+    sentinel.innerHTML = `<td colspan="${cols}" style="padding:6px;text-align:center;color:var(--text-dim,#888)">···</td>`;
+    tbody.appendChild(sentinel);
+    const io = new IntersectionObserver((entries) => {
+      if (!entries.some((e) => e.isIntersecting)) return;
+      if (_paintTokens.get(tbody) !== token) { io.disconnect(); sentinel.remove(); return; }
+      sentinel.remove();
+      const more = append();
+      if (more) tbody.appendChild(sentinel);
+      else io.disconnect();
+    }, { rootMargin: '600px 0px' });
+    io.observe(sentinel);
+  };
+  const step = () => {
+    if (_paintTokens.get(tbody) !== token) return;   // render superado: abortar
+    if (i >= idleCap) { armSentinel(); return; }     // tope: el resto, al scroll
+    if (append()) idle(step);
+  };
+  idle(step);
+}
+
 function renderTable() {
   const tbody = document.getElementById('bots-tbody');
   const empty = document.getElementById('empty-state');
@@ -1607,8 +1775,8 @@ function renderTable() {
     return;
   }
   empty.hidden = true;
-  tbody.innerHTML = bots.map((b, i) => `
-    <tr class="bot-row" data-vps="${b.vps}" data-login="${b.account_login}" data-magic="${b.magic}" style="animation-delay: ${Math.min(i * 15, 400)}ms">
+  paintRowsProgressive(tbody, bots, (b, i) => `
+    <tr class="bot-row" data-vps="${b.vps}" data-login="${b.account_login}" data-magic="${b.magic}"${i < 40 ? ` style="animation-delay: ${Math.min(i * 15, 400)}ms"` : ''}>
       <td>${rankBadge(b._rank)}</td>
       <td>${b.magic}</td>
       <td>${vpsBadge(b.vps)}</td>
@@ -1631,7 +1799,7 @@ function renderTable() {
       <td class="num ${profitClass(b.net_profit)}">${fmt.usd(b.net_profit, true)}</td>
       <td>${fmt.shortTime(b.last_trade)}</td>
     </tr>
-  `).join('');
+  `);
 }
 
 function updateSortIndicators() {
@@ -2920,7 +3088,10 @@ async function bldRecalc() {
       symbols: meta.symbols,
       status: meta.status,
       score: meta.score,
-      account_balance: data.account_balance,
+      // [E4] El saldo ya no viaja en el per-bot file (cambiaba en cada tick y
+      // hacia que el 95% de los archivos se re-subiera cada ciclo). Se toma de
+      // snapshot.accounts, que es su fuente autoritativa.
+      account_balance: data.account_balance ?? bldAccountBalance(meta.vps, meta.login),
       series: data.daily_equity_series || [],
     });
   }
@@ -4225,12 +4396,17 @@ const QUERY_FIELDS = {
   tribunal_comp: b => b.tribunal ? b.tribunal.comp : null,
   podium_streak: b => b.tribunal_history ? b.tribunal_history.consecutive_podiums : null,
   ready_streak: b => b.ready_streak_days,
+  scientific_score: b => b.scientific_score, // [Science Bridge] score del lab; null para EAs legacy (jamás imputado)
   // boolean
+  science_stale: b => !!(b.science && b.science.stale),
   drift_flag: b => !!(b.drift && b.drift.flag),
   decay_flag: b => !!b.decay_flag,
-  is_real: b => !!(b.real_vs_demo && b.real_vs_demo.is_real),
+  is_real: b => b.is_real ?? !!(b.real_vs_demo && b.real_vs_demo.is_real), // [F1] escalar en snapshot slim; objeto completo vive en per-bot detail
   in_podium: b => !!(b.tribunal && !b.tribunal.is_suplente && b.tribunal.rank != null),
   // strings (for IN / =)
+  evidence_tier: b => b.evidence_tier || 'UNKNOWN', // MEASURED (forward demo) / INFERRED (solo backtest) / UNKNOWN (EA legacy)
+  gap_verdict: b => (b.science && b.science.expectation_gap && b.science.expectation_gap.verdict) || '',
+  gm_id: b => b.gm_id || '',
   double_signature: b => b.double_signature || '',
   status: b => b.promotion_status,
   vps: b => b.vps,
@@ -4612,7 +4788,7 @@ wireDNAModal();
 wireCompareModal();
 wireMcpHealth();
 wireTiming();
-paintCachedSnapshot();  // instant first paint from localStorage (SWR)
+paintCachedSnapshot();  // [E2] pintado instantáneo desde IndexedDB (SWR); no bloquea
 loadSnapshot();         // then revalidate from the network in the background
 
 // ----------------------- MCP Health chip + modal -----------------------
@@ -4730,7 +4906,7 @@ function wireMcpHealth() {
     if (e.key === 'Escape' && overlay && !overlay.hidden) overlay.hidden = true;
   });
   refreshMcpHealth();
-  setInterval(refreshMcpHealth, 60000);
+  intervalWhenVisible(refreshMcpHealth, 60000);
 }
 
 // ----------------------- Pipeline latency chip + modal -----------------------
@@ -4892,7 +5068,7 @@ function wireTiming() {
     if (e.key === 'Escape' && overlay && !overlay.hidden) overlay.hidden = true;
   });
   refreshTiming();
-  setInterval(refreshTiming, 60000);
+  intervalWhenVisible(refreshTiming, 60000);
 }
 
 function wireNewBotsControls() {
@@ -5953,6 +6129,22 @@ function renderDNACard(b) {
                 : { icon: '✅', cls: 'dna-ok', label: 'OK' };
   dims.push({ name: 'Sample', icon: '📊', val: `${b.trades || 0} trades, ${months} meses`,
               sem: sSample, hint: 'Mínimo 50 trades + 4 meses para CI estrecho' });
+
+  // 8. Ciencia — Science Bridge del lab. Display-only: no entra al veredicto
+  // numérico. MEASURED = evidencia forward demo (expectation_gap); INFERRED =
+  // GM certificada solo por backtest; UNKNOWN = EA legacy sin validación de lab.
+  const sci = b.science;
+  if (b.evidence_tier && b.evidence_tier !== 'UNKNOWN' && sci) {
+    const verdictGap = sci.expectation_gap ? sci.expectation_gap.verdict : null;
+    const sSci = verdictGap === 'CONFIRMA' ? { icon: '✅', cls: 'dna-ok', label: 'OK' }
+               : verdictGap === 'CONTRADICE' ? { icon: '🛑', cls: 'dna-stop', label: 'STOP' }
+               : { icon: '⚠️', cls: 'dna-caution', label: b.evidence_tier };
+    const sciVal = `${b.gm_id || 'GM'} · score lab ${b.scientific_score != null ? b.scientific_score.toFixed(1) : '—'}` +
+                   (verdictGap ? ` · demo ${verdictGap}` : ' · sin muestra demo') +
+                   (sci.stale ? ' · ⚠ pack viejo' : '');
+    dims.push({ name: 'Ciencia', icon: '🔬', val: sciVal, sem: sSci,
+                hint: 'Lab: veredicto forward demo manda; el holdout 2026 NO es estimador forward (contaminado)' });
+  }
 
   // Battle-tested
   const ev = b.event_stress;

@@ -4,8 +4,14 @@
 // (network-first). NUNCA toca /rest/v1, /auth/v1 ni Realtime (live directo).
 // VERSION debe ir en sync con el pin ?v= de index.html — bump en cada deploy
 // que cambie app.js/styles.css/data-source.js para no servir código viejo.
+//
+// [VELOCIDAD F6] index.html usa AHORA un único ?v= para los 5 assets (antes
+// convivían 3 versiones distintas y el SHELL de abajo, que las deriva todas de
+// VERSION, precacheaba URLs que la página no pedía nunca: se bajaba el shell
+// dos veces en la primera visita y el modo offline no funcionaba hasta la
+// segunda). Regla: este VERSION y el ?v= de index.html se bumpean JUNTOS.
 
-const VERSION = '20260707d';
+const VERSION = '20260804b';
 const SHELL_CACHE = `kiz-shell-${VERSION}`;
 const DATA_CACHE = 'kiz-data-v1';
 const FONT_CACHE = 'kiz-fonts-v1';
@@ -16,11 +22,14 @@ const SHELL = [
   `/app.js?v=${VERSION}`,
   `/styles.css?v=${VERSION}`,
   `/data-source.js?v=${VERSION}`,
-  '/supabase-client.js?v=20260513d',
-  '/auth-guard.js?v=20260513d',
+  `/supabase-client.js?v=${VERSION}`,
+  `/auth-guard.js?v=${VERSION}`,
   '/vendor/chart.umd.min.js',
   '/vendor/chartjs-adapter-date-fns.bundle.min.js',
   '/vendor/supabase.min.js',
+  // [VELOCIDAD F7] fuentes self-hosted; los .woff2 se cachean on-demand
+  // (cache-first del handler final) — precachearlos costaría ~736 KB.
+  '/vendor/fonts/fonts.css',
   '/manifest.json',
 ];
 
@@ -103,6 +112,18 @@ self.addEventListener('fetch', (e) => {
   // JSONs de datos (signed URLs de Storage): red primero, caché si offline.
   if (isSignedStorage(url)) {
     e.respondWith(networkFirstData(req, url));
+    return;
+  }
+
+  // [VELOCIDAD F6] Ruta de borde content-addressed (/d/<sha>/<path>, api/d.js).
+  // Mismo trato que los datos firmados: red primero (el borde ya responde en
+  // ~25ms), caché solo como red de seguridad offline. La key de caché quita el
+  // sha para que el modo offline siga sirviendo el último ciclo visto en vez de
+  // quedarse sin nada en cuanto cambia el sha.
+  if (url.origin === location.origin && url.pathname.startsWith('/d/')) {
+    const stripped = new URL(url.href);
+    stripped.pathname = '/d/' + url.pathname.split('/').slice(3).join('/');
+    e.respondWith(networkFirstData(req, stripped));
     return;
   }
 
