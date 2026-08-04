@@ -596,6 +596,12 @@ T_FETCH_LEDGER_MS=$(( $(now_ms) - _t0 ))
 # Fail-closed: if this breaks, scores/correlations/portfolio.json go stale and
 # the dashboard would mix fresh raw data with old derived data — abort.
 _t0=$(now_ms)
+# Science Bridge (fase 1): hidrata science_pack.json del lab ANTES de
+# post_merge (join por magic). FAIL-OPEN: sin pack el ciclo sigue con los
+# campos science en null — el dashboard nunca depende de que el Mac esté vivo.
+python3 "$SCRIPT_DIR/fetch_science_pack.py" >> "$LOG" 2>&1 \
+  || echo "[$(ts)] fetch_science_pack non-fatal error (science fields null this cycle)" >> "$LOG"
+
 # Test de transferencia demo→real (tribunal P1) — ANTES de post_merge, que
 # preserva bots[].transfer al re-escribir. Best-effort: nunca aborta el ciclo.
 python3 "$SCRIPT_DIR/demo_real_transfer.py" "$DATA_DIR" >> "$LOG" 2>&1 \
