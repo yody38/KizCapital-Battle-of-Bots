@@ -3738,6 +3738,211 @@ def compute_lifecycle(snap, data_dir, now, real_magics):
     return meta
 
 
+# ----------------------------------------------------------------------------
+# Fase 3 Decision Center — impacto sobre la cesta real + próximas mejores
+# acciones. TODO consultivo: cada acción lleva human_veto_required=True y el
+# gate de expectation_gap corre en SHADOW (record-only) hasta calibrarlo.
+# ----------------------------------------------------------------------------
+
+BASKET_MIN_OVERLAP_DAYS = 20
+BASKET_CORR_WARN = 0.5
+DECISION_MAX_ACTIONS = 7
+
+
+def _series_stats(daily):
+    """(sharpe_annualized, max_dd_abs) de una lista de netos diarios."""
+    if len(daily) < 5:
+        return None, None
+    s = stdev(daily)
+    mean = sum(daily) / len(daily)
+    sharpe = (mean / s * math.sqrt(252)) if s > 1e-9 else None
+    cum = peak = 0.0
+    max_dd = 0.0
+    for x in daily:
+        cum += x
+        peak = max(peak, cum)
+        max_dd = max(max_dd, peak - cum)
+    return sharpe, max_dd
+
+
+def compute_basket_impact(snap, data_dir, real_accounts):
+    """Para cada CANDIDATE: qué le hace a la cesta real añadir su serie demo.
+    Correlacionar contra el AGREGADO de la cesta (una serie larga) arregla el
+    corr_max_vs_real=None crónico de las series reales cortas por-cuenta."""
+    real_logins = {login for (_v, login) in real_accounts}
+    basket = {}
+    n_real_series = 0
+    for b in snap.get("bots", []):
+        if b.get("account_login") in real_logins:
+            sr = load_per_bot_series(data_dir, b.get("vps"), b.get("account_login"), b.get("magic"))
+            if sr:
+                n_real_series += 1
+                for row in sr:
+                    d = row.get("date")
+                    if d:
+                        basket[d] = basket.get(d, 0.0) + (row.get("daily_net") or 0.0)
+    meta = {"real_series": n_real_series, "basket_days": len(basket), "evaluated": 0}
+    if len(basket) < BASKET_MIN_OVERLAP_DAYS:
+        snap["basket_impact_meta"] = meta
+        return meta
+
+    dates = sorted(basket)
+    base_daily = [basket[d] for d in dates]
+    base_sharpe, base_dd = _series_stats(base_daily)
+    saturated = set((snap.get("science_meta") or {}).get("saturated_slots") or [])
+
+    for b in snap.get("bots", []):
+        if (b.get("lifecycle") or {}).get("stage") != "CANDIDATE":
+            continue
+        sr = load_per_bot_series(data_dir, b.get("vps"), b.get("account_login"), b.get("magic"))
+        cand = {row["date"]: (row.get("daily_net") or 0.0) for row in sr if row.get("date")}
+        common = [d for d in dates if d in cand]
+        corr = None
+        if len(common) >= BASKET_MIN_OVERLAP_DAYS:
+            corr = pearson([basket[d] for d in common], [cand[d] for d in common])
+        comb_dates = sorted(set(dates) | set(cand))
+        comb_daily = [basket.get(d, 0.0) + cand.get(d, 0.0) for d in comb_dates]
+        comb_sharpe, comb_dd = _series_stats(comb_daily)
+        sym = (b.get("symbols") or [""])[0].split(".")[0].upper()
+        sat_flag = any(sym and slot.startswith(sym) for slot in saturated)
+        b["basket_impact"] = {
+            "corr_to_basket": round(corr, 3) if corr is not None else None,
+            "overlap_days": len(common),
+            "sharpe_delta": round(comb_sharpe - base_sharpe, 3)
+                if (comb_sharpe is not None and base_sharpe is not None) else None,
+            "dd_delta_usd": round(comb_dd - base_dd, 2)
+                if (comb_dd is not None and base_dd is not None) else None,
+            "symbol_saturation_flag": sat_flag,
+        }
+        meta["evaluated"] += 1
+    snap["basket_impact_meta"] = meta
+    return meta
+
+
+def _act(priority, kind, claim, because, caveats=None, magic=None, key=None):
+    return {"priority": priority, "action": kind, "claim": claim,
+            "magic": magic, "key": key, "because": because,
+            "caveats": caveats or [], "human_veto_required": True}
+
+
+def compute_next_best_actions(snap, data_dir):
+    """El punto de unión: motor de promoción + ciencia del lab + evidencia
+    forward + impacto de cesta → máx 7 acciones consultivas con su WHY."""
+    snap_ts = snap.get("generated_at")
+    sci_meta = snap.get("science_meta") or {}
+    actions = []
+
+    # SYSTEM — la confianza del sistema antes que nada.
+    if not sci_meta.get("available"):
+        actions.append(_act(1, "SYSTEM", "Sin science pack del lab este ciclo",
+                            [{"signal": "science_pack", "value": "ausente", "source": "science_bridge"}],
+                            ["los campos científicos están en null; el Mac del lab puede estar apagado"]))
+    elif sci_meta.get("stale"):
+        actions.append(_act(1, "SYSTEM", f"Science pack viejo ({sci_meta.get('age_days')}d)",
+                            [{"signal": "science_age_days", "value": sci_meta.get("age_days"),
+                              "threshold": f"<={SCIENCE_STALE_DAYS}", "source": "science_bridge"}],
+                            ["se suprimen recomendaciones PROMOTE hasta refrescar el pack"]))
+    stale_science = not sci_meta.get("available") or sci_meta.get("stale")
+
+    def gap_of(b):
+        return ((b.get("science") or {}).get("expectation_gap") or {})
+
+    bots = snap.get("bots", [])
+    # PROMOTE_REVIEW — solo con evidencia forward CONFIRMA y cesta limpia.
+    if not stale_science:
+        for b in bots:
+            if (b.get("lifecycle") or {}).get("stage") != "CANDIDATE":
+                continue
+            if b.get("promotion_status") != "READY":
+                continue
+            gap = gap_of(b)
+            if gap.get("verdict") != "CONFIRMA":
+                continue
+            bi = b.get("basket_impact") or {}
+            corr = bi.get("corr_to_basket")
+            clean = (corr is None or corr < BASKET_CORR_WARN) and not bi.get("symbol_saturation_flag")
+            because = [
+                {"signal": "promotion_status", "value": "READY",
+                 "detail": f"score_shrunk {b.get('promotion_score_shrunk')}", "source": "post_merge"},
+                {"signal": "expectation_gap", "value": f"CONFIRMA (n={gap.get('closes')})",
+                 "source": "science_pack"},
+                {"signal": "corr_to_basket", "value": corr, "threshold": f"<{BASKET_CORR_WARN}",
+                 "source": "basket_impact"},
+            ]
+            if b.get("double_signature") == "confirmed":
+                because.append({"signal": "tribunal", "value": "doble firma ✓✓", "source": "tribunal"})
+            caveats = ["holdout 2026 no usable como estimador forward (contaminado)"]
+            if not clean:
+                caveats.append("impacto de cesta NO limpio: revisar correlación/saturación antes")
+            actions.append(_act(2 if clean else 3, "PROMOTE_REVIEW",
+                                f"Magic {b.get('magic')} lista para revisión humana de promoción",
+                                because, caveats, magic=b.get("magic"),
+                                key=f"{b.get('vps')}-{b.get('account_login')}-{b.get('magic')}"))
+
+    # INVESTIGATE — contradicciones y degradaciones.
+    for b in bots:
+        gap = gap_of(b)
+        if gap.get("verdict") == "CONTRADICE":
+            actions.append(_act(2, "INVESTIGATE",
+                                f"Magic {b.get('magic')}: la demo CONTRADICE el backtest",
+                                [{"signal": "expectation_gap", "value": "CONTRADICE",
+                                  "detail": f"esperado {gap.get('expected_usd_per_trade')}$/trade, "
+                                            f"observado {gap.get('observed_usd_per_trade')}$/trade "
+                                            f"(n={gap.get('closes')})", "source": "science_pack"}],
+                                ["gate en SHADOW: aún no bloquea asientos — calibrar antes de enforcen"],
+                                magic=b.get("magic")))
+        drift = b.get("drift") or {}
+        if (b.get("lifecycle") or {}).get("stage") == "REAL" and (b.get("dead") or
+                (drift.get("flag") and (drift.get("severity") or 0) >= 1.3)):
+            actions.append(_act(2, "INVESTIGATE",
+                                f"Magic {b.get('magic')} EN REAL con señal de degradación",
+                                [{"signal": "dead" if b.get("dead") else "drift",
+                                  "value": True if b.get("dead") else drift.get("severity"),
+                                  "source": "post_merge"}],
+                                ["bot con dinero real: prioridad máxima de revisión humana"],
+                                magic=b.get("magic")))
+
+    # OBSERVE — candidatas sin muestra forward suficiente.
+    if not stale_science:
+        for b in bots:
+            if (b.get("lifecycle") or {}).get("stage") != "CANDIDATE":
+                continue
+            if b.get("evidence_tier") != "INFERRED":
+                continue
+            closes = gap_of(b).get("closes") or 0
+            actions.append(_act(4, "OBSERVE",
+                                f"Magic {b.get('magic')}: candidata sin evidencia forward",
+                                [{"signal": "evidence_tier", "value": "INFERRED", "source": "science_pack"},
+                                 {"signal": "demo_closes", "value": closes, "threshold": ">=10",
+                                  "source": "science_pack"}],
+                                [f"necesita ~{max(0, 10 - closes)} cierres demo más para veredicto del lab"],
+                                magic=b.get("magic")))
+
+    # BASKET — saturación de slots del shadow portfolio.
+    for slot in (sci_meta.get("saturated_slots") or []):
+        actions.append(_act(5, "BASKET", f"Slot saturado en el shadow portfolio: {slot}",
+                            [{"signal": "shadow_saturation", "value": slot, "source": "science_pack"}],
+                            ["una GM más en este slot aporta poco conocimiento nuevo (umbral del lab)"]))
+
+    actions.sort(key=lambda a: (a["priority"], str(a.get("magic") or ""), a["claim"]))
+    actions = actions[:DECISION_MAX_ACTIONS]
+    out = {
+        "schema": 1, "generated_at": snap_ts,
+        "actions": actions,
+        "honesty": sci_meta.get("honesty"),
+        "lifecycle": (snap.get("lifecycle_meta") or {}).get("stages"),
+        "human_veto_required": True,
+        "note": "consultivo: el sistema propone con evidencia; promover es un acto exclusivamente humano",
+    }
+    tmp = os.path.join(data_dir, "decision_center.json.tmp")
+    with open(tmp, "w") as f:
+        json.dump(out, f, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+    os.replace(tmp, os.path.join(data_dir, "decision_center.json"))
+    snap["decision_meta"] = {"actions": len(actions),
+                             "kinds": sorted({a["action"] for a in actions})}
+    return snap["decision_meta"]
+
+
 def main():
     if len(sys.argv) < 2:
         print("usage: post_merge.py <data_dir>", file=sys.stderr)
@@ -4081,7 +4286,8 @@ def main():
     for b in snap.get("bots", []):
         b["promotion_status"] = "NO"
 
-    shadow_cola = {"cvar_fail": 0, "tail_fail": 0, "sqn_fail": 0, "corr_fail": 0}
+    shadow_cola = {"cvar_fail": 0, "tail_fail": 0, "sqn_fail": 0, "corr_fail": 0,
+                   "gap_contradice": 0}
     for idx, b in enumerate(eligible):
         if idx < cap_ready:
             b["promotion_status"] = "READY"
@@ -4099,12 +4305,16 @@ def main():
         inst = b.get("institutional") or {}
         cvar, tail, band = inst.get("cvar_95_pct"), inst.get("tail_ratio"), inst.get("sqn_band")
         corr_max = b.get("corr_max_vs_real")
+        # [Fase 3] expectation_gap CONTRADICE en SHADOW: la demo desmiente el
+        # backtest del lab. Record-only hasta calibrar (luego: soft-fail TRUST).
+        _gap_v = ((b.get("science") or {}).get("expectation_gap") or {}).get("verdict")
         b["shadow_gates"] = {
             "cvar_fail": cvar is not None and cvar < -5.0,
             "tail_fail": tail is not None and tail < 0.7,
             "sqn_fail": band == "MALO",
             "corr_max_vs_real": corr_max,
             "corr_fail": corr_max is not None and corr_max > 0.7,
+            "gap_contradice": _gap_v == "CONTRADICE",
         }
         if b["promotion_status"] in ("READY", "NEAR"):
             for k in shadow_cola:
@@ -4231,6 +4441,12 @@ def main():
     print(f"[post_merge] lifecycle: stages={lc_meta['stages']} "
           f"transitions={lc_meta['transitions']} promotions={lc_meta['promotions_detected']} "
           f"first_cycle={lc_meta['first_cycle']}")
+
+    # Fase 3 — impacto sobre la cesta real + próximas mejores acciones.
+    bi_meta = compute_basket_impact(snap, data_dir, real_accounts)
+    dc_meta = compute_next_best_actions(snap, data_dir)
+    print(f"[post_merge] decision center: basket_impact evaluated={bi_meta['evaluated']} "
+          f"(basket_days={bi_meta['basket_days']}) actions={dc_meta['actions']} kinds={dc_meta['kinds']}")
 
     snap["enrichment_meta"] = {
         "stress_runs": MC_RUNS,
