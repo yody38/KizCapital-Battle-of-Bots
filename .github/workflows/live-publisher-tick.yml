@@ -1,0 +1,78 @@
+name: live-publisher-tick
+
+# Equity en vivo de las 5 cuentas REALES → tabla public.live_real_state.
+#
+# Restaurado 2026-07-28. Se habia eliminado el 2026-05-18 ("to fit GH Actions
+# free tier"), y desde entonces `live_real_state` estaba VACIA: el dashboard
+# mostraba las cuentas reales solo con el snapshot de 30 min. Ese motivo ya no
+# aplica — el repo es PUBLICO y los minutos de Actions en runners estandar son
+# ilimitados y gratuitos. Coste de este workflow: 0.
+#
+# SEGURIDAD (regla del owner, 2026-07-27): live_publisher.py NUNCA abre una
+# cuenta. Antes de tocar nada enumera los terminal64.exe EN EJECUCION
+# (_terminales_corriendo, pywin32) y omite los cerrados, porque
+# mt5.initialize(path=...) ARRANCA el terminal si esta cerrado. Si el owner
+# cierra una cuenta, este loop la deja cerrada y simplemente no publica su fila.
+# Sin pywin32 -> no publica nada (fail-closed).
+#
+# Patron: gh-actions-ssh-tick-loop (igual que sampler-tick.yml). Cada run hace
+# ~27 min de ticks one-shot; el cron re-programa con solape para sobrevivir al
+# throttling de los crons de GitHub.
+
+on:
+  workflow_dispatch: {}
+  repository_dispatch:
+    types: [live-publisher-tick]
+  schedule:
+    # Cada 25 min: solape de ~2 min con el run anterior (LOOP_MINUTES=27) para
+    # que no queden huecos si un cron se retrasa.
+    - cron: "*/25 * * * *"
+
+concurrency:
+  group: live-publisher-tick
+  cancel-in-progress: true     # exactamente un loop activo; el nuevo reemplaza al viejo
+
+jobs:
+  tick:
+    runs-on: ubuntu-latest
+    timeout-minutes: 29
+    env:
+      # VPS3 = las 5 cuentas reales (32081, 43306, 25425, 43411, 43414),
+      # consolidadas ahi el 2026-07-27 en instalaciones portables por cuenta.
+      # Fuente unica: config/vps_registry.json (vps6 ya NO tiene reales).
+      VPS_HOSTS: "100.70.228.19"
+      TICK_SECS: "30"
+      LOOP_MINUTES: "27"
+
+    steps:
+      - name: Setup SSH key
+        run: |
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_ed25519_ci
+          chmod 600 ~/.ssh/id_ed25519_ci
+
+      - name: Tailscale up
+        uses: tailscale/github-action@v3
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret:    ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:ci
+          version: latest
+
+      - name: Tick loop (solo lectura — nunca abre una cuenta)
+        run: |
+          end=$(( $(date +%s) + LOOP_MINUTES * 60 ))
+          while [ "$(date +%s)" -lt "$end" ]; do
+            t0=$(date +%s)
+            for host in $VPS_HOSTS; do
+              out=$(ssh -i ~/.ssh/id_ed25519_ci \
+                    -o StrictHostKeyChecking=accept-new \
+                    -o ConnectTimeout=10 -o ServerAliveInterval=10 \
+                    "trader@${host}" \
+                    "C:\\mt5-mcp\\venv\\Scripts\\python.exe C:\\mt5-mcp\\live_publisher.py --once" \
+                    2>&1) && echo "[$host] $out" || echo "[$host] TICK-FAIL: $out"
+            done
+            elapsed=$(( $(date +%s) - t0 ))
+            sleep_for=$(( TICK_SECS - elapsed ))
+            [ "$sleep_for" -gt 0 ] && sleep "$sleep_for" || true
+          done

@@ -49,6 +49,8 @@ except Exception:  # alerting must never break the watchdog
     def tg_send(text, **kw):  # type: ignore[misc]
         return "unavailable"
 
+import r2_read  # noqa: E402  — [EGRESS] lectura del espejo, ver r2_read.py
+
 ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = ROOT / "data"
 ENV_FILE = ROOT / ".env.local"
@@ -171,10 +173,39 @@ def supa_get_json(url: str, key: str, path: str) -> tuple[int, dict | None]:
         return code, None
 
 
-def head_all_bot_files(url: str, key: str, bots: list[dict]) -> list[tuple[str, int]]:
-    """Returns list of (object_path, http_status) for any bot whose file did NOT return 200."""
+# [CUOTA] Muestreo rotatorio en vez de la flota entera cada ciclo.
+# Antes: 402 HEAD por corrida x 48 corridas/dia = ~19.000 peticiones diarias
+# contra la cuota del plan Free. Ahora cada corrida audita una rebanada distinta
+# y determinista, asi que la flota completa se cubre igual — solo que repartida
+# en el tiempo. Con 402 bots y rebanadas de 40, la cobertura total se completa
+# cada ~11 corridas (~5,5 h) y las peticiones bajan un 90%.
+# Las cuentas REALES quedan FUERA del muestreo: se comprueban SIEMPRE, todas y
+# en cada corrida — ahi no se reparte el riesgo en el tiempo.
+BOT_SAMPLE_SIZE = 40
+
+
+def head_all_bot_files(
+    url: str, key: str, bots: list[dict], sample: int = BOT_SAMPLE_SIZE,
+    real_logins: set[int] | None = None,
+) -> tuple[list[tuple[str, int]], int]:
+    """(fallos, nº comprobados). Fallo = archivo que no devolvio 200."""
+    reals = real_logins or set()
+    ordenados = sorted(bots, key=lambda b: f"{b['vps']}/{b['account_login']}-{b['magic']}")
+    siempre = [b for b in ordenados if int(b.get("account_login") or 0) in reals]
+    resto = [b for b in ordenados if int(b.get("account_login") or 0) not in reals]
+
+    if sample and sample < len(resto):
+        # Ventana determinista que avanza con el tiempo: sin estado en disco y
+        # sin aleatoriedad, asi que dos corridas seguidas nunca repiten rebanada.
+        turnos = (len(resto) + sample - 1) // sample
+        idx = (int(time.time()) // 1800) % turnos          # 1800s = cadencia del watchdog
+        elegidos = resto[idx * sample:(idx + 1) * sample]
+    else:
+        elegidos = resto
+
+    objetivo = siempre + elegidos
     missing: list[tuple[str, int]] = []
-    for b in bots:
+    for b in objetivo:
         path = f"bots/{b['vps']}/{b['account_login']}-{b['magic']}.json"
         try:
             code, _ = supa_request(url, key, path, "HEAD")
@@ -182,7 +213,7 @@ def head_all_bot_files(url: str, key: str, bots: list[dict]) -> list[tuple[str, 
             code = -1
         if code != 200:
             missing.append((path, code))
-    return missing
+    return missing, len(objetivo)
 
 
 # ---------- step 5: vercel ----------
@@ -305,11 +336,19 @@ def upload_health_to_supabase(url: str, key: str, record: dict) -> None:
         _, history = supa_get_json(url, key, "watchdog_history.json")
         if not isinstance(history, list):
             history = []
+        # [ESCALA E5] Se guardan tambien las metricas de capacidad para poder
+        # PROYECTAR el crecimiento: sin serie historica no hay forma de avisar
+        # con semanas de antelacion, que es justo lo que fallo con la cuota de
+        # Supabase (nos enteramos el dia del aviso de restriccion).
+        cap = (record.get("steps") or {}).get("capacity") or {}
         history.append({
             "ts": record.get("ts"),
             "result": record.get("result"),
             "fails": record.get("fails") or [],
             "duration_ms": record.get("duration_ms"),
+            "bots": cap.get("bots"),
+            "snapshot_bytes": cap.get("snapshot_bytes"),
+            "max_objects_per_folder": cap.get("max_objects_per_folder"),
         })
         cutoff = datetime.now(timezone.utc).timestamp() - 30 * 86400
         pruned = []
@@ -427,7 +466,21 @@ def main() -> int:
             info["steps"]["upload"] = up
 
         # Step 4 — HEAD probe per-bot files
-        code, snap = supa_get_json(url, key, "snapshot.json")
+        # [EGRESS] El contenido del snapshot (único GET pesado del watchdog) sale
+        # del espejo R2 cuando CI_READ_SOURCE=r2 — la paridad R2==Supabase ya la
+        # verifica el uploader cada ciclo (parity_ok) y la frescura de la COPIA de
+        # Supabase sigue vigilada por el lag de integrity_report y los HEAD/list.
+        # Cualquier fallo de R2 cae al GET de Supabase original.
+        code, snap = None, None
+        if r2_read.read_source() == "r2":
+            try:
+                snap = json.loads(r2_read.r2_get_bytes("snapshot.json"))
+                code = 200
+            except Exception as exc:  # noqa: BLE001
+                print(f"[watchdog] r2 snapshot.json: {exc} — fallback a Supabase", file=sys.stderr)
+                snap = None
+        if snap is None:
+            code, snap = supa_get_json(url, key, "snapshot.json")
         if code != 200 or not snap:
             fails.append(f"supabase snapshot.json fetch http={code}")
             info["steps"]["files"] = {"error": f"snapshot_http={code}"}
@@ -443,14 +496,18 @@ def main() -> int:
             elif snap_age > 90 * 60:
                 fails.append(f"pipeline dead-man: snapshot {int(snap_age/60)}min old (>90min — cron/CI stalled)")
             bots = [b for b in snap.get("bots", []) if b.get("magic", 0) != 0]
-            missing = head_all_bot_files(url, key, bots)
+            missing, comprobados = head_all_bot_files(
+                url, key, bots, real_logins=LIVE_REAL_LOGINS)
             info["steps"]["files"] = {
                 "total": len(bots),
+                "checked": comprobados,
                 "missing": len(missing),
                 "samples": [f"{p}={c}" for p, c in missing[:5]],
             }
             if missing:
-                fails.append(f"supabase missing files: {len(missing)} of {len(bots)}")
+                fails.append(
+                    f"supabase missing files: {len(missing)} de {comprobados} comprobados "
+                    f"(flota {len(bots)}; muestreo rotatorio + todas las reales)")
             # Per-VPS freshness emitted by post_merge.py — surface stale VPSs
             # in the issue body so triage is one click instead of a grep.
             vf = snap.get("vps_freshness") or {}
@@ -596,6 +653,158 @@ def main() -> int:
                         f" (→ lado MT5/broker), heartbeat muerto en {dead or 'ninguno'}"
                         f" (→ proceso/SSH/Railway) · ages_sec={hb_ages}"
                     )
+
+        # Step 4b-bis — [RESILIENCIA R2] Regresión de compresión.
+        # history_recent.jsonl viajó meses con 543 KB crudos porque se subió como
+        # application/octet-stream (mimetypes no conoce .jsonl) y el CDN no
+        # comprime binarios. Nadie lo vio. Este check falla si un archivo de datos
+        # vuelve a servirse sin content-encoding.
+        try:
+            comp_bad = []
+            for obj in ("snapshot.json", "history_recent.jsonl"):
+                ep = f"{url.rstrip('/')}/storage/v1/object/{BUCKET}/{obj}"
+                req = urlrequest.Request(
+                    ep, method="HEAD",
+                    headers={"Authorization": f"Bearer {key}", "apikey": key,
+                             "Accept-Encoding": "br, gzip"})
+                with urlrequest.urlopen(req, timeout=20) as r:
+                    enc = r.headers.get("content-encoding")
+                    ctype = (r.headers.get("content-type") or "").split(";")[0]
+                    if not enc:
+                        comp_bad.append(f"{obj}(type={ctype or '?'})")
+            info["steps"]["compression"] = {"uncompressed": comp_bad}
+            if comp_bad:
+                fails.append(
+                    f"compresion: {', '.join(comp_bad)} se sirve SIN comprimir "
+                    f"(content-type mal → el CDN no comprime; revisar _EXTRA_MIME "
+                    f"en upload_to_supabase.py)"
+                )
+        except Exception as e:  # noqa: BLE001 — check aditivo, nunca tumba el watchdog
+            info["steps"]["compression"] = {"error": str(e)}
+
+    # Step 4b-cap — [ESCALA E5] Presupuesto de datos con alarma ANTICIPADA.
+    #
+    # El owner suma 5-10 bots/dia y proyecta 2.000+ en 90 dias. Cada limite del
+    # sistema tiene un techo conocido; lo que faltaba era avisar ANTES de
+    # llegar, no el dia que revienta (como paso con la cuota de Supabase).
+    # Se mide el consumo actual y se proyecta con el ritmo real de la serie
+    # historica: si un umbral se cruza en <30 dias, se avisa diciendo cuantos
+    # dias quedan.
+    CAP_LIMITS = {
+        # metrica -> (umbral de aviso, techo real, explicacion)
+        "snapshot_bytes": (3_000_000, None,
+                           "el navegador parsea el snapshot entero en cada carga"),
+        "max_objects_per_folder": (800, 1000,
+                                   "el listado de Storage pagina a 1000 por carpeta"),
+        "ci_duration_sec": (1200, 1800,
+                            "el ciclo debe caber en su ventana de 30 min"),
+    }
+    if url and key:
+        try:
+            cap: dict = {}
+            snap_bytes = None
+            code_c, _ = supa_request(url, key, "snapshot.json", "HEAD")
+            # HEAD no da tamaño fiable en Storage → se usa el listado de la raíz.
+            body = json.dumps({"prefix": "", "limit": 1000}).encode()
+            req = urlrequest.Request(
+                f"{url.rstrip('/')}/storage/v1/object/list/{BUCKET}",
+                data=body, method="POST",
+                headers={"Authorization": f"Bearer {key}", "apikey": key,
+                         "Content-Type": "application/json"})
+            with urlrequest.urlopen(req, timeout=25) as r:
+                for o in json.loads(r.read()):
+                    if o.get("name") == "snapshot.json":
+                        snap_bytes = (o.get("metadata") or {}).get("size")
+            cap["snapshot_bytes"] = snap_bytes
+            cap["bots"] = len(bots)
+            # Objetos por carpeta de bots (el techo de 1000 del listado).
+            peor = 0
+            for vps_id in sorted({b.get("vps") for b in bots if b.get("vps")}):
+                body = json.dumps({"prefix": f"bots/{vps_id}", "limit": 1000}).encode()
+                req = urlrequest.Request(
+                    f"{url.rstrip('/')}/storage/v1/object/list/{BUCKET}",
+                    data=body, method="POST",
+                    headers={"Authorization": f"Bearer {key}", "apikey": key,
+                             "Content-Type": "application/json"})
+                with urlrequest.urlopen(req, timeout=25) as r:
+                    peor = max(peor, len(json.loads(r.read())))
+            cap["max_objects_per_folder"] = peor
+            ci = (info.get("steps") or {}).get("ci") or {}
+            cap["ci_duration_sec"] = None
+
+            # Proyeccion sobre la serie historica (ritmo real, no supuesto).
+            avisos = []
+            _, hist = supa_get_json(url, key, "watchdog_history.json")
+            serie = [h for h in (hist or []) if isinstance(h, dict)]
+            for metrica, (umbral, techo, porque) in CAP_LIMITS.items():
+                actual = cap.get(metrica)
+                if not actual:
+                    continue
+                if actual >= umbral:
+                    avisos.append(f"{metrica}={actual} ya supera el umbral {umbral} ({porque})")
+                    continue
+                puntos = [(parse_iso(h.get("ts")), h.get(metrica))
+                          for h in serie if h.get(metrica) and parse_iso(h.get("ts"))]
+                if len(puntos) < 8:
+                    continue                      # sin serie suficiente no se inventa tendencia
+                puntos.sort(key=lambda p: p[0])
+                t0, v0 = puntos[0]
+                t1, v1 = puntos[-1]
+                dias = (t1 - t0).total_seconds() / 86400
+                if dias < 1 or v1 <= v0:
+                    continue                      # sin crecimiento medible
+                ritmo = (v1 - v0) / dias
+                faltan = (umbral - actual) / ritmo
+                if faltan < 30:
+                    avisos.append(
+                        f"{metrica}: {actual} → umbral {umbral} en ~{faltan:.0f} dias "
+                        f"al ritmo actual (+{ritmo:.0f}/dia) · {porque}")
+            cap["avisos"] = avisos
+            info["steps"]["capacity"] = cap
+            for a in avisos:
+                # Aviso, no fallo: el sistema aun funciona; el objetivo es actuar
+                # con semanas de margen.
+                freshness_warn.append(f"capacidad: {a}")
+        except Exception as e:  # noqa: BLE001 — check aditivo, nunca tumba el watchdog
+            info["steps"]["capacity"] = {"error": str(e)}
+
+    # Step 4b-ter — [RESILIENCIA R2] Otros workflows en rojo.
+    # El watchdog solo miraba refresh-dashboard: spread-sampler llevaba 3/3
+    # fallos (KeyError 'utc') sin que nadie se enterara.
+    try:
+        import subprocess
+        wf_bad = []
+        for wf in ("spread-sampler", "sampler-tick", "mcp-health", "live-publisher-tick"):
+            out = subprocess.run(
+                ["gh", "run", "list", "--workflow", wf, "--repo", GH_REPO,
+                 "--limit", "3", "--json", "conclusion"],
+                capture_output=True, text=True, timeout=45)
+            if out.returncode != 0:
+                continue
+            concs = [r.get("conclusion") for r in json.loads(out.stdout or "[]")]
+            done = [c for c in concs if c]
+            if done and all(c == "failure" for c in done):
+                wf_bad.append(f"{wf}({len(done)}/{len(done)} fallos)")
+        info["steps"]["workflows"] = {"failing": wf_bad}
+        if wf_bad:
+            fails.append(f"workflows en rojo: {', '.join(wf_bad)}")
+    except Exception as e:  # noqa: BLE001
+        info["steps"]["workflows"] = {"error": str(e)}
+
+    # Step 4b-quater — [RESILIENCIA R2] Salud del respaldo R2.
+    # El espejo se escribe cada ciclo, pero hasta ahora nadie comprobaba que
+    # fuera USABLE. Un respaldo que no se puede leer no es un respaldo.
+    failover_url = os.environ.get("KIZ_FAILOVER_URL") or env.get("KIZ_FAILOVER_URL")
+    if failover_url:
+        try:
+            with urlrequest.urlopen(f"{failover_url.rstrip('/')}/health", timeout=20) as r:
+                hb = json.loads(r.read())
+            info["steps"]["failover"] = hb
+            if not hb.get("ok"):
+                fails.append("failover R2: /health dice que el espejo NO es utilizable")
+        except Exception as e:  # noqa: BLE001
+            info["steps"]["failover"] = {"error": str(e)}
+            fails.append(f"failover R2 inalcanzable: {e}")
 
     # Step 4c — Tuning shadow (aprendizaje continuo, warn-only): anota qué
     # recomendaría el adaptive_tuner vs los umbrales vigentes. NO cambia el

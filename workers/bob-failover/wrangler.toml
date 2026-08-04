@@ -1,0 +1,12 @@
+name = "bob-failover"
+main = "worker.js"
+compatibility_date = "2026-07-28"
+
+# El bucket que el pipeline ya replica en cada ciclo (parity_ok en upload_health).
+[[r2_buckets]]
+binding = "BUCKET"
+bucket_name = "bob-failover"
+
+# Secretos (NO van aqui — se cargan con `wrangler secret put`):
+#   SUPABASE_JWT_SECRET
+#   ALLOWED_EMAILS

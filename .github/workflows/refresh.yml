@@ -2,7 +2,11 @@ name: refresh-dashboard
 
 on:
   schedule:
-    - cron: "10,40 * * * *"   # UTC; backup if external trigger misses
+    # [VELOCIDAD F6] Cada 15 min (antes 10,40 = cada 30). El dato que lee el owner
+    # cargaba hasta 30 min de pura cola de espera encima de su edad en origen.
+    # Holgura medida sobre 200 runs: p50 251s · p90 451s, así que un ciclo cabe
+    # de sobra en la ventana; `concurrency.group` ya impide que dos se solapen.
+    - cron: "*/15 * * * *"   # UTC; backup if external trigger misses
   workflow_dispatch: {}        # manual trigger button
   repository_dispatch:
     types: [refresh-dashboard] # external trigger (VPS5 cron via PAT)
@@ -68,6 +72,10 @@ jobs:
           R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
           R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          # [EGRESS] los lectores del ciclo (fetch_ledger, carry_forward) se
+          # hidratan del espejo R2 (egress gratis); ante cualquier fallo de R2
+          # caen al camino Supabase original. Kill-switch: poner "supabase".
+          CI_READ_SOURCE: r2
         run: bash scripts/mirror.sh
 
       - name: Determinism gate (post_merge reproducible across processes)

@@ -8,6 +8,48 @@
   const originalFetch = window.fetch.bind(window);
   const signedUrlCache = new Map(); // path -> { url, exp }
   const URL_TTL_MS = 9 * 60 * 1000;  // signed URL is good for 10 min; refresh at 9
+  const SIGN_TTL_SEC = 600;
+
+  // [VELOCIDAD F6] Los objetos que el boot pide SIEMPRE. Se firman en un solo
+  // round-trip (kizStorage.signedUrls) en vez de uno por archivo. Añadir un
+  // path aquí solo adelanta su firma: si el objeto no existe, la API lo omite
+  // del lote y el fetch cae al camino individual de siempre.
+  // [EGRESS 2026-08-04] Recortado de 10 a los 3 que el primer paint necesita de
+  // verdad. Los demás (integrity_report, upload_health, watchdog_*, mcp_health,
+  // pipeline_timing, tuning) alimentan paneles secundarios y se firman lazy por
+  // el camino individual cuando app.js los pide — mismo mecanismo de siempre.
+  const BOOT_MANIFEST = [
+    "snapshot.json",
+    "history_recent.jsonl",
+    "bots/_manifest.json",
+  ];
+
+  // Persistencia por pestaña de las firmas vivas: un F5 dentro de la ventana de
+  // 9 min reutiliza las URLs y arranca la descarga del snapshot con CERO RTT de
+  // firma. Namespaced por usuario para que un cambio de sesión en la misma
+  // pestaña no herede las firmas de la anterior.
+  const SIGN_CACHE_KEY = "kiz.signed.v1";
+  function signCacheKey() {
+    return SIGN_CACHE_KEY + ":" + (window.kizUserEmail || "anon");
+  }
+  function loadSignCache() {
+    try {
+      const raw = sessionStorage.getItem(signCacheKey());
+      if (!raw) return;
+      const now = Date.now();
+      for (const [p, e] of Object.entries(JSON.parse(raw) || {})) {
+        if (e && e.url && e.exp > now) signedUrlCache.set(p, e);
+      }
+    } catch { /* private mode / JSON corrupto — se firma de cero */ }
+  }
+  function saveSignCache() {
+    try {
+      const out = {};
+      const now = Date.now();
+      for (const [p, e] of signedUrlCache) if (e.exp > now) out[p] = e;
+      sessionStorage.setItem(signCacheKey(), JSON.stringify(out));
+    } catch { /* quota / private mode — el caché en memoria sigue sirviendo */ }
+  }
 
   // Wait for session before issuing any data/* fetch.
   const sessionReady =
@@ -27,12 +69,47 @@
     return s.startsWith("data/") ? s.slice(5) : null;
   }
 
+  // Lote de firmas en vuelo. Un getSignedUrl de un path del manifiesto espera a
+  // que el lote cierre en vez de disparar su propia firma en paralelo (que era
+  // exactamente el RTT que este cambio elimina).
+  let batchSign = null;
+
+  function prewarmSignatures() {
+    if (!window.kizStorage || typeof window.kizStorage.signedUrls !== "function") {
+      return Promise.resolve();
+    }
+    const now = Date.now();
+    const missing = BOOT_MANIFEST.filter((p) => {
+      const c = signedUrlCache.get(p);
+      return !(c && c.exp > now);
+    });
+    if (!missing.length) return Promise.resolve();  // sessionStorage ya las tenía
+    batchSign = window.kizStorage
+      .signedUrls(missing, SIGN_TTL_SEC)
+      .then((rows) => {
+        const exp = Date.now() + URL_TTL_MS;
+        for (const r of rows) signedUrlCache.set(r.path, { url: r.url, exp });
+        saveSignCache();
+      })
+      .catch(() => { /* el lote es una optimización: su fallo cae al camino individual */ });
+    return batchSign;
+  }
+
   async function getSignedUrl(path) {
-    const cached = signedUrlCache.get(path);
+    let cached = signedUrlCache.get(path);
     if (cached && cached.exp > Date.now()) return cached.url;
+    const inFlight = batchSign;
+    if (inFlight && BOOT_MANIFEST.indexOf(path) !== -1) {
+      await inFlight;
+      cached = signedUrlCache.get(path);
+      if (cached && cached.exp > Date.now()) return cached.url;
+    }
     if (!window.kizStorage) return null;
-    const url = await window.kizStorage.signedUrl(path, 600);
-    if (url) signedUrlCache.set(path, { url, exp: Date.now() + URL_TTL_MS });
+    const url = await window.kizStorage.signedUrl(path, SIGN_TTL_SEC);
+    if (url) {
+      signedUrlCache.set(path, { url, exp: Date.now() + URL_TTL_MS });
+      saveSignCache();
+    }
     return url;
   }
 
@@ -41,13 +118,102 @@
   // secuenciales: boot → firmar → bajar). El primer fetch de app.js a
   // data/snapshot.json consume esta respuesta ya en vuelo; los siguientes
   // (refresh de 30 min, push) van por el camino normal con ETag.
+  // [VELOCIDAD F6] El prewarm ahora firma TODO el manifiesto del boot en la
+  // misma petición que antes gastaba solo en snapshot.json: el snapshot arranca
+  // su descarga igual de pronto y los otros ~9 JSONs se encuentran la firma ya
+  // hecha cuando app.js los pide.
   let snapshotPrewarm = null;
   sessionReady.then(() => {
+    // Dentro del then: auth-guard fija window.kizUserEmail justo ANTES de
+    // emitir kiz-session-ready, y la clave del caché va namespaced por usuario.
+    loadSignCache();
+    const signed = prewarmSignatures();
     snapshotPrewarm = (async () => {
-      const signed = await getSignedUrl("snapshot.json");
-      return signed ? originalFetch(signed) : null;
+      await signed;
+      const url = await getSignedUrl("snapshot.json");
+      return url ? originalFetch(url) : null;
     })().catch(() => null);
   });
+
+  // [VELOCIDAD F6] Ruta de borde content-addressed (/d/<sha>/<path>, ver api/d.js).
+  // El sha del ciclo se guarda en localStorage al verlo, así que la carga
+  // SIGUIENTE ya arranca sabiéndolo y no gasta ningún round-trip extra en
+  // averiguarlo. Si el sha guardado es de un ciclo viejo, la función responde
+  // 404 y aquí se cae a la URL firmada de siempre — la ruta de borde es una
+  // optimización, nunca la única forma de llegar al dato.
+  const CYCLE_SHA_KEY = "kiz.cycle.sha";
+  const SHA_RE = /^[a-f0-9]{64}$/;
+
+  function cycleSha() {
+    if (SHA_RE.test(window.kizCycleSha || "")) return window.kizCycleSha;
+    try {
+      const s = localStorage.getItem(CYCLE_SHA_KEY);
+      return SHA_RE.test(s || "") ? s : null;
+    } catch { return null; }
+  }
+
+  // app.js llama aquí cada vez que snapshot_meta le da un sha (boot, poll de
+  // respaldo y push Realtime), así que la ruta de borde se auto-corrige sola.
+  window.kizSetCycleSha = function (sha) {
+    if (!SHA_RE.test(sha || "")) return;
+    if (window.kizCycleSha === sha) return;
+    window.kizCycleSha = sha;
+    try { localStorage.setItem(CYCLE_SHA_KEY, sha); } catch { /* quota */ }
+  };
+
+  // Rutas que NO pueden ir por el borde: su cadencia es independiente del ciclo
+  // del snapshot (mcp-health cada 5 min, watchdog en su propio workflow), así
+  // que atarlas al sha del snapshot las serviría viejas hasta 15 min.
+  const OFF_CYCLE = new Set([
+    "mcp_health.json", "watchdog_status.json", "watchdog_history.json",
+  ]);
+
+  async function tryEdge(path, init) {
+    if (OFF_CYCLE.has(path)) return null;
+    const sha = cycleSha();
+    if (!sha) return null;
+    try {
+      const res = await originalFetch(`/d/${sha}/${path}`, init);
+      return res && res.ok ? res : null;   // 404 de ciclo viejo → firma normal
+    } catch { return null; }
+  }
+
+  // [RESILIENCIA R1] Failover a Cloudflare R2.
+  // El pipeline ya replica cada ciclo a R2 (`bob-failover`, parity_ok verificado)
+  // pero el dashboard nunca lo usaba: si Supabase Storage caía, la página se
+  // quedaba sin datos teniendo una copia perfecta al lado. Aquí se consume esa
+  // copia a través de un Worker que valida la sesión localmente (misma
+  // privacidad que hoy) y por eso sigue sirviendo durante una caída de Supabase.
+  // Inactivo mientras config.js no defina FAILOVER_URL → sin cambio de conducta.
+  const FAILOVER_URL = (window.__KIZ_CONFIG__ && window.__KIZ_CONFIG__.FAILOVER_URL) || null;
+  let failoverNotified = false;
+
+  async function failoverFetch(path, init) {
+    if (!FAILOVER_URL) return null;
+    try {
+      let token = null;
+      try {
+        const { data } = await window.kizSupabase.auth.getSession();
+        token = data && data.session ? data.session.access_token : null;
+      } catch { /* Auth caído: el token cacheado del arranque sigue sirviendo */ }
+      if (!token) return null;
+      const res = await originalFetch(
+        `${FAILOVER_URL.replace(/\/+$/, "")}/${encodeURI(path)}`,
+        { ...(init || {}), headers: { Authorization: `Bearer ${token}` } },
+      );
+      if (!res || !res.ok) return null;
+      if (!failoverNotified) {
+        failoverNotified = true;
+        console.warn("[kiz] Supabase Storage no responde — sirviendo desde el espejo R2");
+        try {
+          window.dispatchEvent(new CustomEvent("kiz-failover-active", { detail: { path } }));
+        } catch { /* no crítico */ }
+      }
+      return res;
+    } catch {
+      return null;   // el respaldo nunca puede empeorar el fallo original
+    }
+  }
 
   async function patchedFetch(input, init) {
     const rawUrl =
@@ -74,15 +240,30 @@
       const res = await pre;
       if (res && res.ok) return res;
     }
+    // [VELOCIDAD F6] Borde primero (cacheado en el POP más cercano), firma después.
+    const edge = await tryEdge(path, init);
+    if (edge) return edge;
     const signed = await getSignedUrl(path);
     if (!signed) {
+      // [RESILIENCIA R1] Sin firma (Storage o Auth caídos) → espejo R2.
+      const fb = await failoverFetch(path, init);
+      if (fb) return fb;
       return new Response(JSON.stringify({ error: "storage signed url failed", path }), {
         status: 404,
         headers: { "Content-Type": "application/json" },
       });
     }
     // Drop the original Request object — we use a fresh URL
-    return originalFetch(signed, init);
+    try {
+      const res = await originalFetch(signed, init);
+      if (res && res.ok) return res;
+      const fb = await failoverFetch(path, init);   // 5xx de Storage → espejo
+      return fb || res;
+    } catch (err) {
+      const fb = await failoverFetch(path, init);   // red caída → espejo
+      if (fb) return fb;
+      throw err;
+    }
   }
 
   window.fetch = patchedFetch;
@@ -90,7 +271,7 @@
 
 // ---------------------------------------------------------------------------
 // Live equity stream for the 5 active REAL accounts
-// (#32081/#43306 on VPS5 · #25425/#43411/#43414 on VPS6).
+// (#32081/#43306 on VPS3 · #25425/#43411/#43414 on VPS6).
 // Reads from public.live_real_state via Supabase Realtime + REST.
 // Published every ~3s by C:\mt5-mcp\live_publisher.py on each VPS (roster in
 // C:\mt5-mcp\.live_publisher.env), held alive by the Railway "kiz-live-bridge"
