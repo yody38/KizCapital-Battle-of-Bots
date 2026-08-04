@@ -29,6 +29,8 @@ from pathlib import Path
 from urllib import error as urlerror
 from urllib import request as urlrequest
 
+import r2_read
+
 ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = ROOT / "data"
 ENV_FILE = ROOT / ".env.local"
@@ -82,20 +84,35 @@ def key(r: dict):
 def hydrate(url: str, skey: str, obj: str, local_path: Path, key_fn, sort_key) -> list[dict] | None:
     """Fetch obj, union with local (never shrink), write. Returns merged rows,
     [] on first-run 404, None on error (caller aborts)."""
-    endpoint = f"{url.rstrip('/')}/storage/v1/object/{BUCKET}/{obj}"
-    req = urlrequest.Request(endpoint, headers={"Authorization": f"Bearer {skey}", "apikey": skey})
-    try:
-        with urlrequest.urlopen(req, timeout=30, context=_CTX) as resp:
-            remote = parse_lines(resp.read().decode("utf-8", errors="replace"))
-    except urlerror.HTTPError as exc:
-        if exc.code == 404:
-            print(f"[fetch_ledger] {obj} not on Supabase yet (404) — first run, leaving local as-is")
-            return []
-        print(f"[fetch_ledger] HTTP {exc.code} fetching {obj} — ABORT (won't risk clobber)", file=sys.stderr)
-        return None
-    except Exception as exc:  # noqa: BLE001
-        print(f"[fetch_ledger] error fetching {obj}: {exc} — ABORT (won't risk clobber)", file=sys.stderr)
-        return None
+    # [EGRESS] R2 primero cuando CI_READ_SOURCE=r2; cualquier fallo de R2
+    # (incluido 404: el espejo puede ir por detrás) cae a Supabase con la
+    # semántica ABORT original intacta.
+    body: bytes | None = None
+    source = "supabase"
+    if r2_read.read_source() == "r2":
+        try:
+            body = r2_read.r2_get_bytes(obj)
+            source = "r2"
+        except Exception as exc:  # noqa: BLE001
+            print(f"[fetch_ledger] r2 {obj}: {exc} — fallback a Supabase", file=sys.stderr)
+    if body is None:
+        endpoint = f"{url.rstrip('/')}/storage/v1/object/{BUCKET}/{obj}"
+        req = urlrequest.Request(endpoint, headers={"Authorization": f"Bearer {skey}", "apikey": skey})
+        try:
+            with urlrequest.urlopen(req, timeout=30, context=_CTX) as resp:
+                body = resp.read()
+        except urlerror.HTTPError as exc:
+            if exc.code == 404:
+                print(f"[fetch_ledger] {obj} not on Supabase yet (404) — first run, leaving local as-is")
+                return []
+            print(f"[fetch_ledger] HTTP {exc.code} fetching {obj} — ABORT (won't risk clobber)", file=sys.stderr)
+            return None
+        except Exception as exc:  # noqa: BLE001
+            print(f"[fetch_ledger] error fetching {obj}: {exc} — ABORT (won't risk clobber)", file=sys.stderr)
+            return None
+        if r2_read.read_source() == "supabase":
+            r2_read.shadow_compare(obj, body, "[fetch_ledger]")
+    remote = parse_lines(body.decode("utf-8", errors="replace"))
 
     local = parse_lines(local_path.read_text(encoding="utf-8")) if local_path.exists() else []
 
@@ -112,7 +129,7 @@ def hydrate(url: str, skey: str, obj: str, local_path: Path, key_fn, sort_key) -
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     body = "\n".join(json.dumps(r, ensure_ascii=False) for r in merged)
     local_path.write_text(body + ("\n" if body else ""), encoding="utf-8")
-    print(f"[fetch_ledger] {obj}: remote={len(remote)} local={len(local)} -> {len(merged)} lines")
+    print(f"[fetch_ledger] {obj} [{source}]: remote={len(remote)} local={len(local)} -> {len(merged)} lines")
     return merged
 
 

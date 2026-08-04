@@ -67,3 +67,4 @@ node_modules/
 data/_audit/
 supabase/.temp/
 config/vps_registry.local.json
+.vercel

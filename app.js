@@ -1517,7 +1517,9 @@ function renderNewBots() {
   }
   if (empty) empty.hidden = true;
 
-  tbody.innerHTML = allBots.map((b, i) => {
+  // [ESCALA E6] Antes: innerHTML de TODA la ventana de bots nuevos de golpe
+  // (452 filas medidas con 1.000 bots). Ahora: progresivo con tope + scroll.
+  paintRowsProgressive(tbody, allBots, (b, i) => {
     const symbols = (b.symbols || []).join(', ') || '—';
     const netCls = b.net_profit >= 0 ? 'profit-positive' : 'profit-negative';
     const wins = b.wins || 0;
@@ -1542,7 +1544,7 @@ function renderNewBots() {
         <td class="num"><strong>${days}d</strong></td>
       </tr>
     `;
-  }).join('');
+  }, 30, 60, 90);
 }
 
 // --- Podium --------------------------------------------------------------
@@ -1706,7 +1708,13 @@ function rankBadge(n) {
 // document.body (ver L2200), no enganchados fila a fila.
 const _paintTokens = new WeakMap();  // tbody -> token del render vigente
 
-function paintRowsProgressive(tbody, items, rowHtml, firstChunk = 40, chunk = 80) {
+// [ESCALA E6 2026-08-04] Tope de DOM + carga al scroll. Con 1.000 bots el
+// progresivo puro seguia pintando la tabla ENTERA (~22 nodos/fila = ~22.000
+// nodos que nadie ve). Ahora los trozos en idle paran en `idleCap` filas y el
+// resto se anexa solo cuando el usuario se acerca al final (centinela con
+// IntersectionObserver, margen 600px para que nunca se vea el hueco). El token
+// sigue abortando trozos pendientes cuando llega un render nuevo.
+function paintRowsProgressive(tbody, items, rowHtml, firstChunk = 40, chunk = 80, idleCap = 120) {
   // Token: si llega un render nuevo (refresh, filtro, orden), los trozos
   // pendientes del anterior se descartan en vez de anexar filas obsoletas.
   const token = (_paintTokens.get(tbody) || 0) + 1;
@@ -1717,13 +1725,42 @@ function paintRowsProgressive(tbody, items, rowHtml, firstChunk = 40, chunk = 80
 
   const idle = window.requestIdleCallback || ((fn) => setTimeout(() => fn({ timeRemaining: () => 0 }), 16));
   let i = firstChunk;
-  const step = () => {
-    if (_paintTokens.get(tbody) !== token) return;   // render superado: abortar
+  const append = () => {
     const slice = items.slice(i, i + chunk);
-    if (!slice.length) return;
+    if (!slice.length) return false;
     tbody.insertAdjacentHTML('beforeend', slice.map((b, k) => rowHtml(b, i + k)).join(''));
     i += chunk;
-    if (i < items.length) idle(step);
+    return i < items.length;
+  };
+  const armSentinel = () => {
+    if (typeof IntersectionObserver === 'undefined') {
+      // Sin IO (navegador viejo): comportamiento anterior — todo en idle.
+      const stepAll = () => {
+        if (_paintTokens.get(tbody) !== token) return;
+        if (append()) idle(stepAll);
+      };
+      idle(stepAll);
+      return;
+    }
+    const cols = (tbody.previousElementSibling?.querySelectorAll('th') || []).length || 1;
+    const sentinel = document.createElement('tr');
+    sentinel.className = 'rows-sentinel';
+    sentinel.innerHTML = `<td colspan="${cols}" style="padding:6px;text-align:center;color:var(--text-dim,#888)">···</td>`;
+    tbody.appendChild(sentinel);
+    const io = new IntersectionObserver((entries) => {
+      if (!entries.some((e) => e.isIntersecting)) return;
+      if (_paintTokens.get(tbody) !== token) { io.disconnect(); sentinel.remove(); return; }
+      sentinel.remove();
+      const more = append();
+      if (more) tbody.appendChild(sentinel);
+      else io.disconnect();
+    }, { rootMargin: '600px 0px' });
+    io.observe(sentinel);
+  };
+  const step = () => {
+    if (_paintTokens.get(tbody) !== token) return;   // render superado: abortar
+    if (i >= idleCap) { armSentinel(); return; }     // tope: el resto, al scroll
+    if (append()) idle(step);
   };
   idle(step);
 }
@@ -1739,7 +1776,7 @@ function renderTable() {
   }
   empty.hidden = true;
   paintRowsProgressive(tbody, bots, (b, i) => `
-    <tr class="bot-row" data-vps="${b.vps}" data-login="${b.account_login}" data-magic="${b.magic}" style="animation-delay: ${Math.min(i * 15, 400)}ms">
+    <tr class="bot-row" data-vps="${b.vps}" data-login="${b.account_login}" data-magic="${b.magic}"${i < 40 ? ` style="animation-delay: ${Math.min(i * 15, 400)}ms"` : ''}>
       <td>${rankBadge(b._rank)}</td>
       <td>${b.magic}</td>
       <td>${vpsBadge(b.vps)}</td>

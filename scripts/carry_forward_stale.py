@@ -27,6 +27,9 @@ import sys
 from pathlib import Path
 from urllib import request as urlrequest, error as urlerror
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import r2_read  # noqa: E402
+
 BUCKET = "dashboard-data"
 
 
@@ -52,6 +55,13 @@ def load_env(data_dir: Path) -> tuple[str, str]:
 
 
 def storage_get(url: str, key: str, obj_path: str) -> bytes:
+    # [EGRESS] R2 primero cuando CI_READ_SOURCE=r2; cualquier fallo de R2 cae
+    # al camino Supabase original (fail-closed intacto: si ambos fallan, aborta).
+    if r2_read.read_source() == "r2":
+        try:
+            return r2_read.r2_get_bytes(obj_path)
+        except Exception as e:  # noqa: BLE001
+            print(f"carry_forward: r2 {obj_path}: {e} — fallback a Supabase", file=sys.stderr)
     endpoint = f"{url}/storage/v1/object/{BUCKET}/{obj_path}"
     req = urlrequest.Request(endpoint, headers={"apikey": key, "Authorization": f"Bearer {key}"})
     with urlrequest.urlopen(req, timeout=30) as r:

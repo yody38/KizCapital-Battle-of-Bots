@@ -31,7 +31,15 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: python3 scripts/integrity_watchdog.py
+          # [EGRESS] el GET pesado (snapshot.json) sale del espejo R2; ante
+          # cualquier fallo cae a Supabase. Kill-switch: poner "supabase".
+          CI_READ_SOURCE: r2
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+        run: |
+          python3 -m pip install --quiet boto3
+          python3 scripts/integrity_watchdog.py
 
       - name: Upload health log
         if: always()

@@ -14,16 +14,13 @@
   // round-trip (kizStorage.signedUrls) en vez de uno por archivo. Añadir un
   // path aquí solo adelanta su firma: si el objeto no existe, la API lo omite
   // del lote y el fetch cae al camino individual de siempre.
+  // [EGRESS 2026-08-04] Recortado de 10 a los 3 que el primer paint necesita de
+  // verdad. Los demás (integrity_report, upload_health, watchdog_*, mcp_health,
+  // pipeline_timing, tuning) alimentan paneles secundarios y se firman lazy por
+  // el camino individual cuando app.js los pide — mismo mecanismo de siempre.
   const BOOT_MANIFEST = [
     "snapshot.json",
     "history_recent.jsonl",
-    "integrity_report.json",
-    "upload_health.json",
-    "watchdog_status.json",
-    "watchdog_history.json",
-    "mcp_health.json",
-    "pipeline_timing.json",
-    "tuning.json",
     "bots/_manifest.json",
   ];
 

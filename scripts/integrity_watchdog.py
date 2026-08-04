@@ -49,6 +49,8 @@ except Exception:  # alerting must never break the watchdog
     def tg_send(text, **kw):  # type: ignore[misc]
         return "unavailable"
 
+import r2_read  # noqa: E402  — [EGRESS] lectura del espejo, ver r2_read.py
+
 ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = ROOT / "data"
 ENV_FILE = ROOT / ".env.local"
@@ -464,7 +466,21 @@ def main() -> int:
             info["steps"]["upload"] = up
 
         # Step 4 — HEAD probe per-bot files
-        code, snap = supa_get_json(url, key, "snapshot.json")
+        # [EGRESS] El contenido del snapshot (único GET pesado del watchdog) sale
+        # del espejo R2 cuando CI_READ_SOURCE=r2 — la paridad R2==Supabase ya la
+        # verifica el uploader cada ciclo (parity_ok) y la frescura de la COPIA de
+        # Supabase sigue vigilada por el lag de integrity_report y los HEAD/list.
+        # Cualquier fallo de R2 cae al GET de Supabase original.
+        code, snap = None, None
+        if r2_read.read_source() == "r2":
+            try:
+                snap = json.loads(r2_read.r2_get_bytes("snapshot.json"))
+                code = 200
+            except Exception as exc:  # noqa: BLE001
+                print(f"[watchdog] r2 snapshot.json: {exc} — fallback a Supabase", file=sys.stderr)
+                snap = None
+        if snap is None:
+            code, snap = supa_get_json(url, key, "snapshot.json")
         if code != 200 or not snap:
             fails.append(f"supabase snapshot.json fetch http={code}")
             info["steps"]["files"] = {"error": f"snapshot_http={code}"}

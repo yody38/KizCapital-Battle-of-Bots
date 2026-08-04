@@ -50,6 +50,66 @@ async function currentSha(url, key) {
   return sha;
 }
 
+// --- [EGRESS 2026-08-04] upstream preferido: espejo R2 (salida gratis) -----
+// El bucket espejo recibe dual-write verificado (parity_ok) cada ciclo, así que
+// servir desde R2 da los mismos bytes sin gastar egress de Supabase. Ante
+// CUALQUIER fallo (env ausente, firma, red, 404) se cae al upstream Supabase
+// original: la resiliencia no empeora — mejora, porque /d/ sigue vivo aunque
+// Storage se caiga. Firma SigV4 a mano con Web Crypto: este proyecto no tiene
+// build step y no puede importar dependencias.
+
+const EMPTY_SHA256 = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855';
+
+function hex(buf) {
+  return [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+async function sha256hex(s) {
+  return hex(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(s)));
+}
+
+async function hmacBytes(keyBytes, msg) {
+  const key = await crypto.subtle.importKey(
+    'raw', keyBytes, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign'],
+  );
+  return new Uint8Array(await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(msg)));
+}
+
+async function r2Fetch(path) {
+  const acct = process.env.R2_ACCOUNT_ID;
+  const ak = process.env.R2_ACCESS_KEY_ID;
+  const sk = process.env.R2_SECRET_ACCESS_KEY;
+  const bucket = process.env.R2_BUCKET || 'bob-failover';
+  if (!acct || !ak || !sk) return null;
+  try {
+    const host = `${acct}.r2.cloudflarestorage.com`;
+    const canonicalUri = '/' + [bucket, ...path.split('/')].map(encodeURIComponent).join('/');
+    const amzDate = new Date().toISOString().replace(/[-:]/g, '').slice(0, 15) + 'Z';
+    const dateStamp = amzDate.slice(0, 8);
+    const scope = `${dateStamp}/auto/s3/aws4_request`;
+    const signedHeaders = 'host;x-amz-content-sha256;x-amz-date';
+    const canonical = [
+      'GET', canonicalUri, '',
+      `host:${host}\nx-amz-content-sha256:${EMPTY_SHA256}\nx-amz-date:${amzDate}\n`,
+      signedHeaders, EMPTY_SHA256,
+    ].join('\n');
+    const strToSign = ['AWS4-HMAC-SHA256', amzDate, scope, await sha256hex(canonical)].join('\n');
+    let k = await hmacBytes(new TextEncoder().encode('AWS4' + sk), dateStamp);
+    for (const part of ['auto', 's3', 'aws4_request']) k = await hmacBytes(k, part);
+    const sig = hex((await hmacBytes(k, strToSign)).buffer);
+    const res = await fetch(`https://${host}${canonicalUri}`, {
+      headers: {
+        Authorization: `AWS4-HMAC-SHA256 Credential=${ak}/${scope}, SignedHeaders=${signedHeaders}, Signature=${sig}`,
+        'x-amz-date': amzDate,
+        'x-amz-content-sha256': EMPTY_SHA256,
+      },
+    });
+    return res.ok ? res : null;
+  } catch {
+    return null;
+  }
+}
+
 function deny(status, msg) {
   return new Response(JSON.stringify({ error: msg }), {
     status,
@@ -76,11 +136,16 @@ export default async function handler(req) {
   if (!live) return deny(503, 'cycle sha unavailable');
   if (sha !== live) return deny(404, 'stale cycle');
 
-  const upstream = await fetch(
-    `${SUPABASE_URL}/storage/v1/object/${BUCKET}/${path}`,
-    { headers: { Authorization: `Bearer ${SERVICE_KEY}` } },
-  );
-  if (!upstream.ok) return deny(upstream.status === 404 ? 404 : 502, 'upstream error');
+  let upstreamSource = 'r2';
+  let upstream = await r2Fetch(path);
+  if (!upstream) {
+    upstreamSource = 'supabase';
+    upstream = await fetch(
+      `${SUPABASE_URL}/storage/v1/object/${BUCKET}/${path}`,
+      { headers: { Authorization: `Bearer ${SERVICE_KEY}` } },
+    );
+    if (!upstream.ok) return deny(upstream.status === 404 ? 404 : 502, 'upstream error');
+  }
 
   const headers = new Headers();
   // [V1] `application/json` tambien para .jsonl: el CDN comprime por content-type
@@ -98,6 +163,8 @@ export default async function handler(req) {
   // respuestas de rutas distintas bajo la misma entrada.
   headers.set('Vary', 'Accept-Encoding');
   headers.set('X-Content-Type-Options', 'nosniff');
+  // Observabilidad: de qué upstream salió el byte (r2 = egress gratis).
+  headers.set('X-Bob-Upstream', upstreamSource);
 
   return new Response(req.method === 'HEAD' ? null : upstream.body, { status: 200, headers });
 }
