@@ -4188,6 +4188,42 @@ def main():
         b["trades_30d"] = sum(1 for c in _cts if (_now_ts - c) <= 30 * 86400)
         b["trades_90d"] = sum(1 for c in _cts if (_now_ts - c) <= 90 * 86400)
 
+        # [Fase 5] Campos para las vistas preset — derivados de la serie diaria
+        # (deterministas: anclados a la ÚLTIMA fecha de la serie, no al reloj).
+        if daily_series and len(daily_series) >= 10:
+            try:
+                _rows = [r for r in daily_series if r.get("date")]
+                _last = datetime.fromisoformat(_rows[-1]["date"]).date()
+                _cut7 = (_last - timedelta(days=7)).isoformat()
+                b["net_7d"] = round(sum((r.get("daily_net") or 0.0) for r in _rows
+                                        if r["date"] > _cut7), 2)
+                _cums = [r.get("cum_net", 0.0) or 0.0 for r in _rows]
+                _n = len(_cums)
+                _xm = (_n - 1) / 2.0
+                _ym = sum(_cums) / _n
+                _sxx = sum((i - _xm) ** 2 for i in range(_n))
+                _sxy = sum((i - _xm) * (y - _ym) for i, y in enumerate(_cums))
+                _syy = sum((y - _ym) ** 2 for y in _cums)
+                # R² de la equity vs tiempo: 1.0 = línea recta (máxima estabilidad)
+                b["stability_score"] = round((_sxy * _sxy) / (_sxx * _syy), 3) \
+                    if _sxx > 0 and _syy > 1e-9 else None
+
+                def _slope(rows_n):
+                    ys = _cums[-rows_n:]
+                    m = len(ys)
+                    if m < 5:
+                        return None
+                    xm = (m - 1) / 2.0
+                    ym = sum(ys) / m
+                    sxx = sum((i - xm) ** 2 for i in range(m))
+                    return sum((i - xm) * (y - ym) for i, y in enumerate(ys)) / sxx if sxx else None
+                _s30, _s90 = _slope(30), _slope(90)
+                # improvement > 0: el último mes gana MÁS por día que el trimestre
+                b["improvement"] = round(_s30 - _s90, 3) \
+                    if (_s30 is not None and _s90 is not None) else None
+            except Exception:  # noqa: BLE001
+                pass
+
         inst = institutional_metrics(daily_series, trades, bal)
         # Solo guardar si al menos una métrica se calculó
         if any(inst.get(k) is not None for k in

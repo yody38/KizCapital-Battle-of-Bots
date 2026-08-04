@@ -4397,6 +4397,13 @@ const QUERY_FIELDS = {
   podium_streak: b => b.tribunal_history ? b.tribunal_history.consecutive_podiums : null,
   ready_streak: b => b.ready_streak_days,
   scientific_score: b => b.scientific_score, // [Science Bridge] score del lab; null para EAs legacy (jamás imputado)
+  net_7d: b => b.net_7d,               // [Fase 5] ventana semanal (anclada a la última fecha de la serie)
+  net_30d: b => b.net_30d,
+  net_90d: b => b.net_90d,
+  stability: b => b.stability_score,   // R² de la equity vs tiempo (1 = línea recta)
+  improvement: b => b.improvement,     // slope 30d − slope 90d en USD/día (positivo = acelerando)
+  consistency: b => b.months_positive_pct,
+  recovery: b => b.recovery_factor,
   // boolean
   science_stale: b => !!(b.science && b.science.stale),
   drift_flag: b => !!(b.drift && b.drift.flag),
