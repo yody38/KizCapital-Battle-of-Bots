@@ -250,19 +250,10 @@ function applySnapshot(data) {
     ((data.real_portfolio && data.real_portfolio.open_positions) || []).forEach(p => { if (p.magic) state.realMagics.add(p.magic); });
   }
   state.demoAccounts = (data.accounts || []).filter(a => !a.is_real);
-  // Only show demo accounts where balance > $10,000 (initial deposit for all demo accounts)
-  const DEMO_INITIAL_DEPOSIT = 10000;
   // Exclude bots already running on a real account — by login AND by magic (an EA
   // deployed to real must not compete in any section, even its demo twin).
   const allDemoBots = (data.bots || []).filter(b => !state.realLogins.has(b.account_login) && !state.realMagics.has(b.magic));
-  const profitableLogins = new Set(
-    state.demoAccounts
-      .filter(a => (a.balance || 0) > DEMO_INITIAL_DEPOSIT)
-      .map(a => String(a.login))
-  );
-  state.demoAccounts = state.demoAccounts.filter(a => profitableLogins.has(String(a.login)));
   state.demoBots = allDemoBots
-    .filter(b => profitableLogins.has(String(b.account_login)))
     .filter(b => !isNewBot(b))  // new bots live only in the Bots Nuevos window
     .map((b, i) => ({ ...b, _rank: i + 1, _wilson: wilsonLB(b.wins || 0, b.trades || 0) * 100 }));
   render();
@@ -620,11 +611,19 @@ function drawSpark(canvas, points, color) {
       datasets: [{
         data: points.map(p => p.equity),
         borderColor: color,
-        backgroundColor: color + '22',
-        borderWidth: 1.5,
+        borderWidth: 1.8,
         pointRadius: 0,
         tension: 0.35,
         fill: true,
+        // Degradado vertical: intenso junto a la línea, transparente en la base.
+        backgroundColor: (c) => {
+          const area = c.chart.chartArea;
+          if (!area) return color + '22';
+          const g = c.chart.ctx.createLinearGradient(0, area.top, 0, area.bottom);
+          g.addColorStop(0, color + '4d');
+          g.addColorStop(1, color + '00');
+          return g;
+        },
       }],
     },
     options: {
@@ -972,7 +971,9 @@ function updateRealRiskCard(login, vals, flash = false) {
 // (1h/24h/7d/30d, ≤1000 filas por llamada). Si la tabla aún no tiene datos el
 // panel queda oculto (deploy shadow-first, sin ruido).
 const realHistory = { win: '24h', chart: null, timer: null, wired: false };
-const REAL_HISTORY_COLORS = ['#e8c547', '#3ddc97', '#6ea8fe', '#ff6b8b', '#b98bff', '#ffb86b'];
+// Paleta categórica validada (dataviz: banda L oscura 0.48–0.67, CVD, contraste ≥3:1
+// sobre #0a0b12). Identidad por leyenda + tooltip, orden fijo — nunca ciclar hues nuevos.
+const REAL_HISTORY_COLORS = ['#ae8f06', '#04a66c', '#5089dc', '#df4e71', '#9b6cdd', '#c58131'];
 
 async function fetchRealHistory(win) {
   if (!window.kizSupabase) return [];
@@ -1034,16 +1035,17 @@ function renderRealHistoryChart(rows) {
     label: `#${login}`,
     data: pts,
     borderColor: REAL_HISTORY_COLORS[i % REAL_HISTORY_COLORS.length],
-    backgroundColor: 'transparent',
-    borderWidth: 1.6,
+    backgroundColor: REAL_HISTORY_COLORS[i % REAL_HISTORY_COLORS.length],
+    borderWidth: 2,
     pointRadius: 0,
-    tension: 0.25,
+    pointHoverRadius: 4,
+    tension: 0.3,
   }));
   if (byLogin.size > 1 && total.some(p => p.y !== null)) {
     datasets.push({
       label: 'Total', data: total, borderColor: '#cfd5e6', borderDash: [6, 4],
-      backgroundColor: 'transparent', borderWidth: 1.4, pointRadius: 0, tension: 0.25,
-      spanGaps: false,
+      backgroundColor: '#cfd5e6', borderWidth: 1.6, pointRadius: 0, pointHoverRadius: 4,
+      tension: 0.3, spanGaps: false,
     });
   }
 
@@ -1057,7 +1059,7 @@ function renderRealHistoryChart(rows) {
       animation: false,
       interaction: { mode: 'nearest', axis: 'x', intersect: false },
       plugins: {
-        legend: { labels: { color: '#9aa3bb', boxWidth: 14 } },
+        legend: { labels: { color: '#9aa3bb', usePointStyle: true, pointStyle: 'circle', boxWidth: 8, boxHeight: 8, padding: 14 } },
         tooltip: { callbacks: { label: (c) => `${c.dataset.label}: ${fmt.usd(c.parsed.y)}` } },
       },
       scales: {
@@ -1113,25 +1115,46 @@ async function renderSystemHealth() {
 
   const hist = Array.isArray(history) ? history : [];
   const now = Date.now();
-  const uptime = (days) => {
+
+  // Severidad INFRA vs DATOS — espejo de INFRA_FAIL_PATTERNS en
+  // integrity_watchdog.py (mantener en sync). Filas nuevas ya traen
+  // result:'warn'; las viejas se reclasifican aquí por sus mensajes de fail.
+  const INFRA_PATTERNS = ['mcp-health critical', 'mcp_health.json', 'artifact_download_failed',
+    'ci_list_failed', "missing 'upload' section", 'workflows en rojo', 'failover R2'];
+  const isInfraFail = (f) => INFRA_PATTERNS.some(p => String(f).includes(p));
+  // ok | warn (solo infra) | fail (datos)
+  const sevOf = (h) => {
+    if (!h || h.result === 'ok') return 'ok';
+    if (h.result === 'warn') return 'warn';
+    const fails = h.fails || [];
+    return (fails.length && fails.every(isInfraFail)) ? 'warn' : 'fail';
+  };
+
+  // Dos uptimes: DATOS (lo que importa — el dashboard sirvió datos íntegros;
+  // ok+warn cuentan como arriba) e INFRA (sondas/tooling perfectos).
+  const uptime = (days, mode) => {
     const cut = now - days * 86400e3;
     const rows = hist.filter(h => (Date.parse(h.ts) || 0) >= cut);
     if (!rows.length) return null;
-    const ok = rows.filter(h => h.result === 'ok').length;
-    return { pct: (100 * ok / rows.length), n: rows.length };
+    const up = rows.filter(h => mode === 'data' ? sevOf(h) !== 'fail' : sevOf(h) === 'ok').length;
+    return { pct: (100 * up / rows.length), n: rows.length };
   };
-  const u7 = uptime(7), u30 = uptime(30);
-  const upCls = (u) => u == null ? '' : u.pct >= 99 ? 'risk-green' : u.pct >= 95 ? 'risk-amber' : 'risk-red';
+  const d7 = uptime(7, 'data'), d30 = uptime(30, 'data');
+  const i7 = uptime(7, 'infra'), i30 = uptime(30, 'infra');
+  const upCls = (u) => u == null ? '' : u.pct >= 97 ? 'risk-green' : u.pct >= 90 ? 'risk-amber' : 'risk-red';
   const fmtUp = (u) => u == null ? '—' : `${u.pct.toFixed(1)}%`;
 
   // Chips del summary (visibles con el panel colapsado).
   const chips = document.getElementById('health-summary-chips');
   if (chips) {
-    const last = status ? status.result : (hist[hist.length - 1] || {}).result;
+    const lastSev = sevOf(status || hist[hist.length - 1] || null);
+    const wd = lastSev === 'ok' ? ['risk-green', 'watchdog OK']
+             : lastSev === 'warn' ? ['risk-amber', 'watchdog ⚠ infra']
+             : ['risk-red', 'watchdog FAIL'];
     chips.innerHTML = `
-      <span class="health-chip ${last === 'ok' ? 'risk-green' : 'risk-red'}">watchdog ${last === 'ok' ? 'OK' : 'FAIL'}</span>
-      <span class="health-chip ${upCls(u7)}">uptime 7d ${fmtUp(u7)}</span>
-      <span class="health-chip ${upCls(u30)}">30d ${fmtUp(u30)}</span>`;
+      <span class="health-chip ${wd[0]}">${wd[1]}</span>
+      <span class="health-chip ${upCls(d7)}">datos 7d ${fmtUp(d7)}</span>
+      <span class="health-chip ${upCls(d30)}">30d ${fmtUp(d30)}</span>`;
   }
 
   const grid = document.getElementById('health-grid');
@@ -1146,10 +1169,13 @@ async function renderSystemHealth() {
     const lastTs = status && status.ts ? fmt.shortTime(status.ts) : '—';
     const tile = (label, value, cls = '') =>
       `<div class="health-tile"><span class="metric-label">${label}</span><strong class="${cls}">${value}</strong></div>`;
+    const lastCls = { ok: 'risk-green', warn: 'risk-amber', fail: 'risk-red' }[sevOf(status)] || '';
     grid.innerHTML = [
-      tile('Uptime watchdog 7d', `${fmtUp(u7)}${u7 ? ` <small>(${u7.n} checks)</small>` : ''}`, upCls(u7)),
-      tile('Uptime watchdog 30d', `${fmtUp(u30)}${u30 ? ` <small>(${u30.n} checks)</small>` : ''}`, upCls(u30)),
-      tile('Último check', lastTs, status && status.result === 'ok' ? 'risk-green' : 'risk-red'),
+      tile('Datos 7d', `${fmtUp(d7)}${d7 ? ` <small>(${d7.n} checks)</small>` : ''}`, upCls(d7)),
+      tile('Datos 30d', `${fmtUp(d30)}${d30 ? ` <small>(${d30.n} checks)</small>` : ''}`, upCls(d30)),
+      tile('Infra 7d', fmtUp(i7), upCls(i7)),
+      tile('Infra 30d', fmtUp(i30), upCls(i30)),
+      tile('Último check', lastTs, lastCls),
       tile('Stream live', liveAge == null ? 'sin datos' : `${liveAge.toFixed(0)}s · ${transport}`,
            liveAge == null ? 'risk-red' : liveAge < 20 ? 'risk-green' : 'risk-red'),
       tile('Snapshot', snapAgeMin == null ? '—' : `hace ${snapAgeMin} min`,
@@ -1161,12 +1187,17 @@ async function renderSystemHealth() {
 
   const list = document.getElementById('health-events-list');
   if (list) {
-    const incidents = hist.filter(h => h.result === 'fail').slice(-8).reverse();
-    list.innerHTML = incidents.length
+    // Incidentes de DATOS (los que importan). Los de solo-infra se resumen en una línea.
+    const incidents = hist.filter(h => sevOf(h) === 'fail').slice(-8).reverse();
+    const infraCount = hist.filter(h => sevOf(h) === 'warn').length;
+    const items = incidents.length
       ? incidents.map(h => `<li><span class="health-ev-ts">${fmt.shortTime(h.ts)}</span> ${
-          (h.fails || []).slice(0, 2).map(f => `<code>${String(f).slice(0, 110)}</code>`).join(' · ')
+          (h.fails || []).filter(f => !isInfraFail(f)).slice(0, 2).map(f => `<code>${String(f).slice(0, 110)}</code>`).join(' · ')
         }</li>`).join('')
-      : '<li class="empty-state">Sin incidentes registrados 🎉</li>';
+      : '<li class="empty-state">Sin incidentes de datos 🎉</li>';
+    list.innerHTML = items + (infraCount
+      ? `<li class="empty-state">+ ${infraCount} avisos de infraestructura (sondas SSH/tooling) sin impacto en datos</li>`
+      : '');
   }
 }
 
@@ -1473,9 +1504,9 @@ function renderNewBots() {
   const now = Date.now();
   const cutoff = now - NEW_BOTS_DAYS * 24 * 60 * 60 * 1000;
 
-  // Source: demo bots only (exclude real-account bots — they live only in the Real Accounts section), magic ≠ 0, ≥1 closed trade, first_trade within 30d
+  // Source: demo bots only (exclude real-account bots by login AND by magic — they live only in the Real Accounts section), magic ≠ 0, ≥1 closed trade, first_trade within 30d
   let allBots = (state.snapshot.bots || [])
-    .filter(b => !state.realLogins.has(b.account_login))
+    .filter(b => !state.realLogins.has(b.account_login) && !state.realMagics.has(b.magic))
     .filter(b => b.magic && b.magic !== 0)
     .filter(b => (b.trades || 0) >= 1)
     .map(b => {
@@ -7231,11 +7262,23 @@ function ensureTickerChart() {
   realSuite.ticker.chart = new Chart(canvas, {
     type: 'line',
     data: { labels: [], datasets: [{
-      data: [], borderColor: '#3ddc84', borderWidth: 1.6, pointRadius: 0,
-      fill: true, backgroundColor: 'rgba(61,220,132,0.08)', tension: 0.25,
+      data: [], borderColor: '#3ddc97', borderWidth: 2, pointRadius: 0,
+      pointHoverRadius: 4, pointHoverBackgroundColor: '#3ddc97',
+      fill: true, tension: 0.3,
+      // Degradado vertical bajo la línea — el relleno se desvanece hacia la base.
+      backgroundColor: (c) => {
+        const area = c.chart.chartArea;
+        if (!area) return 'rgba(61,220,151,0.10)';
+        const g = c.chart.ctx.createLinearGradient(0, area.top, 0, area.bottom);
+        g.addColorStop(0, 'rgba(61,220,151,0.30)');
+        g.addColorStop(0.55, 'rgba(61,220,151,0.10)');
+        g.addColorStop(1, 'rgba(61,220,151,0)');
+        return g;
+      },
     }] },
     options: {
       responsive: true, maintainAspectRatio: false, animation: false,
+      interaction: { intersect: false, mode: 'index' },
       plugins: { legend: { display: false }, tooltip: { intersect: false, mode: 'index' } },
       scales: {
         x: { ticks: { color: '#8b90a7', maxTicksLimit: 8, maxRotation: 0 }, grid: { display: false } },

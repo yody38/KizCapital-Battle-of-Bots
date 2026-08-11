@@ -14,7 +14,7 @@
     { id: 'sharpe', icon: '⚡', label: 'Sharpe', q: 'trades >= 30 AND stage != "REAL" SORT BY sharpe DESC LIMIT 20' },
     { id: 'recovery', icon: '🔄', label: 'Recovery', q: 'trades >= 30 AND stage != "REAL" SORT BY recovery DESC LIMIT 20' },
     { id: 'lowdd', icon: '🛡️', label: 'Menor DD', q: 'trades >= 30 AND net > 0 AND stage != "REAL" SORT BY dd_pct ASC LIMIT 20' },
-    { id: 'science', icon: '🔬', label: 'Score científico', q: 'evidence_tier != "UNKNOWN" SORT BY scientific_score DESC LIMIT 20' },
+    { id: 'science', icon: '🔬', label: 'Score científico', q: 'evidence_tier != "UNKNOWN" AND stage != "REAL" SORT BY scientific_score DESC LIMIT 20' },
     { id: 'promotion', icon: '🎯', label: 'Score promoción', q: 'stage = "CANDIDATE" OR stage = "OBSERVATION" SORT BY score_shrunk DESC LIMIT 20' },
     { id: 'improving', icon: '📈', label: 'Mejorando', q: 'trades >= 30 AND stage != "REAL" SORT BY improvement DESC LIMIT 20' },
   ];
@@ -81,12 +81,15 @@
   ];
 
   const NAV_CSS = `
-    #real-subnav { position:sticky; top:0; z-index:30; display:flex; flex-wrap:wrap; gap:5px;
-      padding:8px 0; margin-bottom:6px; backdrop-filter:blur(8px);
-      background:color-mix(in srgb, canvas 82%, transparent); }
-    .rn-chip { font-size:.72rem; padding:3px 9px; border-radius:999px; cursor:pointer;
-      border:1px solid rgba(128,128,128,.3); background:rgba(128,128,128,.07); color:inherit; }
-    .rn-chip:hover { border-color:#e0a552; color:#e0a552; }
+    #real-subnav { position:sticky; top:0; z-index:30; display:flex; flex-wrap:wrap; gap:6px;
+      padding:10px 12px; margin:0 0 10px; backdrop-filter:blur(12px); -webkit-backdrop-filter:blur(12px);
+      background:rgba(10,11,18,.85);
+      border:1px solid rgba(232,197,71,.16); border-radius:12px;
+      box-shadow:0 8px 24px rgba(0,0,0,.35); }
+    .rn-chip { font-size:.72rem; padding:4px 11px; border-radius:999px; cursor:pointer;
+      border:1px solid rgba(255,255,255,.12); background:rgba(23,26,39,.6); color:#9aa3bb;
+      transition:color .15s, border-color .15s, background .15s; }
+    .rn-chip:hover { border-color:rgba(232,197,71,.65); color:#e8c547; background:rgba(232,197,71,.08); }
   `;
 
   function renderRealNav() {

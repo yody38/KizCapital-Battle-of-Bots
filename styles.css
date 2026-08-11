@@ -1,4 +1,5 @@
 :root {
+  color-scheme: dark; /* system keywords (canvas, scrollbars, form controls) resuelven oscuro */
   --bg-0: #0a0b12;
   --bg-1: #11131d;
   --bg-2: #171a27;
@@ -600,12 +601,16 @@ td.num { text-align: right; }
 .real-accounts {
   position: relative;
   margin: 28px 0 32px;
-  padding: 24px 28px;
-  background: linear-gradient(135deg, rgba(255, 216, 107, 0.08), rgba(255, 107, 139, 0.06));
-  border: 1px solid rgba(255, 216, 107, 0.22);
+  padding: 26px 30px;
+  background:
+    radial-gradient(1100px 380px at 88% -10%, rgba(232, 197, 71, 0.10), transparent 60%),
+    radial-gradient(900px 420px at -8% 112%, rgba(255, 107, 139, 0.07), transparent 60%),
+    linear-gradient(160deg, rgba(23, 26, 39, 0.92), rgba(10, 11, 18, 0.96));
+  border: 1px solid rgba(232, 197, 71, 0.26);
   border-left: 4px solid #e8c547;
   border-radius: var(--radius);
-  box-shadow: var(--shadow-card), 0 0 40px rgba(232, 197, 71, 0.08);
+  box-shadow: var(--shadow-card), 0 0 56px rgba(232, 197, 71, 0.10);
+  overflow: clip;
 }
 .real-accounts::before {
   content: "";
@@ -624,7 +629,7 @@ td.num { text-align: right; }
   border-bottom: 1px dashed rgba(255, 216, 107, 0.2);
 }
 .real-title {
-  font-size: 22px; font-weight: 800;
+  font-size: 24px; font-weight: 800; letter-spacing: -0.01em;
   background: var(--gold);
   -webkit-background-clip: text; background-clip: text;
   -webkit-text-fill-color: transparent;
@@ -633,18 +638,25 @@ td.num { text-align: right; }
 .real-subtitle { color: var(--text-dim); font-size: 13px; }
 .real-totals { display: flex; gap: 18px; flex-wrap: wrap; }
 .real-total-item {
+  position: relative;
   display: flex; flex-direction: column; align-items: flex-end;
-  padding: 8px 14px;
-  background: rgba(10, 11, 18, 0.5);
-  border: 1px solid var(--border);
+  padding: 10px 16px;
+  background: rgba(10, 11, 18, 0.55);
+  border: 1px solid rgba(232, 197, 71, 0.18);
   border-radius: var(--radius-sm);
-  min-width: 120px;
+  min-width: 130px;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+  overflow: clip;
+}
+.real-total-item::before {
+  content: ""; position: absolute; top: 0; left: 0; right: 0; height: 2px;
+  background: linear-gradient(90deg, transparent, rgba(232, 197, 71, 0.65), transparent);
 }
 .real-total-item .label {
   font-size: 11px; color: var(--text-faint); text-transform: uppercase; letter-spacing: 0.05em;
 }
 .real-total-item strong {
-  font-size: 18px; font-weight: 700;
+  font-size: 20px; font-weight: 700;
   font-family: 'JetBrains Mono', monospace;
 }
 .real-total-item strong.positive { color: var(--green); }
@@ -657,15 +669,23 @@ td.num { text-align: right; }
   margin-bottom: 22px;
 }
 .real-card {
-  background: var(--bg-card);
+  position: relative;
+  background: linear-gradient(180deg, rgba(23, 26, 39, 0.88), rgba(13, 15, 24, 0.92));
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   padding: 16px 18px;
-  transition: transform 0.2s, border-color 0.2s;
+  transition: transform 0.22s ease, border-color 0.22s ease, box-shadow 0.22s ease;
+  overflow: clip;
+}
+.real-card::before {
+  content: ""; position: absolute; top: 0; left: 0; right: 0; height: 2px;
+  background: linear-gradient(90deg, transparent, rgba(232, 197, 71, 0.55), transparent);
+  opacity: 0.6; pointer-events: none;
 }
 .real-card:hover {
-  transform: translateY(-2px);
-  border-color: rgba(232, 197, 71, 0.4);
+  transform: translateY(-3px);
+  border-color: rgba(232, 197, 71, 0.45);
+  box-shadow: 0 14px 34px rgba(0, 0, 0, 0.45), 0 0 24px rgba(232, 197, 71, 0.12);
 }
 .real-card-header {
   display: flex; justify-content: space-between; align-items: center;
@@ -673,8 +693,9 @@ td.num { text-align: right; }
 }
 .real-card-login {
   font-family: 'JetBrains Mono', monospace;
-  font-size: 16px; font-weight: 700;
-  color: var(--text);
+  font-size: 17px; font-weight: 700;
+  color: #e8c547;
+  text-shadow: 0 0 18px rgba(232, 197, 71, 0.35);
 }
 .real-card-metrics {
   display: grid; grid-template-columns: 1fr 1fr; gap: 10px 14px;
@@ -693,7 +714,7 @@ td.num { text-align: right; }
 .real-card-metrics strong.positive { color: var(--green); }
 .real-card-metrics strong.negative { color: var(--red); }
 .spark-wrapper {
-  height: 50px;
+  height: 56px;
   margin: 10px 0;
   position: relative;
 }
@@ -4207,11 +4228,17 @@ tr.bot-row:hover { background: rgba(124, 156, 255, 0.06); }
    ========================================================================== */
 
 /* --- B1 · Live ticker --- */
+.live-ticker-panel, .real-history-panel {
+  background: linear-gradient(180deg, rgba(23, 26, 39, 0.55), rgba(13, 15, 24, 0.62));
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 14px 18px 16px;
+}
 .live-ticker-panel { position: relative; overflow: hidden; transition: box-shadow .4s ease; }
 .live-ticker-head { display: flex; justify-content: space-between; align-items: baseline; flex-wrap: wrap; gap: 8px; }
 .live-ticker-session { font-size: 11px; color: var(--text-faint); font-weight: 400; }
 .live-ticker-value-wrap { display: flex; align-items: baseline; gap: 12px; }
-.live-ticker-value { font: 700 30px/1 ui-monospace, 'SF Mono', monospace; color: var(--text); letter-spacing: .5px; font-variant-numeric: tabular-nums; }
+.live-ticker-value { font: 800 36px/1 ui-monospace, 'SF Mono', monospace; color: #f5f7ff; letter-spacing: .5px; font-variant-numeric: tabular-nums; text-shadow: 0 0 26px rgba(61, 220, 151, 0.25); }
 .live-ticker-delta { font-size: 13px; color: var(--text-dim); font-variant-numeric: tabular-nums; }
 .live-ticker-delta.positive { color: #3ddc84; }
 .live-ticker-delta.negative { color: #ff6b8b; }
