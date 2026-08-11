@@ -298,6 +298,32 @@ def file_issue_dedupe(title_root: str, body: str) -> str:
 
 # ---------- main ----------
 
+# --- Severidad de fallos: INFRA vs DATOS -----------------------------------
+# Un fallo de sonda/tooling (ssh ping de mcp-health, gh CLI, la carrera
+# conocida del re-upload, el espejo de failover) NO significa datos malos en
+# el dashboard: vps3 puede tardar >15s en responder un ping mientras su
+# snapshot llega fresco y las 5 reales publican a 0s (incidente 2026-08-10/11:
+# 87% de los fails de 7d eran solo mcp-health). result pasa a 3 estados:
+#   ok   — todo verde
+#   warn — SOLO fallos de infraestructura (el dato que sirve el dashboard está bien)
+#   fail — al menos un fallo de DATOS (default fail-closed para patrones nuevos)
+# El frontend (renderSystemHealth) refleja estos mismos patrones para
+# reclasificar filas viejas del history — mantener ambas listas en sync.
+INFRA_FAIL_PATTERNS = (
+    "mcp-health critical",          # sonda ssh del monitor de infra
+    "mcp_health.json",              # el monitor mismo ausente/ilegible
+    "artifact_download_failed",     # gh run download (tooling)
+    "ci_list_failed",               # gh run list (tooling)
+    "missing 'upload' section",     # carrera verify-antes-de-upload (conocida)
+    "workflows en rojo",            # workflows auxiliares, no el dato servido
+    "failover R2",                  # espejo de respaldo, no la fuente primaria
+)
+
+
+def fail_severity(msg: str) -> str:
+    return "infra" if any(p in msg for p in INFRA_FAIL_PATTERNS) else "data"
+
+
 def append_log(record: dict) -> None:
     LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
     with LOG_FILE.open("a", encoding="utf-8") as f:
@@ -369,6 +395,7 @@ def main() -> int:
 
     started = time.time()
     fails: list[str] = []
+    warns: list[str] = []
     info: dict = {"ts": now_iso(), "steps": {}}
     dormant_eas: list[dict] = []  # "competencia siempre activa" monitor (separate alert)
 
@@ -568,8 +595,9 @@ def main() -> int:
         # body / health log), per kiz-tribunal verdict on c95ef57 — it must not
         # page the inbox while the data is provably fresh. An ABSENT file is
         # still a hard fail (monitor never deployed — the 12-day blind spot
-        # 2026-05-26 → 2026-06-07), and any_critical stays a hard fail (real
-        # VPS down/stale, already debounced by FAIL_THRESHOLD=2 upstream).
+        # 2026-05-26 → 2026-06-07), and any_critical stays a fail (real
+        # VPS down/stale, debounced by FAIL_THRESHOLD=3 upstream) — but a
+        # severity-INFRA one: it degrades result to 'warn', never 'fail'.
         now = datetime.now(timezone.utc)
         code, mcp = supa_get_json(url, key, "mcp_health.json")
         if code != 200 or not mcp:
@@ -763,8 +791,10 @@ def main() -> int:
             info["steps"]["capacity"] = cap
             for a in avisos:
                 # Aviso, no fallo: el sistema aun funciona; el objetivo es actuar
-                # con semanas de margen.
-                freshness_warn.append(f"capacidad: {a}")
+                # con semanas de margen. (Antes: NameError `freshness_warn` que el
+                # except genérico tragaba — la capa E5 moría en silencio cada run
+                # y history guardaba bots/snapshot_bytes en null.)
+                warns.append(f"capacidad: {a}")
         except Exception as e:  # noqa: BLE001 — check aditivo, nunca tumba el watchdog
             info["steps"]["capacity"] = {"error": str(e)}
 
@@ -828,8 +858,13 @@ def main() -> int:
 
     duration_ms = int((time.time() - started) * 1000)
     info["duration_ms"] = duration_ms
-    info["result"] = "ok" if not fails else "fail"
+    fails_data = [f for f in fails if fail_severity(f) == "data"]
+    fails_infra = [f for f in fails if fail_severity(f) == "infra"]
+    info["result"] = "ok" if not fails else ("warn" if not fails_data else "fail")
     info["fails"] = fails
+    info["fails_data"] = fails_data
+    info["fails_infra"] = fails_infra
+    info["warns"] = warns
 
     append_log(info)
     if url and key:
@@ -879,7 +914,8 @@ def main() -> int:
     issue_ref = "skipped"
     if not args.no_issue:
         issue_ref = file_issue_dedupe("drift detected", "\n".join(body_lines))
-    print(f"[watchdog] FAIL fails={len(fails)} issue={issue_ref} {duration_ms}ms", file=sys.stderr)
+    print(f"[watchdog] {info['result'].upper()} fails={len(fails)} "
+          f"(data={len(fails_data)} infra={len(fails_infra)}) issue={issue_ref} {duration_ms}ms", file=sys.stderr)
     for f in fails:
         print(f"  - {f}", file=sys.stderr)
     return 2

@@ -61,7 +61,10 @@ VPS_ROSTER = _vps_roster()
 SSH_KEY = os.environ.get("SSH_KEY", str(Path.home() / ".ssh" / "id_ed25519_ci"))
 SSH_TIMEOUT = 8
 STALE_SEC = int(os.environ.get("MCP_HEALTH_STALE_SEC", 2700))
-FAIL_THRESHOLD = 2
+# 3 checks consecutivos (~15 min) para declarar critical: el flapping de vps3
+# (2026-08-10/11, ssh lento bajo carga pero datos frescos) generaba criticals
+# falsos con 2. Una VPS muerta de verdad sigue cayendo igual, 5 min más tarde.
+FAIL_THRESHOLD = 3
 AUTO_RECOVERY = os.environ.get("AUTO_RECOVERY", "0") == "1"
 # Free-RAM early warning — INFORMATIONAL ONLY (never changes status).
 # The 5 production VPS run at a steady state of 70-106MB free RAM (1-1.5GB total,
@@ -133,13 +136,14 @@ def probe_vps(vps_id: str, host: str) -> dict:
     }
 
     # 1. SSH ping — con UN reintento a timeout más generoso antes de declarar
-    # down: una VPS lenta-pero-viva (VPS2 bajo presión de RAM responde en ~11s,
-    # sobre el ConnectTimeout de 8s) no debe abrir incidente; una VPS muerta
-    # sigue cayendo igual (2 checks consecutivos = ~10 min, FAIL_THRESHOLD).
+    # down: una VPS lenta-pero-viva (vps2/vps3 bajo presión de RAM responden en
+    # 11-20s, sobre el ConnectTimeout de 8s) no debe abrir incidente; una VPS
+    # muerta sigue cayendo igual (FAIL_THRESHOLD checks consecutivos = ~15 min).
+    # 15s→30s tras el flapping de vps3 (2026-08-10/11: ssh_ms ~20s, ssh_rc=124).
     rc, stdout, stderr, ms = ssh_cmd(host, "echo pong")
     if rc != 0 or "pong" not in stdout:
         result["ssh_retry"] = True
-        rc, stdout, stderr, ms = ssh_cmd(host, "echo pong", timeout=15)
+        rc, stdout, stderr, ms = ssh_cmd(host, "echo pong", timeout=30)
     result["ssh_ms"] = round(ms, 1)
     if rc != 0 or "pong" not in stdout:
         result["status"] = "down"
