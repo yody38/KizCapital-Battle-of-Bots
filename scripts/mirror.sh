@@ -542,6 +542,17 @@ else
 fi
 T_MIRROR_MS=$(( $(now_ms) - MIRROR_START_MS ))   # scp(6 VPS) + merge
 
+# Cesta fija de cuentas reales (nivel CUENTA). carry_forward_stale.py cubre la
+# VPS entera caida; esto cubre el hueco que quedaba: la VPS responde fresca pero
+# uno de sus terminales MT5 esta cerrado, y esa cuenta real desaparece del ciclo.
+# Sin esto, real_portfolio suma solo las presentes y una cuenta ausente se
+# publica como PERDIDA (2026-08-20: VPS3 reinicio, volvio 1 terminal de 5, y el
+# dashboard mostro $4,738 en vez de $31,758 con el badge verde).
+# Va ANTES del manifiesto para que los per-bot files heredados entren en el.
+# Fail-soft: si falla, el ciclo sigue como siempre — el dashboard nunca se para.
+python3 "$DIR/scripts/carry_forward_reals.py" "$DATA_DIR" >> "$LOG" 2>&1 \
+  || echo "[$(ts)] carry_forward_reals non-fatal error (cesta real sin heredar este ciclo)" >> "$LOG"
+
 # Build manifest of available per-bot files (used by the dashboard audit modal)
 python3 - "$BOTS_OUT_DIR" >> "$LOG" 2>&1 <<'PY'
 import json, os, sys

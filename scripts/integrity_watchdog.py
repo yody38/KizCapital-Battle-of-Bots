@@ -674,12 +674,21 @@ def main() -> int:
                     pass
                 if hb_ages:
                     info["steps"]["publisher_heartbeat"] = hb_ages
-                    alive = sorted(v for v, a in hb_ages.items() if a < 180)
-                    dead = sorted(v for v, a in hb_ages.items() if a >= 180)
+                    # Una fila con DIAS de antiguedad no es un publisher caido: es uno
+                    # RETIRADO. vps6 dejo una de 23 dias al consolidar las 5 reales en
+                    # vps3 (2026-07-27), y desde entonces cada incidente acusaba a una
+                    # maquina sana — mandando a mirar donde no estaba el problema.
+                    RETIRED_SEC = 86400
+                    retired = sorted(v for v, a in hb_ages.items() if a >= RETIRED_SEC)
+                    active = {v: a for v, a in hb_ages.items() if a < RETIRED_SEC}
+                    info["steps"]["publisher_retired"] = retired
+                    alive = sorted(v for v, a in active.items() if a < 180)
+                    dead = sorted(v for v, a in active.items() if a >= 180)
                     fails.append(
                         f"live-stream root-cause: publisher vivo en {alive or 'ninguno'}"
                         f" (→ lado MT5/broker), heartbeat muerto en {dead or 'ninguno'}"
-                        f" (→ proceso/SSH/Railway) · ages_sec={hb_ages}"
+                        f" (→ proceso/SSH/Railway) · ages_sec={active}"
+                        + (f" · retirados (>24h, ignorados): {retired}" if retired else "")
                     )
 
         # Step 4b-bis — [RESILIENCIA R2] Regresión de compresión.
