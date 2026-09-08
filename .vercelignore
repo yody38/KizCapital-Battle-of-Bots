@@ -1,65 +1,51 @@
-# ALLOWLIST — nada se despliega salvo lo que este archivo re-incluya.
+# Que NO se despliega al CDN publico.
 #
-# 2026-09-08: esto era una lista de EXCLUSIONES, y todo lo que no estuviera
-# nombrado viajaba al CDN publico. Asi acabaron desplegados CUENTAS-REALES.md,
-# SETUP_HARDENING.md, RUNBOOK.md, config/ (el registro de las VPS), railway/,
-# workers/, tribunal/, upstream/, ledger/ y spread-samples/. Una lista negra
-# falla en silencio cada vez que alguien agrega una carpeta nueva; una lista
-# blanca falla ruidosamente (el asset no carga) y eso se ve el mismo dia.
+# 2026-09-08: se intento una lista BLANCA (`*` + re-inclusiones con `!`) y el
+# build de Vercel fallo: su implementacion de .vercelignore no honra de forma
+# fiable la re-inclusion despues de un `*`, y el deployment se queda sin
+# archivos. Se vuelve a lista de exclusion, que si funciona, pero COMPLETA:
+# antes solo nombraba scripts/, supabase/, README.md y .env.example, asi que
+# todo lo demas viajaba al dominio publico — incluidos CUENTAS-REALES.md,
+# config/ (el registro de las VPS), railway/, workers/, tribunal/, upstream/,
+# ledger/ y spread-samples/.
 #
-# Sintaxis .gitignore: gana el ULTIMO patron que coincide, y no se puede
-# re-incluir un archivo si su carpeta padre sigue excluida — por eso cada
-# directorio lleva DOS lineas: `!dir/` (la carpeta) y `!dir/**` (su contenido).
-#
-# Regla al agregar un asset nuevo al front: si el navegador lo pide, se
-# re-incluye aqui. Si no lo pide, no se despliega.
+# REGLA AL AGREGAR UNA CARPETA NUEVA: si el navegador no la pide, excluirla
+# aqui explicitamente. Una lista negra no protege sola.
 
-*
+# --- Todo el backend y la operacion ---
+scripts/
+supabase/
+config/
+railway/
+workers/
+tribunal/
+upstream/
+ledger/
+spread-samples/
+tests/
+docs/
+.github/
+data/
 
-# --- Paginas ---
-!index.html
-!login.html
-!command.html
-
-# --- Modulos JS del dashboard (referenciados por index.html) ---
-!config.js
-!supabase-client.js
-!auth-guard.js
-!data-source.js
-!app.js
-!views.js
-!search.js
-
-# --- Login ---
-!login.js
-!login.css
-
-# --- Estilos ---
-!styles.css
-
-# --- PWA: service worker, manifiesto e iconos ---
-!sw.js
-!manifest.json
-!icon-192.png
-!icon-512.png
-
-# --- Vendor (Chart.js, supabase-js, fuentes Inter/JetBrains self-hosted) ---
-!vendor/
-!vendor/**
-# ...menos los descargas a medias del script de vendorizado (ya gitignored, pero
-# un deploy desde el working tree local si los veria).
-vendor/.tmp.*
-
-# --- Funciones serverless de Vercel (/api/d -> rewrite /d/:sha/:path*) ---
-!api/
-!api/**
-
-# --- Command Center (shell futuro; cache no-immutable via vercel.json) ---
-!cc/
-!cc/**
-# ...menos el fixture de desarrollo: son datos sinteticos y un stub de sesion
-# que no pintan nada en produccion y no tienen por que viajar al CDN publico.
+# --- El fixture de desarrollo del Command Center (datos sinteticos) ---
 cc/dev/
 
-# --- Configuracion de la propia plataforma ---
-!vercel.json
+# --- Documentacion: ninguna la pide el navegador ---
+*.md
+
+# --- Secretos y overlays locales (redundante con .gitignore, por si acaso) ---
+.env
+.env.*
+!.env.example
+.env.example
+*.local.json
+*.local.md
+vps-access.local.md
+
+# --- Artefactos ---
+*.log
+__pycache__/
+*.pyc
+.pytest_cache/
+.DS_Store
+pytest.ini
