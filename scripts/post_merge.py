@@ -95,6 +95,59 @@ CAPS = {
     "cadence_trades_per_month": 20.0,  # ≈1 trade/día hábil = "opera constante" perfecto
 }
 
+# --- Versionado del score (Fase 1-B, 2026-09-08) -------------------------
+# v1 es el score VIVO y no cambia. v2 corre en SOMBRA: se publica junto a v1,
+# no toca `promotion_status` ni el orden de asientos, y solo pasa a ser el vivo
+# cuando el owner revise el diff y se cambie SCORE_LIVE_VERSION a "v2".
+SCORE_LIVE_VERSION = "v1"
+SCORE_SHADOW_VERSIONS = ("v2",)
+
+# Trazabilidad obligatoria de toda formula que cambia (regla del owner).
+SCORE_CHANGELOG_V2 = [
+    {
+        "component": "net_return",
+        "old": "clamp01(((net_after_commission_LIFETIME / balance) / months_active_365d * 100) / 0.5)",
+        "new": "clamp01(return_monthly_pct_365d / 0.5)  # numerador y denominador en la MISMA ventana",
+        "rationale": ("El builder filtra a 365 dias pero reconcile_snapshot sobrescribia el neto "
+                      "con el de por vida, asi que se dividia dinero de 3 anos entre 12 meses. "
+                      "El componente quedaba inflado por un factor aproximado a la edad en anos."),
+        "expected_impact": ("Los bots con mas de 12 meses bajan en este componente; peso 0.15, "
+                            "asi que hasta 15 puntos de score. Los de menos de 12 meses no cambian."),
+        "affected": "todo bot con months_active_lifetime > months_active_365d",
+        "test": "tests/test_norms_v2.py::test_net_return_misma_ventana",
+    },
+    {
+        "component": "oos_robustness",
+        "old": "clamp01(pct_folds_test_profitable)  # campo 0-100 dentro de un clamp 0-1",
+        "new": "clamp01(pct_folds_test_profitable / 100.0)",
+        "rationale": ("El campo se emite en 0-100 (walk_forward) y dos lineas antes ya se divide "
+                      "entre 100 para oos_score. Con el clamp, cualquier bot con >=1% de folds "
+                      "rentables puntuaba igual que uno con el 100%."),
+        "expected_impact": "El componente deja de estar saturado; peso 0.06.",
+        "affected": "todo bot con bloque oos",
+        "test": "tests/test_norms_v2.py::test_norm_oos_escala",
+    },
+    {
+        "component": "significance",
+        "old": "clamp01(0.5 + sharpe_ci.lo)  # suma un Sharpe anualizado a 0.5",
+        "new": "clamp01((sharpe_ci.lo + 1.0) / 2.0)  # lo=-1 -> 0, lo=0 -> 0.5, lo=+1 -> 1",
+        "rationale": "Mezcla de escalas sin definir; saturaba para cualquier |lo| >= 0.5.",
+        "expected_impact": "Cambia hasta 3 puntos (peso 0.03).",
+        "affected": "todo bot con confidence_intervals.sharpe.lo",
+        "test": "tests/test_norms_v2.py::test_norm_significance_mapeo",
+    },
+    {
+        "component": "radar.returns / dominance.money",
+        "old": "radar: (net_profit_bruto/bal)*(12/m)*100 · dominance: (nac_lifetime/bal)/m*100",
+        "new": "ambos: return_monthly_pct_365d (la metrica canonica del registry)",
+        "rationale": ("Habia TRES definiciones distintas de 'retorno' en el mismo archivo, asi que "
+                      "el eje del radar y el analisis de Pareto no eran comparables con el score."),
+        "expected_impact": "Cambia el percentil del eje returns y algun veredicto is_thoroughbred.",
+        "affected": "todo bot con radar o dominance",
+        "test": "tests/test_norms_v2.py::test_retorno_unico_del_registry",
+    },
+]
+
 # Hard gating filters: failing any one => promotion_status = "NO".
 # DD cap tightened 15→10 (2026-06-30): real accounts are leveraged $5-10K where the
 # owner's own money is ~10% — a 10% account DD already threatens the funded arrangement.
@@ -158,7 +211,11 @@ TRIBUNAL_STALE_DD_PTS = 2.0    # dd_pct empeoró > N pts vs el veredicto → obs
 TRIBUNAL_STALE_PF_DROP = 0.3   # PF cayó > N vs el veredicto → obsoleto
 
 MIN_CORR_TRADES = 25          # min trades to be in correlation matrix
-MAX_CORR_BOTS = 60            # cap matrix size
+MAX_CORR_BOTS = 60
+# Minimo de dias en que AMBOS bots operaron para que el estimador v2 se
+# pronuncie. Por debajo devuelve None: preferimos "no se" a un cero inventado.
+MIN_CORR_OVERLAP_DAYS = 20
+CORR_LIVE_VERSION = "v1"            # cap matrix size
 NEW_BOTS_DAYS = 30           # bots with first_trade within this window live only in the Bots Nuevos view
 
 
@@ -346,6 +403,60 @@ def norm_net_return(net_after_commission, balance, months_active):
     if monthly_pct <= 0:
         return 0.0
     return clamp01(monthly_pct / CAPS["net_monthly_return_pct"])
+
+
+# --- Normalizadores v2 (SOMBRA) -----------------------------------------
+# Cada uno documenta su cambio en SCORE_CHANGELOG_V2. Ninguno se usa para
+# decidir asientos mientras SCORE_LIVE_VERSION sea "v1".
+
+def norm_net_return_v2(bot, balance):
+    """F1: retorno mensual con numerador y denominador en la MISMA ventana.
+
+    Usa `return_monthly_pct_365d`, que escribe reconcile_snapshot con el neto
+    de 365 dias (comision incluida) sobre los meses activos de 365 dias. Si el
+    campo no existe (snapshot anterior a la Fase 1-B) se cae a la ventana de
+    por vida, que tambien es coherente, y solo en ultimo caso a v1.
+    """
+    pct = bot.get("return_monthly_pct_365d")
+    if pct is None:
+        pct = bot.get("return_monthly_pct_lifetime")
+    if pct is None:
+        nac = bot.get("net_after_commission_365d")
+        months = bot.get("months_active_365d") or bot.get("months_active")
+        if nac is not None and balance and months:
+            pct = (nac / balance) / months * 100.0
+    if pct is None or pct <= 0:
+        return 0.0
+    return clamp01(pct / CAPS["net_monthly_return_pct"])
+
+
+def norm_oos_v2(oos):
+    """F2: `pct_folds_test_profitable` es 0-100, hay que dividirlo entre 100."""
+    if not oos:
+        return 0.3
+    parts = []
+    if oos.get("oos_score") is not None:
+        parts.append(clamp01(oos["oos_score"]))
+    if oos.get("pct_folds_test_profitable") is not None:
+        parts.append(clamp01(oos["pct_folds_test_profitable"] / 100.0))
+    p = oos.get("permutation_p_value")
+    if p is not None:
+        parts.append(clamp01(1.0 - (p / 0.5)))
+    return sum(parts) / len(parts) if parts else 0.3
+
+
+def norm_significance_v2(oos, ci):
+    """F3: mapeo definido del IC inferior de Sharpe: -1 -> 0, 0 -> 0.5, +1 -> 1."""
+    parts = []
+    p = (oos or {}).get("permutation_p_value")
+    if p is not None:
+        parts.append(clamp01(1.0 - (p / 0.5)))
+    sh = (ci or {}).get("sharpe") or {}
+    if sh.get("lo") is not None:
+        parts.append(clamp01((sh["lo"] + 1.0) / 2.0))
+    elif ci is not None and ci.get("low_confidence") is not None:
+        parts.append(0.2 if ci.get("low_confidence") else 0.8)
+    return sum(parts) / len(parts) if parts else 0.3
 
 
 # --- Quality-factor norms (consume Pass-2 enrichments; filled in re-scoring pass) ---
@@ -552,6 +663,44 @@ def build_correlation_matrix(snapshot, data_dir, real_accounts=None):
                 c = pearson(vectors[ki], vectors[kj])
                 matrix[ki][kj] = round(c, 3) if c is not None else None
 
+    # --- Estimador v2 en SOMBRA (Fase 1-B, 2026-09-08) ---------------------
+    # v1 alinea por la UNION de fechas y rellena con 0.0 los dias sin operar.
+    # Esas series son dispersas: un bot que opera una vez por semana lleva ~80%
+    # de ceros. El relleno sesga la correlacion hacia 0 en pares de baja
+    # frecuencia y la INFLA entre bots que simplemente comparten calendario,
+    # aunque sus resultados no tengan relacion. Y ese estimador alimenta el
+    # bloqueo HARD `clones_real` con umbral 0.7: un bot puede quedar bloqueado
+    # (o dejar de estarlo) por un artefacto del calendario.
+    #
+    # v2 correlaciona SOLO sobre la interseccion de dias en que ambos operaron,
+    # y devuelve None si no hay solape suficiente en vez de fingir un 0.
+    # Se publica junto a v1; el gate sigue leyendo v1 hasta que el owner lo
+    # autorice (CORR_LIVE_VERSION).
+    matrix_v2 = {}
+    overlap_n = {}
+    for i, ki in enumerate(keys):
+        matrix_v2[ki] = {}
+        overlap_n[ki] = {}
+        si = series_by_bot[ki]
+        for j, kj in enumerate(keys):
+            if i == j:
+                matrix_v2[ki][kj] = 1.0
+                overlap_n[ki][kj] = len(si)
+                continue
+            if kj in matrix_v2 and ki in matrix_v2[kj]:
+                matrix_v2[ki][kj] = matrix_v2[kj][ki]
+                overlap_n[ki][kj] = overlap_n[kj][ki]
+                continue
+            sj = series_by_bot[kj]
+            common = sorted(set(si) & set(sj))
+            n_common = len(common)
+            overlap_n[ki][kj] = n_common
+            if n_common < MIN_CORR_OVERLAP_DAYS:
+                matrix_v2[ki][kj] = None
+                continue
+            c = pearson([si[d] for d in common], [sj[d] for d in common])
+            matrix_v2[ki][kj] = round(c, 3) if c is not None else None
+
     bot_meta = {}
     for b in candidates:
         key = f"{b['vps']}-{b['account_login']}-{b['magic']}"
@@ -574,6 +723,15 @@ def build_correlation_matrix(snapshot, data_dir, real_accounts=None):
         "max_bots": MAX_CORR_BOTS,
         "bots": bot_meta,
         "matrix": matrix,
+        # Sombra: no lo consume ningun gate todavia.
+        "matrix_v2": matrix_v2,
+        "overlap_n": overlap_n,
+        "estimators": {
+            "live": "v1 · pearson sobre la union de fechas, dias sin operar = 0.0",
+            "shadow": (f"v2 · pearson sobre la interseccion de dias activos, "
+                       f"minimo {MIN_CORR_OVERLAP_DAYS} dias solapados, None si no llega"),
+            "live_version": CORR_LIVE_VERSION,
+        },
     }
 
 
@@ -605,7 +763,7 @@ def load_per_bot(data_dir, vps, login, magic):
 DETAIL_SPLIT_FIELDS = [
     "regime", "event_stress", "promotion_radar", "underwater",
     "oos", "institutional", "confidence_intervals", "capacity",
-    "shrinkage_meta", "promotion_components",
+    "shrinkage_meta", "promotion_components", "promotion_components_v2",
     # [VELOCIDAD V2] Segunda tanda (2026-07-28). Campos que aparecieron despues
     # del primer split y solo los pintan paneles del modal — verificado uno a uno
     # contra app.js: cada consumidor es una funcion de modal (renderScorePanel,
@@ -636,8 +794,30 @@ DETAIL_SPLIT_FIELDS = [
     "slope_recent_90d", "slope_lifetime",
     "monthly_net_stdev", "monthly_net_cov",
     "max_consecutive_wins", "stdev_per_trade",
+    # [FASE 1-B · 2026-09-08] Campos con ventana explicita que anade
+    # reconcile_snapshot. Son 29 por bot: medidos, +521 KB en el snapshot con
+    # 702 bots y +1,4 MB con 2.000, sobre un archivo que el navegador descarga
+    # ENTERO en cada ciclo y cuyo umbral de alerta del watchdog es 3 MB.
+    # Se mueven al per-bot, que es donde los consume el modal.
+    #
+    # SE QUEDAN en el snapshot, porque se usan sin abrir ningun modal:
+    #   months_active_365d / months_active_lifetime -> diff v1 vs v2
+    #   return_monthly_pct_365d -> metrica canonica de retorno (Query DSL)
+    #   net_after_commission_365d -> entrada del score v2
+    # El split corre DESPUES del scoring, asi que post_merge los ve todos.
+    "trades_365d", "trades_lifetime", "wins_365d", "wins_lifetime",
+    "losses_365d", "losses_lifetime",
+    "win_rate_pct_365d", "win_rate_pct_lifetime",
+    "gross_profit_365d", "gross_profit_lifetime",
+    "gross_loss_365d", "gross_loss_lifetime",
+    "net_profit_365d", "net_after_commission_lifetime",
+    "max_drawdown_365d", "max_drawdown_lifetime",
+    "calmar_365d", "calmar_lifetime",
+    "sortino_365d", "sortino_lifetime", "sharpe_lifetime",
+    "profit_factor_365d", "profit_factor_lifetime",
+    "dd_pct_of_balance_lifetime", "return_monthly_pct_lifetime",
 ]
-DETAIL_CANDIDATE_KEEP = {"shrinkage_meta", "promotion_components"}
+DETAIL_CANDIDATE_KEEP = {"shrinkage_meta", "promotion_components", "promotion_components_v2"}
 DETAIL_CANDIDATE_STATUSES = {"READY", "NEAR", "WATCH"}
 
 
@@ -4175,6 +4355,19 @@ def main():
         raw = sum(comp.get(k, 0.0) * w for k, w in WEIGHTS.items())
         b["promotion_score"] = round(raw * 100, 1)
 
+        # --- SOMBRA v2: mismos pesos, tres componentes corregidos -----------
+        # No toca `promotion_score` ni los asientos. Solo se publica para que
+        # el owner pueda comparar antes de autorizar el cambio.
+        if "v2" in SCORE_SHADOW_VERSIONS:
+            comp_v2 = dict(comp)
+            comp_v2["net_return"] = round(norm_net_return_v2(b, bal), 3)
+            comp_v2["oos_robustness"] = round(norm_oos_v2(b.get("oos")), 3)
+            comp_v2["significance"] = round(
+                norm_significance_v2(b.get("oos"), b.get("confidence_intervals")), 3)
+            b["promotion_components_v2"] = comp_v2
+            b["promotion_score_v2"] = round(
+                sum(comp_v2.get(k, 0.0) * w for k, w in WEIGHTS.items()) * 100, 1)
+
     # 6) Bayesian shrinkage of promotion_score (must run AFTER initial scoring,
     # BEFORE forward tracker / portfolio so they consume the shrunk values).
     shrinkage_meta = compute_shrunk_scores(snap)
@@ -4465,7 +4658,76 @@ def main():
         snap.pop("tribunal_meta", None)
         print("[tribunal] sin veredictos en tribunal/data/ — sección sin decorar (fail-open)")
 
+    # --- Diff v1 vs v2 (solo lectura, para revision del owner) -------------
+    # Se ordena todo por `tag` para que el gate de determinismo no vea ruido.
+    score_versions = {"live": SCORE_LIVE_VERSION, "shadow": list(SCORE_SHADOW_VERSIONS)}
+    if "v2" in SCORE_SHADOW_VERSIONS:
+        rows = []
+        for b in snap.get("bots", []):
+            v1, v2 = b.get("promotion_score"), b.get("promotion_score_v2")
+            if v1 is None or v2 is None:
+                continue
+            c1 = b.get("promotion_components") or {}
+            c2 = b.get("promotion_components_v2") or {}
+            rows.append({
+                "tag": _tag(b),
+                "magic": b.get("magic"),
+                "score_v1": v1,
+                "score_v2": v2,
+                "delta": round(v2 - v1, 1),
+                "months_active_365d": b.get("months_active_365d"),
+                "months_active_lifetime": b.get("months_active_lifetime"),
+                "net_return_v1": c1.get("net_return"),
+                "net_return_v2": c2.get("net_return"),
+                "oos_v1": c1.get("oos_robustness"),
+                "oos_v2": c2.get("oos_robustness"),
+                "significance_v1": c1.get("significance"),
+                "significance_v2": c2.get("significance"),
+                "promotion_status": b.get("promotion_status"),
+            })
+        rows.sort(key=lambda r: r["tag"])
+        deltas = sorted(abs(r["delta"]) for r in rows)
+        ready_v1 = sorted(r["tag"] for r in rows if r["promotion_status"] == "READY")
+        # Asientos v2 en sombra: mismo pool elegible, orden por score_v2.
+        elig_tags = {_tag(b) for b in eligible}
+        v2_ranked = sorted(
+            (r for r in rows if r["tag"] in elig_tags),
+            key=lambda r: (-r["score_v2"], r["tag"]),
+        )
+        ready_v2 = sorted(r["tag"] for r in v2_ranked[:STATUS_RANK_CAPS.get("READY", 3)])
+        inter = len(set(ready_v1) & set(ready_v2))
+        union = len(set(ready_v1) | set(ready_v2))
+        score_versions["v2"] = {
+            "changelog": SCORE_CHANGELOG_V2,
+            "diff": {
+                "n_scored": len(rows),
+                "mean_abs_delta": round(sum(deltas) / len(deltas), 2) if deltas else 0.0,
+                "p90_abs_delta": round(deltas[int(len(deltas) * 0.9)], 2) if deltas else 0.0,
+                "max_abs_delta": round(deltas[-1], 2) if deltas else 0.0,
+                "ready_v1": ready_v1,
+                "ready_v2": ready_v2,
+                "jaccard_ready": round(inter / union, 3) if union else 1.0,
+            },
+        }
+        shadow_dir = os.path.join(data_dir, "shadow")
+        os.makedirs(shadow_dir, exist_ok=True)
+        _v2_path = os.path.join(shadow_dir, "score_v2_diff.json")
+        _v2_tmp = _v2_path + ".tmp"
+        with open(_v2_tmp, "w") as _f:
+            json.dump({
+                "generated_at": snap.get("generated_at"),
+                "live_version": SCORE_LIVE_VERSION,
+                "changelog": SCORE_CHANGELOG_V2,
+                "summary": score_versions["v2"]["diff"],
+                "bots": rows,
+            }, _f, ensure_ascii=False, separators=(",", ":"))
+        os.replace(_v2_tmp, _v2_path)
+        print(f"[score-v2] sombra: n={len(rows)} "
+              f"delta_medio={score_versions['v2']['diff']['mean_abs_delta']} "
+              f"jaccard_ready={score_versions['v2']['diff']['jaccard_ready']}")
+
     snap["promotion_meta"] = {
+        "score_versions": score_versions,
         "weights": WEIGHTS,
         "caps": CAPS,
         "gating": GATING,
