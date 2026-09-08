@@ -1,11 +1,15 @@
-// Redirects to /login.html if there is no Supabase session.
+// Redirects to /login if there is no Supabase session.
 // Handles the magic-link callback (URL hash contains access_token) by
 // waiting briefly for supabase-js to parse it before deciding.
 (async function () {
   function goLogin() {
-    const here = window.location.pathname + window.location.search;
+    // [FIX 2026-09-08] "/login" sin .html: vercel.json usa cleanUrls, asi que
+    // /login.html devuelve un 308. Bajo un service worker esa respuesta
+    // redirigida no puede responder a una navegacion y la pestana se quedaba
+    // en blanco. Se incluye el hash para no perder los deep links (#q=...).
+    const here = window.location.pathname + window.location.search + window.location.hash;
     const next = encodeURIComponent(here);
-    window.location.replace("/login.html?next=" + next);
+    window.location.replace("/login?next=" + next);
   }
 
   if (!window.kizSupabase) {

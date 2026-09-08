@@ -11,7 +11,7 @@
 // dos veces en la primera visita y el modo offline no funcionaba hasta la
 // segunda). Regla: este VERSION y el ?v= de index.html se bumpean JUNTOS.
 
-const VERSION = '20260811a';
+const VERSION = '20260908a';
 const SHELL_CACHE = `kiz-shell-${VERSION}`;
 const DATA_CACHE = 'kiz-data-v1';
 const FONT_CACHE = 'kiz-fonts-v1';
@@ -21,6 +21,7 @@ const SHELL = [
   '/',
   `/app.js?v=${VERSION}`,
   `/views.js?v=${VERSION}`,
+  `/search.js?v=${VERSION}`,
   `/styles.css?v=${VERSION}`,
   `/data-source.js?v=${VERSION}`,
   `/supabase-client.js?v=${VERSION}`,
@@ -87,14 +88,28 @@ async function cacheFirst(request, cacheName) {
   return resp;
 }
 
+// [FIX 2026-09-08] Un Response con redirected=true NO puede responder a una
+// peticion de navegacion: el navegador rechaza respondWith y la pestana queda
+// EN BLANCO cargando para siempre. Pasaba en cada visita sin sesion, porque
+// auth-guard mandaba a /login.html y vercel.json (cleanUrls) devuelve un 308
+// hacia /login. Se reconstruye la respuesta para limpiar la bandera.
+function stripRedirect(resp) {
+  if (!resp || !resp.redirected) return resp;
+  return new Response(resp.body, {
+    status: resp.status,
+    statusText: resp.statusText,
+    headers: resp.headers,
+  });
+}
+
 async function networkFirst(request, fallbackKey) {
   try {
     const resp = await fetch(request);
-    if (resp && resp.ok) {
+    if (resp && resp.ok && fallbackKey !== null) {
       const cache = await caches.open(SHELL_CACHE);
       cache.put(fallbackKey || request, resp.clone());
     }
-    return resp;
+    return stripRedirect(resp);
   } catch {
     const cached = await caches.match(fallbackKey || request);
     if (cached) return cached;
@@ -136,9 +151,16 @@ self.addEventListener('fetch', (e) => {
 
   if (url.origin !== location.origin) return;
 
+  // [FIX 2026-09-08] Las paginas de acceso jamas pasan por el SW: son el
+  // destino del 308 de cleanUrls y no tienen sentido offline.
+  if (url.pathname === '/login' || url.pathname === '/login.html') return;
+
   // Navegación e index: network-first (código fresco), caché si offline.
+  // Solo la raíz se guarda bajo la clave '/': cachear ahí cualquier otra
+  // navegación dejaba esa página como portada offline.
   if (req.mode === 'navigate' || url.pathname === '/' || url.pathname === '/index.html') {
-    e.respondWith(networkFirst(req, '/'));
+    const isRoot = url.pathname === '/' || url.pathname === '/index.html';
+    e.respondWith(networkFirst(req, isRoot ? '/' : null));
     return;
   }
 
