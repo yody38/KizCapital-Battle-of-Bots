@@ -4497,3 +4497,43 @@ body.war-room-active { overflow: hidden; }
   .wk-kpi-grid { grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); }
   .wk-chart-wrap { height: 220px; }
 }
+
+/* --- Cuenta real desconectada -------------------------------------------
+   Cesta fija (2026-08-20): cuando un terminal MT5 se cierra, su cuenta se
+   sigue mostrando con el ultimo dato conocido para que el total no publique
+   una perdida que nadie tuvo. La tarjeta tiene que decir a gritos que esas
+   cifras estan congeladas — un numero viejo sin marca es peor que ninguno. */
+.real-degraded-note {
+  margin: 4px 0 0;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.2px;
+  color: #ffc861;
+}
+.real-degraded-note.hidden { display: none; }
+
+.real-card--disconnected {
+  border-color: rgba(255,184,0,0.45);
+  background-image: repeating-linear-gradient(
+    135deg,
+    rgba(255,184,0,0.05) 0 10px,
+    transparent 10px 20px
+  );
+  cursor: default;
+}
+.real-card--disconnected .real-card-metrics strong,
+.real-card--disconnected .real-card-login { opacity: 0.55; }
+.real-card--disconnected .real-card-footer { color: #ffc861; opacity: 0.9; }
+.real-card-off {
+  margin-left: auto;
+  margin-right: 8px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: rgba(255,184,0,0.16);
+  border: 1px solid rgba(255,184,0,0.4);
+  color: #ffd98a;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.6px;
+  white-space: nowrap;
+}

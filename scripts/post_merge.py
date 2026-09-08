@@ -3972,6 +3972,13 @@ def main():
     # Per-VPS freshness — computed from snapshot_vpsN.json before any enrichment.
     vps_freshness, partial_data = compute_vps_freshness(data_dir)
     snap["vps_freshness"] = vps_freshness
+    # compute_vps_freshness solo mira el nivel VPS (ausente / stale / corrupta /
+    # carried_forward). Una cuenta real cuyo terminal MT5 esta cerrado deja su
+    # VPS perfectamente fresca, asi que el 2026-08-20 el dashboard publico 4 de 5
+    # reales heredadas con partial_data=False: badge verde y $27,020 de dinero
+    # real "desaparecidos" sin una sola marca. La cesta fija tambien abre cartel.
+    if any(a.get("disconnected") for a in (snap.get("real_portfolio") or {}).get("accounts", [])):
+        partial_data = True
     snap["partial_data"] = partial_data
 
     enriched = 0

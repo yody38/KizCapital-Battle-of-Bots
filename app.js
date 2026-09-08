@@ -238,6 +238,16 @@ function applySnapshot(data) {
   state.bots = (data.bots || []).map((b, i) => ({ ...b, _rank: i + 1 }));
   const realAccts = (data.real_portfolio && data.real_portfolio.accounts) || [];
   state.realLogins = new Set(realAccts.map(a => a.login));
+  // CESTA FIJA (2026-08-20). state.realLogins es el divisor de warWeeklyHistoryPrefix:
+  // si encoge, la apertura de la semana suma mas cuentas que el cierre y el "ingreso
+  // de la semana" reporta como perdida el equity de la que se cayo (paso de verdad:
+  // VPS3 reinicio, quedo 1 real de 5, y la cesta habria dado ~-$27,000 inventados).
+  // carry_forward_reals.py mantiene las 5 en el snapshot; esto solo avisa si no.
+  const expectedReals = (data.real_portfolio && data.real_portfolio.expected_count) || 0;
+  if (expectedReals && state.realLogins.size < expectedReals) {
+    console.warn(`[kiz] cesta real incompleta: ${state.realLogins.size}/${expectedReals} cuentas — `
+      + 'las series semanales comparan cestas distintas');
+  }
   // Magics (EAs) already deployed to a real account — excluded from the promotion-discovery
   // views (Candidatos/Tracker/Builder/Portfolio). Single source of truth: the backend emits
   // data.real_magics (detect_real_magics). Fall back to local derivation only if an old snapshot
@@ -373,11 +383,25 @@ function renderStalenessBanner(snap) {
   }
   const lagMin = (Date.now() - new Date(snap.generated_at).getTime()) / 60000;
   const partial = snap.partial_data === true;
-  const stalePerVps = snap.vps_freshness
-    ? Object.entries(snap.vps_freshness)
-        .filter(([, v]) => v && v.present && v.stale)
-        .map(([k]) => k.toUpperCase())
-    : [];
+  // Motivo por VPS. Antes solo se listaban las `present && stale`, así que un
+  // carry-forward o una VPS ausente dejaban el cartel mudo: decía "al menos una
+  // VPS no respondió" sin nombrar cuál, que es justo lo que no sirve a las 6am.
+  const vpsIssues = Object.entries(snap.vps_freshness || {})
+    .map(([k, v]) => {
+      if (!v) return null;
+      const name = k.toUpperCase();
+      if (v.present === false) return `${name} (sin responder)`;
+      if (v.corrupt || v.error) return `${name} (snapshot ilegible)`;
+      if (v.stale) return `${name} (atrasada ${Math.floor((v.lag_sec || 0) / 60)} min)`;
+      if (v.carried_forward) return `${name} (datos heredados)`;
+      return null;
+    })
+    .filter(Boolean);
+
+  // Cuentas reales caídas. Es DINERO: manda sobre cualquier otro mensaje que no
+  // sea el corte total del pipeline.
+  const degradedReals = Array.isArray(snap.degraded_reals) ? snap.degraded_reals : [];
+  const rp = snap.real_portfolio || {};
 
   el.classList.remove('warn', 'critical', 'hidden');
 
@@ -395,15 +419,27 @@ function renderStalenessBanner(snap) {
     const hh = String(since.getUTCHours()).padStart(2,'0');
     const mm = String(since.getUTCMinutes()).padStart(2,'0');
     msg = `Datos no actualizados desde ${hh}:${mm} UTC (${Math.floor(lagMin)} min). Pipeline degradado — ver el estado más reciente en GitHub Issues del repo.`;
+  } else if (degradedReals.length) {
+    icon = '🔴';
+    const logins = degradedReals.map(d => d.login).join(', ');
+    const vpsList = [...new Set(degradedReals.map(d => d.expected_vps).filter(Boolean))]
+      .map(v => v.toUpperCase()).join(', ');
+    const total = rp.expected_count || (rp.accounts || []).length;
+    const asOf = degradedReals.map(d => d.as_of).filter(Boolean).sort()[0];
+    msg = `${degradedReals.length} de ${total} cuentas reales desconectadas (${logins})`
+      + (vpsList ? ` en ${vpsList}` : '')
+      + ` — sus cifras son del último dato conocido${asOf ? ` (${fmt.dateTime(asOf)})` : ''}, no de este ciclo.`;
   } else if (partial && lagMin <= 35) {
-    msg = 'Datos parciales: el último cycle se completó pero al menos una VPS no respondió.';
+    msg = vpsIssues.length
+      ? `Datos parciales: el último cycle se completó, pero ${vpsIssues.join(' · ')}.`
+      : 'Datos parciales: el último cycle se completó pero al menos una VPS no respondió.';
   }
   iconEl.textContent = icon;
   textEl.textContent = msg;
   el.classList.add(cls);
 
-  if (stalePerVps.length) {
-    partialEl.textContent = `VPS caídas: ${stalePerVps.join(', ')}`;
+  if (vpsIssues.length) {
+    partialEl.textContent = `VPS: ${vpsIssues.join(' · ')}`;
     partialEl.classList.remove('hidden');
   } else {
     partialEl.classList.add('hidden');
@@ -771,7 +807,10 @@ function applyLivePatch(row, opts) {
 
   // Update card.
   const card = document.querySelector(`.real-card[data-real-login="${login}"]`);
-  if (card) {
+  // Una tarjeta marcada DESCONECTADA muestra el último dato conocido del ciclo.
+  // El stream puede seguir entregando su última fila publicada antes de que el
+  // terminal se cerrara: pintarla con flash la haría parecer viva.
+  if (card && !card.classList.contains('real-card--disconnected')) {
     const balanceEl = card.querySelector('[data-live-field="balance"]');
     const equityEl = card.querySelector('[data-live-field="equity"]');
     const profitEl = card.querySelector('[data-live-field="profit"]');
@@ -1212,7 +1251,22 @@ function renderRealAccounts() {
   }
   section.hidden = false;
 
-  document.getElementById('real-count').textContent = visible.length;
+  document.getElementById('real-count').textContent = rp.expected_count || visible.length;
+  // Cesta fija: los totales de arriba incluyen las cuentas heredadas, así que la
+  // caída de un terminal no se publica como pérdida. La nota dice cuáles no son
+  // dato de este ciclo — sin ella el número sería honesto pero mudo.
+  const degradedNote = document.getElementById('real-degraded-note');
+  if (degradedNote) {
+    const down = visible.filter(a => a.disconnected);
+    if (down.length) {
+      const asOf = down.map(a => a.as_of).filter(Boolean).sort()[0];
+      degradedNote.textContent = `⚠️ ${down.length} desconectada${down.length > 1 ? 's' : ''} `
+        + `(${down.map(a => a.login).join(', ')}) — último dato${asOf ? ` ${fmt.dateTime(asOf)}` : ' conocido'}`;
+      degradedNote.classList.remove('hidden');
+    } else {
+      degradedNote.classList.add('hidden');
+    }
+  }
   document.getElementById('real-balance').textContent = fmt.usd(rp.total_balance);
   document.getElementById('real-equity').textContent = fmt.usd(rp.total_equity);
   const floatEl = document.getElementById('real-floating');
@@ -1225,10 +1279,12 @@ function renderRealAccounts() {
   const cards = document.getElementById('real-cards');
   cards.innerHTML = visible.map(a => {
     const pnlCls = signedClass(a.profit);
+    const off = !!a.disconnected;
     return `
-      <div class="real-card account-card" data-vps="${a.vps}" data-login="${a.login}" data-real-login="${a.login}" title="Click para ver los bots de esta cuenta">
+      <div class="real-card account-card${off ? ' real-card--disconnected' : ''}" data-vps="${a.vps}" data-login="${a.login}" data-real-login="${a.login}" title="${off ? 'Terminal cerrado — cifras del último ciclo con dato' : 'Click para ver los bots de esta cuenta'}">
         <div class="real-card-header">
           <span class="real-card-login">#${a.login}</span>
+          ${off ? '<span class="real-card-off">⚠ DESCONECTADA</span>' : ''}
           <span class="vps-badge vps-${(a.vps || '').toLowerCase()}">${vpsPrettyName(a.vps)}</span>
         </div>
         <div class="real-card-metrics">
@@ -1237,6 +1293,7 @@ function renderRealAccounts() {
           <div><span class="metric-label">Flotante</span><strong class="${pnlCls}" data-live-field="profit">${fmt.usd(a.profit, true)}</strong></div>
           <div><span class="metric-label">Margin</span><strong data-live-field="margin">${fmt.usd(a.margin)}</strong></div>
         </div>
+        ${off ? '' : `
         <div class="real-risk" data-risk-login="${a.login}">
           <div class="risk-item"><span class="metric-label">P&L hoy</span><strong data-risk-field="daypnl">—</strong></div>
           <div class="risk-item"><span class="metric-label">DD intradía</span><strong data-risk-field="dd">—</strong></div>
@@ -1245,18 +1302,22 @@ function renderRealAccounts() {
             <div class="risk-margin-bar"><div class="risk-margin-fill" data-risk-field="mlvl-bar"></div></div>
           </div>
         </div>
-        <div class="spark-wrapper"><canvas id="spark-${a.login}"></canvas></div>
-        <div class="real-card-footer">Broker: ${a.server} · Leverage 1:${a.leverage}</div>
+        <div class="spark-wrapper"><canvas id="spark-${a.login}"></canvas></div>`}
+        <div class="real-card-footer">${off
+          ? `Sin conexión · dato de ${a.as_of ? fmt.dateTime(a.as_of) : 'el último ciclo'}`
+          : `Broker: ${a.server} · Leverage 1:${a.leverage}`}</div>
       </div>
     `;
   }).join('');
 
   // Fila de riesgo con valores del snapshot (el live la refresca después).
-  visible.forEach(a => updateRealRiskCard(a.login, a));
+  // Las desconectadas no tienen esa fila en el DOM: sus cifras están congeladas
+  // y animarlas las haría parecer vivas.
+  visible.filter(a => !a.disconnected).forEach(a => updateRealRiskCard(a.login, a));
 
   // Draw sparklines after DOM update
   requestAnimationFrame(() => {
-    visible.forEach(a => {
+    visible.filter(a => !a.disconnected).forEach(a => {
       const points = historyForLogin(a.login);
       const canvas = document.getElementById(`spark-${a.login}`);
       const color = a.profit >= 0 ? '#e8c547' : '#ff6b8b';

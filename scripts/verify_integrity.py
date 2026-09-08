@@ -328,7 +328,21 @@ def check_freshness(
         vps = a.get("vps")
         vf = vps_fresh.get(vps) if vps else None
         status, live_feed = "ok", True
-        if vf is None:
+        if a.get("disconnected"):
+            # Cesta fija (carry_forward_reals.py): la cuenta está en el snapshot
+            # con su último saldo conocido para que su caída no se publique como
+            # pérdida, pero NO es dato de este ciclo. Sin esta rama el informe de
+            # integridad la daría por sana justamente porque la acabamos de
+            # reinyectar — la cesta fija no puede comprarse el silencio.
+            status, live_feed = "disconnected", False
+            src = a.get("carry_source")
+            degraded.append({
+                "login": login, "status": "disconnected", "expected_vps": vps,
+                "detail": "terminal MT5 cerrado — cifras heredadas de "
+                          + ("el roster (saldo registrado, sin flotante)" if src == "roster"
+                             else f"el último ciclo con dato ({a.get('as_of')})"),
+            })
+        elif vf is None:
             status = "unknown"
             warn.append(f"freshness: real {login} on {vps} — no vps_freshness metadata (cannot verify)")
         # Los 3 casos siguientes significan lo mismo para el lector: las cifras de esta
