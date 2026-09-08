@@ -25,8 +25,15 @@ jobs:
 
       - name: Setup SSH key
         run: |
+          # 2026-09-08: `umask 077` ANTES de escribir. Con `echo > archivo` seguido
+          # de `chmod 600` la clave privada existia unos milisegundos con permisos
+          # 644, legible por cualquier otro proceso del runner. Mismo patron que
+          # ya usa refresh.yml para .env.local.
           mkdir -p ~/.ssh && chmod 700 ~/.ssh
-          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_ed25519_ci
+          umask 077
+          cat > ~/.ssh/id_ed25519_ci <<'EOF_KEY'
+          ${{ secrets.SSH_PRIVATE_KEY }}
+          EOF_KEY
           chmod 600 ~/.ssh/id_ed25519_ci
 
       - name: Tailscale up
@@ -63,13 +70,43 @@ jobs:
           path: data/mcp_health_state.json
           key: mcp-health-state-${{ github.run_id }}
 
+      - name: Redact topology before uploading the artifact
+        if: always()
+        run: |
+          # 2026-09-08: el repo es PUBLICO y los artifacts de un run los descarga
+          # cualquiera que tenga la URL del run. data/mcp_health.json lleva el
+          # campo `host` de cada VPS (direcciones Tailscale de las 6 maquinas),
+          # asi que se sube una copia redactada: fuera cualquier clave que sea
+          # ip/host/direccion, a cualquier nivel de anidamiento.
+          # mcp_health_state.json solo tiene contadores por vps_id — no se toca.
+          python3 - <<'PYEOF'
+          import json, pathlib, re
+
+          src = pathlib.Path("data/mcp_health.json")
+          dst = pathlib.Path("data/mcp_health.public.json")
+          if not src.exists():
+              raise SystemExit(0)
+
+          SENSIBLE = re.compile(r"ip|host|addr|tailscale", re.IGNORECASE)
+
+          def limpiar(obj):
+              if isinstance(obj, dict):
+                  return {k: limpiar(v) for k, v in obj.items() if not SENSIBLE.search(str(k))}
+              if isinstance(obj, list):
+                  return [limpiar(v) for v in obj]
+              return obj
+
+          dst.write_text(json.dumps(limpiar(json.loads(src.read_text())), indent=2))
+          print("mcp_health.public.json escrito (topologia redactada)")
+          PYEOF
+
       - name: Upload health artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: mcp-health-${{ github.run_id }}
           path: |
-            data/mcp_health.json
+            data/mcp_health.public.json
             data/mcp_health_state.json
           if-no-files-found: warn
           retention-days: 7

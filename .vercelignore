@@ -1,13 +1,62 @@
-# Files that should live in the repo but NOT be deployed to Vercel.
-# Vercel only ships the public dashboard (HTML/CSS/JS); ops scripts stay private.
+# ALLOWLIST — nada se despliega salvo lo que este archivo re-incluya.
+#
+# 2026-09-08: esto era una lista de EXCLUSIONES, y todo lo que no estuviera
+# nombrado viajaba al CDN publico. Asi acabaron desplegados CUENTAS-REALES.md,
+# SETUP_HARDENING.md, RUNBOOK.md, config/ (el registro de las VPS), railway/,
+# workers/, tribunal/, upstream/, ledger/ y spread-samples/. Una lista negra
+# falla en silencio cada vez que alguien agrega una carpeta nueva; una lista
+# blanca falla ruidosamente (el asset no carga) y eso se ve el mismo dia.
+#
+# Sintaxis .gitignore: gana el ULTIMO patron que coincide, y no se puede
+# re-incluir un archivo si su carpeta padre sigue excluida — por eso cada
+# directorio lleva DOS lineas: `!dir/` (la carpeta) y `!dir/**` (su contenido).
+#
+# Regla al agregar un asset nuevo al front: si el navegador lo pide, se
+# re-incluye aqui. Si no lo pide, no se despliega.
 
-scripts/
-supabase/
-README.md
-.env.example
+*
 
-# Build/lock artifacts that don't apply
-*.log
-__pycache__/
-*.pyc
-.DS_Store
+# --- Paginas ---
+!index.html
+!login.html
+!command.html
+
+# --- Modulos JS del dashboard (referenciados por index.html) ---
+!config.js
+!supabase-client.js
+!auth-guard.js
+!data-source.js
+!app.js
+!views.js
+!search.js
+
+# --- Login ---
+!login.js
+!login.css
+
+# --- Estilos ---
+!styles.css
+
+# --- PWA: service worker, manifiesto e iconos ---
+!sw.js
+!manifest.json
+!icon-192.png
+!icon-512.png
+
+# --- Vendor (Chart.js, supabase-js, fuentes Inter/JetBrains self-hosted) ---
+!vendor/
+!vendor/**
+# ...menos los descargas a medias del script de vendorizado (ya gitignored, pero
+# un deploy desde el working tree local si los veria).
+vendor/.tmp.*
+
+# --- Funciones serverless de Vercel (/api/d -> rewrite /d/:sha/:path*) ---
+!api/
+!api/**
+
+# --- Command Center (shell futuro; cache no-immutable via vercel.json) ---
+!cc/
+!cc/**
+
+# --- Configuracion de la propia plataforma ---
+!vercel.json

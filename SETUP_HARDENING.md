@@ -123,3 +123,21 @@ necesitarían fallar: Mac apagada + Gmail + GH API + Vercel cache. Probabilidad
 - **Si las alertas hacen spam**: bajar `WARN_LAG_MIN`/`FAIL_LAG_MIN` en
   `scripts/heartbeat_check.py`. Los dedupe windows ya evitan más de 1 email cada
   30 min (FAIL) o 60 min (WARN).
+
+---
+
+## Cabeceras de seguridad en `vercel.json` (2026-09-08)
+
+`vercel.json` es JSON estricto y **no admite comentarios**, asi que la nota vive aqui.
+
+- `Strict-Transport-Security: max-age=63072000; includeSubDomains` — activo, en el
+  bloque `/(.*)`.
+- `Content-Security-Policy-Report-Only` — deliberadamente en modo **solo reporte**:
+  observa y no bloquea nada, para poder medir violaciones reales antes de aplicarla.
+  La politica ya cubre lo que el sitio usa hoy: `cdn.jsdelivr.net` (supabase-js en
+  `login.html`), `*.supabase.co` mas `wss://*.supabase.co` (REST + Realtime) y
+  `*.workers.dev` (el `FAILOVER_URL` de `config.js`, que es un Worker de Cloudflare
+  y por tanto queda cubierto por ese comodin).
+- **El paso a enforcement (renombrar la cabecera a `Content-Security-Policy`) queda
+  para despues**, cuando se hayan revisado los reportes del navegador. Hasta entonces
+  nada del dashboard puede romperse por esta cabecera.

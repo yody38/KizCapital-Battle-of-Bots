@@ -70,7 +70,11 @@ MCP_DEADMAN_SEC = 90 * 60  # mcp-health is dispatched ~every 30min (VPS5 dispatc
                            # only a backstop, so 20min was a guaranteed false positive. 90min =
                            # tolerate 2 missed dispatch cycles, still catch a dead monitor in <1.5h.
 LIVE_DEADMAN_SEC = 90      # live stream pushes every ~3s → >90s stale = worker/tailnet/MT5 dead
-LIVE_REAL_LOGINS = {25425, 32081, 43306, 43411, 43414}  # 5 reales en vivo: 32081/43306 (VPS3) + 25425/43411/43414 (VPS6); roster por VPS en C:\mt5-mcp\.live_publisher.env
+LIVE_REAL_LOGINS = {25425, 32081, 43306, 43411, 43414}
+# 2026-09-08: el comentario que habia aqui repetia los logins uno a uno y ademas
+# afirmaba que 3 de ellos vivian en vps6 — falso desde el renumerado/consolidacion
+# del 2026-07-27. Son 5 cuentas reales y TODAS estan en vps3. El roster canonico
+# (que cuenta y en que maquina) es config/vps_registry.json, no este comentario.
 
 
 # ---------- env / helpers ----------

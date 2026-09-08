@@ -41,8 +41,15 @@ jobs:
     steps:
       - name: Setup SSH key
         run: |
+          # 2026-09-08: `umask 077` ANTES de escribir. Con `echo > archivo` seguido
+          # de `chmod 600` la clave privada existia unos milisegundos con permisos
+          # 644, legible por cualquier otro proceso del runner. Mismo patron que
+          # ya usa refresh.yml para .env.local.
           mkdir -p ~/.ssh && chmod 700 ~/.ssh
-          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_ed25519_ci
+          umask 077
+          cat > ~/.ssh/id_ed25519_ci <<'EOF_KEY'
+          ${{ secrets.SSH_PRIVATE_KEY }}
+          EOF_KEY
           chmod 600 ~/.ssh/id_ed25519_ci
 
       - name: Tailscale up
@@ -55,18 +62,45 @@ jobs:
 
       - name: Tick loop
         run: |
+          # 2026-09-08: contadores ok/fail y `exit 1` al final. Antes el ultimo
+          # comando del ciclo era `... || true`, asi que el paso salia 0 SIEMPRE:
+          # el sampler podia estar muerto en toda la flota durante 27 min y el run
+          # se veia verde — exactamente como paso entre 2026-07-28 y 2026-08-04.
+          # La cadencia del loop no cambia: solo se cuenta y se decide al salir.
+          ok=0
+          fail=0
           end=$(( $(date +%s) + LOOP_MINUTES * 60 ))
           while [ "$(date +%s)" -lt "$end" ]; do
             t0=$(date +%s)
             for host in $VPS_HOSTS; do
-              out=$(ssh -i ~/.ssh/id_ed25519_ci \
+              if out=$(ssh -i ~/.ssh/id_ed25519_ci \
                     -o StrictHostKeyChecking=accept-new \
                     -o ConnectTimeout=10 -o ServerAliveInterval=10 \
                     "trader@${host}" \
                     "C:\\mt5-mcp\\venv\\Scripts\\python.exe C:\\mt5-mcp\\equity_sampler.py --once --cadence ${TICK_SECS}" \
-                    2>&1) && echo "[$host] $out" || echo "[$host] TICK-FAIL: $out"
+                    2>&1); then
+                echo "[$host] $out"
+                ok=$(( ok + 1 ))
+              else
+                echo "[$host] TICK-FAIL: $out"
+                fail=$(( fail + 1 ))
+              fi
             done
             elapsed=$(( $(date +%s) - t0 ))
             sleep_for=$(( TICK_SECS - elapsed ))
             [ "$sleep_for" -gt 0 ] && sleep "$sleep_for" || true
           done
+          total=$(( ok + fail ))
+          echo "TICK-SUMMARY ok=$ok fail=$fail"
+          if [ "$total" -eq 0 ]; then
+            echo "TICK-VERDICT: el loop no llego a intentar ni un tick"
+            exit 1
+          fi
+          if [ "$ok" -eq 0 ]; then
+            echo "TICK-VERDICT: cero ticks exitosos"
+            exit 1
+          fi
+          if [ $(( fail * 2 )) -ge "$total" ]; then
+            echo "TICK-VERDICT: fallos >= 50% de los intentos"
+            exit 1
+          fi

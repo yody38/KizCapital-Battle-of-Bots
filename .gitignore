@@ -67,6 +67,21 @@ node_modules/
 data/_audit/
 supabase/.temp/
 config/vps_registry.local.json
+# 2026-09-08: patron generico ademas de la ruta explicita de arriba. El repo es
+# PUBLICO y la convencion `*.local.*` es donde viven las IPs, logins y notas que
+# nunca deben commitearse; sin el patron, un overlay NUEVO (otro *.local.json o
+# un *.local.md) se subiria por accidente al primer `git add -A`.
+*.local.json
+*.local.md
 .vercel
 .playwright-mcp/
 vendor/.tmp.*
+
+# Auditoria tecnica maestra: NUNCA al repo publico (contiene topologia y hallazgos de seguridad)
+KIZ_CAPITAL_PLATFORM_MASTER_AUDIT.md
+
+# Artefactos de pytest. El repo es PUBLICO: los .pyc y la cache de pytest no
+# aportan nada y pueden filtrar rutas locales. (2026-09-08)
+.pytest_cache/
+tests/**/__pycache__/
+*.pyc

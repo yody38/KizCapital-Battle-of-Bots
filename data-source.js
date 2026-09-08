@@ -271,7 +271,9 @@
 
 // ---------------------------------------------------------------------------
 // Live equity stream for the 5 active REAL accounts
-// (#32081/#43306 on VPS3 · #25425/#43411/#43414 on VPS6).
+// 2026-09-08: aqui se listaban los 5 logins y se decia que 3 vivian en vps6 —
+// falso desde el 2026-07-27 y, peor, este archivo lo sirve Vercel en publico.
+// Son 5 cuentas reales, todas en vps3; el roster canonico es config/vps_registry.json.
 // Reads from public.live_real_state via Supabase Realtime + REST.
 // Published every ~3s by C:\mt5-mcp\live_publisher.py on each VPS (roster in
 // C:\mt5-mcp\.live_publisher.env), held alive by the Railway "kiz-live-bridge"
