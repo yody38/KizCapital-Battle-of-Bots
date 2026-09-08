@@ -44,12 +44,25 @@ export function mount(el, params, ctx) {
 
   el.innerHTML = `<div class="cc-stack"><div class="cc-skeleton" style="height:120px"></div></div>`;
 
+  // [FIX 2026-09-08] loadBot() no llevaba catch: si el archivo per-bot no se
+  // podia leer, la promesa quedaba rechazada sin manejar y la vista se quedaba
+  // en el esqueleto PARA SIEMPRE, sin decir nada. Es el mismo fallo que dejaba
+  // colgada la DNA Card del dashboard legacy. Ahora se pinta igual con lo que
+  // hay en el snapshot y el detalle que falta se anuncia.
   Promise.all([
-    loadBot(vps, login, magic),
+    loadBot(vps, login, magic).catch((err) => {
+      console.error('[cc] per-bot ilegible', err);
+      return null;
+    }),
     getCorrelations().catch(() => null),
   ]).then(([detail, corr]) => {
     if (my !== token) return;   // el usuario ya navego a otra ruta
     render(bot, detail, corr, params.query || {});
+  }).catch((err) => {
+    if (my !== token) return;
+    console.error('[cc] bot 360 fallo al pintarse', err);
+    el.innerHTML = emptyState('No se pudo abrir el Bot 360',
+      (err && err.message) || String(err), true);
   });
 }
 
