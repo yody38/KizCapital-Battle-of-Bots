@@ -6150,18 +6150,24 @@ function dnaVerdict(score, status, stops, cautions) {
   return { label: 'HOLD', cls: 'dna-verdict-hold', desc: 'No es candidato aún — seguir en demo.' };
 }
 
+// [FIX 2026-09-08] correlations.json emite `bots` y `matrix` como DICCIONARIOS
+// indexados por "<vps>-<login>-<magic>" (post_merge.py build_correlation_matrix),
+// no como arrays. El codigo anterior usaba findIndex/indices numericos: lanzaba
+// TypeError dentro de un async sin try/catch y dejaba la DNA Card colgada en
+// "Cargando DNA..." para siempre, sin ningun mensaje de error.
 function findCorrelatedPeers(b) {
   const c = state.correlations;
   if (!c || !c.matrix || !c.bots) return null;
   const myKey = `${b.vps}-${b.account_login}-${b.magic}`;
-  const myIdx = c.bots.findIndex(x => x.key === myKey);
-  if (myIdx < 0) return null;
+  const row = c.matrix[myKey];
+  if (!row || !c.bots[myKey]) return null;
   const peers = [];
-  for (let j = 0; j < c.bots.length; j++) {
-    if (j === myIdx) continue;
-    const v = c.matrix[myIdx]?.[j];
-    if (v == null) continue;
-    peers.push({ peer: c.bots[j], rho: v });
+  for (const peerKey of Object.keys(row)) {
+    if (peerKey === myKey) continue;
+    const v = row[peerKey];
+    const meta = c.bots[peerKey];
+    if (v == null || !meta) continue;
+    peers.push({ peer: { ...meta, key: peerKey }, rho: v });
   }
   peers.sort((a, b) => Math.abs(b.rho) - Math.abs(a.rho));
   return peers.slice(0, 3);
@@ -6350,7 +6356,11 @@ async function openDNAModal() {
     document.getElementById('dna-main').innerHTML = '<div class="empty-state">Bot no encontrado en snapshot.</div>';
     return;
   }
-  if (!state.correlations) { try { await loadCorrelations(); } catch {} }
+  // [FIX 2026-09-08] loadCorrelations() solo RETORNA (no asigna): sin este
+  // guardado state.correlations seguia null y los paneles de correlacion
+  // quedaban vacios salvo que el usuario hubiera abierto antes el modal
+  // de Correlacion, que si asigna (openCorrModal).
+  if (!state.correlations) { try { state.correlations = await loadCorrelations(); } catch {} }
   const enriched = { ...b, vps: b.vps || modalState.bot.vps, account_login: b.account_login || modalState.bot.login };
   document.getElementById('dna-main').innerHTML = renderDNACard(enriched);
   setTimeout(() => drawDNAMiniCharts(enriched), 50);
@@ -6627,7 +6637,11 @@ async function openCompareModal() {
   if (!overlay) return;
   overlay.hidden = false;
   document.body.style.overflow = 'hidden';
-  if (!state.correlations) { try { await loadCorrelations(); } catch {} }
+  // [FIX 2026-09-08] loadCorrelations() solo RETORNA (no asigna): sin este
+  // guardado state.correlations seguia null y los paneles de correlacion
+  // quedaban vacios salvo que el usuario hubiera abierto antes el modal
+  // de Correlacion, que si asigna (openCorrModal).
+  if (!state.correlations) { try { state.correlations = await loadCorrelations(); } catch {} }
   renderCompare();
 }
 
@@ -6651,13 +6665,14 @@ function compareBest(items, key, higherIsBetter = true) {
   return best;
 }
 
+// [FIX 2026-09-08] Mismo error de forma que findCorrelatedPeers: rompia el
+// Comparador. Las claves de compareList (compareKey) ya usan el mismo formato
+// "<vps>-<login>-<magic>" que emite el backend, asi que el acceso es directo.
 function corrBetween(aKey, bKey) {
   const c = state.correlations;
   if (!c?.matrix || !c?.bots) return null;
-  const ai = c.bots.findIndex(x => x.key === aKey);
-  const bi = c.bots.findIndex(x => x.key === bKey);
-  if (ai < 0 || bi < 0) return null;
-  return c.matrix[ai]?.[bi];
+  const v = c.matrix[aKey]?.[bKey];
+  return v == null ? null : v;
 }
 
 function renderCompare() {
