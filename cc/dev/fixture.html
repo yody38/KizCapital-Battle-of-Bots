@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>KIZ Command Center · fixture de desarrollo</title>
+<link rel="stylesheet" href="/cc/tokens.css">
+<link rel="stylesheet" href="/cc/base.css">
+<link rel="stylesheet" href="/cc/components.css">
+<style>
+  #fx-bar {
+    position: fixed; right: 12px; bottom: 12px; z-index: 2000;
+    display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
+    padding: 8px 12px; border-radius: 999px;
+    background: rgba(255, 195, 107, .14); border: 1px solid rgba(255, 195, 107, .5);
+    color: #ffc36b; font: 600 11px/1.2 system-ui, sans-serif;
+  }
+  #fx-bar a { color: #ffc36b; text-decoration: underline; }
+</style>
+</head>
+<body>
+<div id="cc-root"></div>
+<div id="fx-bar">
+  <span>FIXTURE — datos sinteticos, sin sesion, sin red</span>
+  <span id="fx-count">…</span>
+  <a href="?n=10000#/fleet">10.000 filas</a>
+  <a href="?n=1200#/home">1.200 filas</a>
+  <a href="#/home">home</a><a href="#/fleet">flota</a><a href="#/real">real</a>
+  <a href="#/promotion">promocion</a><a href="#/portfolio">cartera</a><a href="#/health">salud</a>
+  <a href="#" id="fx-bot">bot</a><a href="#" id="fx-acct">cuenta</a>
+</div>
+
+<script type="module">
+// Todo el montaje del stub ocurre ANTES del import dinamico de /cc/app.js:
+// asi el shell arranca creyendo que hay sesion y que la red responde.
+import { buildFixture, buildPerBot } from './fixture-data.js';
+
+const qs = new URLSearchParams(location.search);
+const N = Math.max(1, Math.min(50000, Number(qs.get('n')) || 1200));
+const FX = buildFixture({ botCount: N });
+
+// --- 1. Sesion falsa ------------------------------------------------------
+window.kizUserEmail = 'fixture@local';
+window.__KIZ_CONFIG__ = { SUPABASE_URL: 'https://fixture.local', FAILOVER_URL: 'https://fixture-mirror.local' };
+window.kizSetCycleSha = () => {};
+// Sin window.kizSupabase a proposito: snapshot.initPush() se salta el Realtime.
+
+// --- 2. Stream real falso -------------------------------------------------
+window.kizLiveReal = {
+  async fetchOnce() { return refreshRows(); },
+  connect(onUpdate, onMode) {
+    onMode('realtime');
+    const tick = () => { for (const r of refreshRows()) onUpdate(r, 'INSERT'); };
+    tick();
+    const id = setInterval(tick, 3000);
+    return { stop() { clearInterval(id); }, get mode() { return 'realtime'; } };
+  },
+};
+function refreshRows() {
+  const now = new Date().toISOString();
+  return FX.liveRows.map((r) => ({ ...r, ts: now,
+    equity: r.equity + Math.round((Math.random() - 0.5) * 30),
+    profit: r.profit + Math.round((Math.random() - 0.5) * 20) }));
+}
+
+// --- 3. fetch falso -------------------------------------------------------
+const FILES = {
+  'snapshot.json': FX.snapshot,
+  'correlations.json': FX.correlations,
+  'portfolio.json': FX.portfolio,
+  'watchdog_status.json': FX.watchdog,
+  'mcp_health.json': FX.mcpHealth,
+  'pipeline_timing.json': FX.pipelineTiming,
+  'upload_health.json': FX.uploadHealth,
+  'integrity_report.json': FX.integrityReport,
+  'basket_recommendations.json': FX.basket,
+};
+const byKey = new Map(FX.bots.map((b) => [`${b.vps}/${b.account_login}-${b.magic}`, b]));
+
+window.fetch = async function (input) {
+  const raw = typeof input === 'string' ? input : (input && input.url) || '';
+  const m = /(?:^|\/)data\/(.+)$/.exec(String(raw).split('?')[0]);
+  if (!m) return json({ error: 'fixture: solo se sirven rutas data/*' }, 404, raw);
+  const path = m[1];
+  if (FILES[path]) return json(FILES[path], 200, `/d/${'a'.repeat(64)}/${path}`);
+  const pb = /^bots\/([^/]+)\/(\d+)-(\d+)\.json$/.exec(path);
+  if (pb) {
+    const bot = byKey.get(`${pb[1]}/${pb[2]}-${pb[3]}`);
+    if (!bot) return json({ error: 'no existe' }, 404, raw);
+    return json(buildPerBot(bot), 200, `/d/${'a'.repeat(64)}/${path}`);
+  }
+  // Todo lo demas se sirve como 404 a proposito, para ver los estados vacios.
+  return json({ error: 'fixture: sin este archivo' }, 404, raw);
+};
+function json(obj, status, url) {
+  const res = new Response(JSON.stringify(obj), { status, headers: { 'Content-Type': 'application/json' } });
+  try { Object.defineProperty(res, 'url', { value: url, configurable: true }); } catch {}
+  return res;
+}
+
+// --- 4. Barra de atajos ---------------------------------------------------
+const first = FX.bots[0];
+const realAcct = FX.realAccounts[0];
+document.getElementById('fx-bot').href = `#/bot/${first.vps}/${first.account_login}/${first.magic}`;
+document.getElementById('fx-acct').href = `#/account/${realAcct.vps}/${realAcct.login}`;
+document.getElementById('fx-count').textContent = `${FX.bots.length.toLocaleString('es-ES')} bots`;
+
+// --- 5. Arranque del shell ------------------------------------------------
+if (!location.hash) location.hash = '#/home';
+await import('/cc/app.js');
+</script>
+</body>
+</html>

@@ -1,0 +1,223 @@
+/* cc/base.css — reset, tipografia y esqueleto de layout del Command Center.
+ * Depende de cc/tokens.css. No toca ninguna clase de styles.css.
+ */
+
+*,
+*::before,
+*::after { box-sizing: border-box; }
+
+html, body { margin: 0; padding: 0; }
+
+html { -webkit-text-size-adjust: 100%; }
+
+body {
+  background: var(--cc-background);
+  color: var(--cc-text-primary);
+  font-family: var(--cc-font-sans);
+  font-size: var(--cc-fs-md);
+  line-height: var(--cc-lh-base);
+  min-height: 100vh;
+  overflow-x: hidden;
+}
+
+h1, h2, h3, h4 { margin: 0; font-weight: 650; line-height: var(--cc-lh-tight); }
+h1 { font-size: var(--cc-fs-2xl); letter-spacing: -0.02em; }
+h2 { font-size: var(--cc-fs-xl); letter-spacing: -0.01em; }
+h3 { font-size: var(--cc-fs-lg); }
+h4 { font-size: var(--cc-fs-md); }
+p { margin: 0 0 var(--cc-space-3); }
+ul, ol { margin: 0; padding-left: var(--cc-space-5); }
+
+a {
+  color: var(--cc-accent);
+  text-decoration: none;
+  transition: color var(--cc-transition);
+}
+a:hover { color: var(--cc-text-primary); }
+
+code, pre, .cc-mono { font-family: var(--cc-font-mono); font-size: 0.95em; }
+
+button, input, select, textarea {
+  font-family: inherit;
+  font-size: inherit;
+  color: inherit;
+}
+
+:focus-visible {
+  outline: 2px solid var(--cc-accent);
+  outline-offset: 2px;
+  border-radius: var(--cc-radius-sm);
+}
+
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: var(--cc-border-strong);
+  border-radius: var(--cc-radius-pill);
+}
+
+[hidden] { display: none !important; }
+
+.cc-visually-hidden {
+  position: absolute;
+  width: 1px; height: 1px;
+  padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0 0 0 0);
+  white-space: nowrap; border: 0;
+}
+
+/* ----------------------------------------------------------------------- */
+/* Layout: sidebar + contenido en escritorio, nav inferior en movil.         */
+/* ----------------------------------------------------------------------- */
+
+.cc-shell {
+  display: grid;
+  grid-template-columns: var(--cc-sidebar-w) minmax(0, 1fr);
+  min-height: 100vh;
+}
+
+.cc-sidebar {
+  position: sticky;
+  top: 0;
+  align-self: start;
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  gap: var(--cc-space-2);
+  padding: var(--cc-space-4) var(--cc-space-3);
+  background: var(--cc-surface);
+  border-right: 1px solid var(--cc-border);
+  z-index: var(--cc-z-nav);
+  overflow-y: auto;
+}
+
+.cc-brand {
+  display: flex;
+  align-items: baseline;
+  gap: var(--cc-space-2);
+  padding: var(--cc-space-2) var(--cc-space-2) var(--cc-space-4);
+}
+.cc-brand__mark {
+  font-size: var(--cc-fs-lg);
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  background: var(--cc-real-gradient);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+.cc-brand__sub {
+  font-size: var(--cc-fs-xs);
+  color: var(--cc-text-tertiary);
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+.cc-nav { display: flex; flex-direction: column; gap: 2px; }
+.cc-nav__link {
+  display: flex;
+  align-items: center;
+  gap: var(--cc-space-3);
+  padding: var(--cc-space-2) var(--cc-space-3);
+  border-radius: var(--cc-radius-sm);
+  color: var(--cc-text-secondary);
+  font-size: var(--cc-fs-md);
+  font-weight: 500;
+  border: 1px solid transparent;
+  transition: background var(--cc-transition), color var(--cc-transition);
+}
+.cc-nav__link:hover { background: var(--cc-surface-hover); color: var(--cc-text-primary); }
+.cc-nav__link.is-active {
+  background: var(--cc-accent-soft);
+  border-color: var(--cc-border-strong);
+  color: var(--cc-text-primary);
+  font-weight: 650;
+}
+.cc-nav__link--real.is-active {
+  background: var(--cc-real-soft);
+  color: var(--cc-real-accent);
+}
+.cc-nav__icon { width: 18px; text-align: center; font-size: var(--cc-fs-lg); }
+
+.cc-sidebar__foot {
+  margin-top: auto;
+  padding-top: var(--cc-space-4);
+  border-top: 1px solid var(--cc-border);
+  font-size: var(--cc-fs-xs);
+  color: var(--cc-text-tertiary);
+  display: flex;
+  flex-direction: column;
+  gap: var(--cc-space-2);
+  word-break: break-all;
+}
+
+.cc-main {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.cc-topbar {
+  position: sticky;
+  top: 0;
+  z-index: calc(var(--cc-z-nav) - 1);
+  display: flex;
+  align-items: center;
+  gap: var(--cc-space-3);
+  flex-wrap: wrap;
+  padding: var(--cc-space-3) var(--cc-space-5);
+  background: color-mix(in srgb, var(--cc-background) 88%, transparent);
+  backdrop-filter: blur(10px);
+  border-bottom: 1px solid var(--cc-border);
+}
+.cc-topbar__title { font-size: var(--cc-fs-lg); font-weight: 650; }
+.cc-topbar__spacer { flex: 1 1 auto; }
+
+.cc-view {
+  padding: var(--cc-space-5);
+  display: flex;
+  flex-direction: column;
+  gap: var(--cc-space-5);
+  flex: 1 1 auto;
+}
+
+.cc-bottomnav { display: none; }
+
+/* Tablet: sidebar reducida a iconos. */
+@media (max-width: 1199px) and (min-width: 768px) {
+  .cc-shell { grid-template-columns: var(--cc-sidebar-w-compact) minmax(0, 1fr); }
+  .cc-brand__sub, .cc-nav__label, .cc-sidebar__foot { display: none; }
+  .cc-nav__link { justify-content: center; padding: var(--cc-space-3) 0; }
+  .cc-view { padding: var(--cc-space-4); }
+}
+
+/* Movil: sin sidebar, nav inferior de 5 destinos. */
+@media (max-width: 767px) {
+  .cc-shell { grid-template-columns: minmax(0, 1fr); }
+  .cc-sidebar { display: none; }
+  .cc-view { padding: var(--cc-space-3); padding-bottom: calc(var(--cc-bottomnav-h) + var(--cc-space-5)); }
+  .cc-topbar { padding: var(--cc-space-3); }
+
+  .cc-bottomnav {
+    display: grid;
+    grid-template-columns: repeat(5, 1fr);
+    position: fixed;
+    left: 0; right: 0; bottom: 0;
+    height: var(--cc-bottomnav-h);
+    background: var(--cc-surface);
+    border-top: 1px solid var(--cc-border);
+    z-index: var(--cc-z-nav);
+  }
+  .cc-bottomnav__link {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 2px;
+    font-size: var(--cc-fs-xs);
+    color: var(--cc-text-tertiary);
+  }
+  .cc-bottomnav__link.is-active { color: var(--cc-accent); }
+  .cc-bottomnav__link--real.is-active { color: var(--cc-real-accent); }
+  .cc-bottomnav__icon { font-size: 1.05rem; line-height: 1; }
+}

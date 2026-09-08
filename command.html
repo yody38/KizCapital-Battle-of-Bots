@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<meta http-equiv="Pragma" content="no-cache">
+<meta http-equiv="Expires" content="0">
+<title>KIZ Command Center</title>
+<meta name="theme-color" content="#0a0b12">
+<link rel="apple-touch-icon" href="/icon-192.png">
+<link rel="stylesheet" href="/cc/tokens.css?v=20260908a">
+<link rel="stylesheet" href="/cc/base.css?v=20260908a">
+<link rel="stylesheet" href="/cc/components.css?v=20260908a">
+<link rel="stylesheet" href="/vendor/fonts/fonts.css">
+<link rel="preconnect" href="https://sudnilwqhbfcjqnzzmhi.supabase.co" crossorigin>
+<!-- Misma cadena que index.html:18-24 y en el MISMO orden: el shell nuevo
+     hereda tal cual la sesion, el fetch parcheado (edge -> firma -> R2) y el
+     transporte Realtime que ya existen. No se duplica nada de esa logica. -->
+<script defer src="/vendor/chart.umd.min.js"></script>
+<script defer src="/vendor/chartjs-adapter-date-fns.bundle.min.js"></script>
+<script defer src="/vendor/supabase.min.js"></script>
+<script defer src="/config.js"></script>
+<script defer src="/supabase-client.js?v=20260908a"></script>
+<script defer src="/auth-guard.js?v=20260908a"></script>
+<script defer src="/data-source.js?v=20260908a"></script>
+<!-- Sin scripts inline (CSP-ready). El service worker de index.html no se
+     registra aqui a proposito: /cc/ va network-first y lo gestiona sw.js. -->
+<script type="module" src="/cc/app.js?v=20260908a"></script>
+</head>
+<body>
+<noscript>
+  <div style="padding:24px;font-family:system-ui,sans-serif;color:#e7ebf5;background:#0a0b12">
+    <h1 style="font-size:1.25rem;margin:0 0 12px">KIZ Command Center</h1>
+    <p>Este panel necesita JavaScript para autenticar la sesion y leer los datos del ciclo.
+       Activalo y recarga la pagina.</p>
+    <p><a href="/index.html" style="color:#7c9cff">Ir al dashboard clasico</a></p>
+  </div>
+</noscript>
+<div id="cc-root" aria-live="polite"></div>
+</body>
+</html>

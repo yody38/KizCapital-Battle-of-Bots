@@ -1,0 +1,70 @@
+{
+  "_readme": "Golden promotion scores over tests/fixtures/synth.py. Refresh ONLY on a reviewed, intentional scoring change: KIZ_UPDATE_GOLDEN=1 python3 -m pytest tests/test_score_end_to_end.py",
+  "bots": {
+    "vps1-900001-5001": {
+      "archetype": "old_grinder_a",
+      "gating_pass": true,
+      "promotion_score": 89.2,
+      "promotion_status": "NEAR"
+    },
+    "vps1-900001-5007": {
+      "archetype": "loser",
+      "gating_pass": false,
+      "promotion_score": 15.4,
+      "promotion_status": "NO"
+    },
+    "vps1-900002-5002": {
+      "archetype": "old_grinder_b",
+      "gating_pass": true,
+      "promotion_score": 91.0,
+      "promotion_status": "READY"
+    },
+    "vps2-900003-5003": {
+      "archetype": "old_grinder_c",
+      "gating_pass": true,
+      "promotion_score": 84.4,
+      "promotion_status": "NEAR"
+    },
+    "vps2-900004-5004": {
+      "archetype": "young_hot",
+      "gating_pass": true,
+      "promotion_score": 87.7,
+      "promotion_status": "NEAR"
+    },
+    "vps3-900009-5009": {
+      "archetype": "real_bot",
+      "gating_pass": true,
+      "promotion_score": 90.0,
+      "promotion_status": "NO"
+    },
+    "vps4-900005-5005": {
+      "archetype": "young_hot_b",
+      "gating_pass": true,
+      "promotion_score": 89.8,
+      "promotion_status": "READY"
+    },
+    "vps4-900006-5006": {
+      "archetype": "sparse",
+      "gating_pass": true,
+      "promotion_score": 89.6,
+      "promotion_status": "READY"
+    }
+  },
+  "score_live_version": "v1",
+  "weights": {
+    "age": 0.02,
+    "cadence": 0.06,
+    "calmar": 0.15,
+    "decay": 0.08,
+    "months_positive_pct": 0.11,
+    "net_return": 0.15,
+    "oos_robustness": 0.06,
+    "profit_factor": 0.05,
+    "safety": 0.06,
+    "significance": 0.03,
+    "sortino": 0.08,
+    "tail_quality": 0.04,
+    "trade_count": 0.01,
+    "win_rate": 0.1
+  }
+}

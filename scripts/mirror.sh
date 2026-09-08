@@ -681,6 +681,14 @@ if [ $UPLOAD_RC -ne 0 ]; then
   echo "[$(ts)] supabase upload FAIL rc=$UPLOAD_RC — public dashboard data may be stale" >> "$LOG"
   exit $UPLOAD_RC
 fi
+# Capa SOMBRA de Postgres (Fase 2, 2026-09-08): historia que snapshot.json no
+# puede contestar (first_seen, serie diaria, transiciones). NADIE la lee aun.
+# Va DESPUES del upload a proposito: si algo aqui falla, el dato publico ya
+# esta arriba. Best-effort duro — el script sale 0 pase lo que pase y esta
+# guarda es el segundo cinturon. Kill switch: DB_SHADOW_WRITE=0.
+DB_SHADOW_WRITE="${DB_SHADOW_WRITE:-1}" python3 "$SCRIPT_DIR/publish_metrics_db.py" >> "$LOG" 2>&1 || \
+  echo "[$(ts)] publish_metrics_db non-fatal error (capa sombra omitida este ciclo)" >> "$LOG"
+
 echo "[$(ts)] mirror cycle OK — verified + uploaded" >> "$LOG"
 
 # Notarize the verified root in the PUBLIC repo (git history = immutable

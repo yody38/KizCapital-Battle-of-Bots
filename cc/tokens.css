@@ -1,0 +1,111 @@
+/* cc/tokens.css — Design tokens del KIZ COMMAND CENTER.
+ *
+ * Los 15 colores salen TAL CUAL de styles.css:1-23 (los mismos hex) para que el
+ * shell nuevo y el dashboard legacy se lean como un solo producto. Lo que se
+ * anade son las escalas que hoy no existen: espaciado, tipografia, radios,
+ * sombras y capas z. Dark-first, institucional: sin neon, sin animacion
+ * gratuita, transiciones solo en cambio de estado y <=200ms.
+ *
+ * Prefijo --cc-* a proposito: styles.css sigue duenio de --bg-0, --text, etc.
+ * Cargar los dos archivos en la misma pagina no colisiona.
+ */
+
+:root {
+  color-scheme: dark;
+
+  /* ---- Superficies (styles.css --bg-0 / --bg-1 / --bg-2 / --bg-card) ---- */
+  --cc-background: #0a0b12;
+  --cc-surface: #11131d;
+  --cc-surface-raised: #171a27;
+  --cc-surface-card: rgba(23, 26, 39, 0.72);
+  --cc-surface-hover: rgba(124, 156, 255, 0.07);
+
+  /* ---- Bordes (--border / --border-strong) ---- */
+  --cc-border: rgba(255, 255, 255, 0.08);
+  --cc-border-strong: rgba(255, 255, 255, 0.14);
+
+  /* ---- Texto (--text / --text-dim / --text-faint) ---- */
+  --cc-text-primary: #e7ebf5;
+  --cc-text-secondary: #9aa3bb;
+  --cc-text-tertiary: #6b7390;
+
+  /* ---- Semantica (--green / --red / --amber) ---- */
+  --cc-positive: #3ddc97;
+  --cc-negative: #ff6b8b;
+  --cc-warning: #ffc36b;
+  /* NUEVO: --cc-critical es rojo saturado y SOLO indica severidad de sistema.
+     No se usa nunca para un numero negativo — para eso esta --cc-negative. */
+  --cc-critical: #ff2d55;
+  /* NUEVO: informativo / neutro (sombra, shadow metrics, notas). */
+  --cc-info: #6fb7ff;
+
+  /* ---- Acentos (--accent / --gold) ---- */
+  --cc-accent: #7c9cff;
+  --cc-accent-soft: rgba(124, 156, 255, 0.16);
+  /* Dinero real. styles.css lo tiene como gradiente; aqui se separa el color
+     solido (para texto y bordes) del gradiente (para franjas y cabeceras). */
+  --cc-real-accent: #ffd86b;
+  --cc-real-gradient: linear-gradient(135deg, #ffd86b, #ff9a3c);
+  --cc-real-soft: rgba(255, 216, 107, 0.12);
+
+  /* ---- Tintes de fondo por severidad ---- */
+  --cc-positive-soft: rgba(61, 220, 151, 0.12);
+  --cc-negative-soft: rgba(255, 107, 139, 0.12);
+  --cc-warning-soft: rgba(255, 195, 107, 0.12);
+  --cc-critical-soft: rgba(255, 45, 85, 0.14);
+  --cc-info-soft: rgba(111, 183, 255, 0.12);
+
+  /* ---- Espaciado, base 4px ---- */
+  --cc-space-1: 4px;
+  --cc-space-2: 8px;
+  --cc-space-3: 12px;
+  --cc-space-4: 16px;
+  --cc-space-5: 24px;
+  --cc-space-6: 32px;
+  --cc-space-7: 48px;
+  --cc-space-8: 64px;
+
+  /* ---- Tipografia ---- */
+  --cc-font-sans: 'Inter', system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --cc-font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+  --cc-fs-xs: 0.6875rem;   /* 11px — chips, etiquetas de metrica */
+  --cc-fs-sm: 0.75rem;     /* 12px — tablas densas */
+  --cc-fs-md: 0.8125rem;   /* 13px — cuerpo por defecto */
+  --cc-fs-lg: 0.9375rem;   /* 15px — subtitulos */
+  --cc-fs-xl: 1.25rem;     /* 20px — titulos de seccion */
+  --cc-fs-2xl: 1.75rem;    /* 28px — cifras KPI y titulo de vista */
+  --cc-lh-tight: 1.15;
+  --cc-lh-base: 1.45;
+  --cc-lh-relaxed: 1.65;
+
+  /* ---- Forma ---- */
+  --cc-radius: 16px;
+  --cc-radius-sm: 10px;
+  --cc-radius-pill: 999px;
+
+  /* ---- Sombras ---- */
+  --cc-shadow-1: 0 1px 2px rgba(0, 0, 0, 0.28), 0 1px 0 rgba(255, 255, 255, 0.03) inset;
+  --cc-shadow-2: 0 8px 28px rgba(0, 0, 0, 0.35), 0 1px 0 rgba(255, 255, 255, 0.04) inset;
+
+  /* ---- Capas ---- */
+  --cc-z-nav: 100;
+  --cc-z-modal: 900;
+  --cc-z-toast: 1000;
+
+  /* ---- Movimiento: solo cambio de estado, nunca decorativo ---- */
+  --cc-transition: 160ms ease;
+  --cc-transition-slow: 200ms ease;
+
+  /* ---- Geometria del layout ---- */
+  --cc-sidebar-w: 224px;
+  --cc-sidebar-w-compact: 64px;
+  --cc-bottomnav-h: 58px;
+  --cc-row-h: 34px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --cc-transition: 0ms;
+    --cc-transition-slow: 0ms;
+  }
+}

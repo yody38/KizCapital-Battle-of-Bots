@@ -1,0 +1,100 @@
+name: migrate
+
+# Migraciones de Postgres (Battle of Bots · Fase 2, 2026-09-08).
+#
+# SOLO workflow_dispatch. Sin cron, sin `on: push`, sin repository_dispatch.
+# Un cambio de esquema toca el mismo Postgres donde vive el dato de las cinco
+# cuentas REALES: se ejecuta cuando el owner lo decide y nunca solo.
+#
+# `plan` y `check-rest` son de lectura. `apply` ademas exige escribir APLICAR
+# en el campo `confirm` — un dispatch con el desplegable a medio poner no
+# puede tocar el esquema.
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "plan (lista) · check-rest (verifica lo desplegado) · apply (ESCRIBE)"
+        type: choice
+        required: true
+        default: plan
+        options:
+          - plan
+          - check-rest
+          - apply
+      confirm:
+        description: "Escribe APLICAR (exacto) solo si mode=apply. En otro caso dejalo vacio."
+        type: string
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: migrate
+  cancel-in-progress: false
+
+jobs:
+  migrate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # La compuerta va ANTES de que exista ningun secreto en el entorno: si
+      # la confirmacion no coincide, el job muere sin haber tenido acceso.
+      - name: Compuerta de confirmacion
+        if: inputs.mode == 'apply'
+        run: |
+          if [ "${{ inputs.confirm }}" != "APLICAR" ]; then
+            echo "::error::mode=apply requiere confirm=APLICAR (recibido: '${{ inputs.confirm }}')"
+            exit 1
+          fi
+          echo "Confirmacion OK — se aplicaran las migraciones pendientes."
+
+      - name: plan
+        if: inputs.mode == 'plan'
+        run: python3 scripts/migrate.py --plan
+
+      # check-rest NO necesita URL de base de datos: sondea PostgREST con el
+      # service_role, exactamente como el resto de scripts del repo.
+      - name: check-rest
+        if: inputs.mode == 'check-rest'
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: python3 scripts/migrate.py --check-rest
+
+      - name: Subir el veredicto de drift
+        if: inputs.mode == 'check-rest'
+        uses: actions/upload-artifact@v4
+        with:
+          name: schema-drift-${{ github.run_id }}
+          path: data/schema_drift.json
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Instalar psql
+        if: inputs.mode == 'apply'
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq postgresql-client
+
+      # SUPABASE_DB_URL debe ser el SESSION POOLER de Supavisor (puerto 5432):
+      # los runners de GitHub son IPv4-only y la conexion directa
+      # db.<ref>.supabase.co solo resuelve a IPv6.
+      - name: apply
+        if: inputs.mode == 'apply'
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+        run: python3 scripts/migrate.py --apply
+
+      - name: Verificar despues de aplicar
+        if: inputs.mode == 'apply'
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: python3 scripts/migrate.py --check-rest

@@ -1,0 +1,54 @@
+name: tests
+
+# Characterization + regression suite for the scoring engine.
+# Deliberately hermetic: no secrets, no Tailscale, no VPS, no Supabase, no
+# network. Everything runs against the synthetic fixture in tests/fixtures/.
+# This workflow must NEVER be wired into refresh.yml — refresh publishes real
+# money figures and must not depend on, or be blocked by, this suite.
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  python:
+    name: pytest (characterization + regression)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      # Same guard as scripts/test_determinism.py: str hashing must not reorder
+      # anything the engine iterates.
+      PYTHONHASHSEED: '0'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install pytest
+        run: python3 -m pip install --disable-pip-version-check --quiet pytest
+      - name: Run the suite
+        run: python3 -m pytest -q
+
+  node:
+    name: node --test (frontend data-shape contracts)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      # NOTE: the files are passed explicitly instead of `node --test tests/js/`.
+      # Node's directory discovery only picks up `*.test.js` / `test-*.js` /
+      # `*_test.js` / a `test/` dir — it does NOT match `test_*.js`, so passing
+      # the directory would exit 1 with MODULE_NOT_FOUND and run nothing.
+      - name: Run the JS tests
+        run: node --test tests/js/*.js
