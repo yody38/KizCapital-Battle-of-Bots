@@ -57,6 +57,9 @@ vendor/.tmp.*
 # --- Command Center (shell futuro; cache no-immutable via vercel.json) ---
 !cc/
 !cc/**
+# ...menos el fixture de desarrollo: son datos sinteticos y un stub de sesion
+# que no pintan nada en produccion y no tienen por que viajar al CDN publico.
+cc/dev/
 
 # --- Configuracion de la propia plataforma ---
 !vercel.json
