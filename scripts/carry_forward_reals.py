@@ -65,6 +65,21 @@ def _epoch_ok(snap: dict) -> bool:
     return True
 
 
+def _write_snapshot_atomic(snap_path: Path, snap: dict) -> None:
+    """Escribe el snapshot por tmp + os.replace, SIEMPRE.
+
+    2026-09-08: dos de las tres salidas de este script hacian `write_text`
+    directo sobre snapshot.json. Ese archivo contiene la cartera de dinero real:
+    si el proceso muere a mitad de la escritura (timeout del job, OOM del runner,
+    cancelacion del workflow) queda un snapshot.json TRUNCADO que el resto del
+    ciclo daria por bueno y publicaria. os.replace es atomico dentro del mismo
+    sistema de archivos: o se ve el snapshot viejo entero, o el nuevo entero.
+    """
+    tmp = snap_path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(snap, ensure_ascii=False, separators=(",", ":")))
+    os.replace(tmp, snap_path)
+
+
 def _recompute_real_portfolio(snap: dict, expected: int) -> None:
     real_accounts = [a for a in snap.get("accounts", []) if a.get("is_real")]
     # `live` se deriva del propio snapshot: una cuenta que llegó por el
@@ -118,7 +133,7 @@ def main() -> int:
     if not missing:
         _recompute_real_portfolio(snap, len(expected_logins))
         snap["degraded_reals"] = []
-        snap_path.write_text(json.dumps(snap, ensure_ascii=False, separators=(",", ":")))
+        _write_snapshot_atomic(snap_path, snap)
         print(f"carry_forward_reals: OK cesta completa {live}/{len(expected_logins)} — nada que heredar")
         return 0
 
@@ -211,7 +226,7 @@ def main() -> int:
         _recompute_real_portfolio(snap, len(expected_logins))
         snap["degraded_reals"] = [{"login": lg, "expected_vps": None, "as_of": None}
                                   for lg in unrecoverable]
-        snap_path.write_text(json.dumps(snap, ensure_ascii=False, separators=(",", ":")))
+        _write_snapshot_atomic(snap_path, snap)
         return 0
 
     # 3 · Orden del ranking: el merge deja bots ordenados por net_profit desc y
@@ -234,9 +249,7 @@ def main() -> int:
     snap["degraded_reals"] = carried + [{"login": lg, "expected_vps": None, "as_of": None}
                                         for lg in unrecoverable]
 
-    tmp = snap_path.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(snap, ensure_ascii=False, separators=(",", ":")))
-    os.replace(tmp, snap_path)
+    _write_snapshot_atomic(snap_path, snap)
 
     print(f"carry_forward_reals: OK live={live}/{len(expected_logins)} "
           f"heredadas={[c['login'] for c in carried]} bots={n_bots} per_bot_files={n_files} "

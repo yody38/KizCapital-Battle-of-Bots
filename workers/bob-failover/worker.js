@@ -135,13 +135,11 @@ export default {
     // /health responde sin auth: lo usa el watchdog para saber si el respaldo
     // esta utilizable ANTES de que haga falta de verdad.
     if (url.pathname === "/health") {
+      // [FIX 2026-09-08] Sin autenticar por diseno (lo sondea el watchdog), pero
+      // ya no devuelve `size` ni `uploaded`: eso permitia a cualquiera medir el
+      // tamano del snapshot y la cadencia real del pipeline desde fuera.
       const probe = await env.BUCKET.head("snapshot.json");
-      return json(probe ? 200 : 503, {
-        ok: !!probe,
-        object: "snapshot.json",
-        size: probe ? probe.size : null,
-        uploaded: probe ? probe.uploaded : null,
-      });
+      return json(probe ? 200 : 503, { ok: !!probe });
     }
 
     const auth = request.headers.get("Authorization") || "";
@@ -157,7 +155,14 @@ export default {
       .map((e) => e.trim().toLowerCase())
       .filter(Boolean);
     const email = String(claims.email || "").toLowerCase();
-    if (allowed.length && !allowed.includes(email)) {
+    // [FIX 2026-09-08] FALLA CERRADO. Antes era `if (allowed.length && ...)`: si
+    // ALLOWED_EMAILS quedaba vacia o sin definir, la comprobacion se saltaba
+    // entera y CUALQUIER JWT valido del proyecto Supabase leia todo el espejo.
+    // Una lista blanca vacia es un error de configuracion, no un permiso.
+    if (!allowed.length) {
+      return json(503, { error: "whitelist not configured" });
+    }
+    if (!allowed.includes(email)) {
       return json(403, { error: "email not whitelisted" });
     }
 

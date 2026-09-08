@@ -268,6 +268,11 @@ def check_bot(bot: dict, tolerance: float) -> list[str]:
     return fails
 
 
+# [FASE 1-C] Interruptor del gate duro de frescura. 0 = sombra (registra en el
+# informe, no aborta). Mismo patron que LIFECYCLE_ENFORCE / GAP_CONTRADICE_ENFORCE.
+FRESHNESS_HARD_ENFORCE = os.environ.get("FRESHNESS_HARD_ENFORCE", "0") == "1"
+
+
 def check_freshness(
     snap: dict, expected_logins: set[int], roster: dict | None = None
 ) -> tuple[list[str], list[str], list[dict], dict]:
@@ -379,6 +384,48 @@ def check_freshness(
             detail["demo_on_stale_vps"] += 1
     if detail["demo_on_stale_vps"]:
         warn.append(f"freshness: {detail['demo_on_stale_vps']} demo account(s) on a stale/absent VPS")
+
+    # (d) [FASE 1-C · 2026-09-08] El canal `hard` llevaba declarado y VACIO desde
+    #     siempre: `all_fails.extend(freshness_hard)` era una operacion nula y
+    #     `freshness_hard_fails` valia 0 pasara lo que pasara, asi que el gate de
+    #     autenticidad que describe el docstring no existia.
+    #
+    #     Se llena SOLO con los dos casos en que la cifra publicada seria FALSA,
+    #     nunca con los que son representables con honestidad (esos siguen
+    #     degradando y el dashboard sigue publicando, regla del owner):
+    #
+    #       d1. Una cuenta real presente que NO esta en el roster esperado. Su
+    #           dinero entra en el total de la cesta real sin que nadie la haya
+    #           autorizado. Son exactamente 5 cuentas: si aparece una sexta o una
+    #           duplicada, es un error que se reporta, no algo que se "arregla".
+    #       d2. Una cuenta que se presenta como SANA (sin `disconnected`) pero que
+    #           trae `carry_source`, es decir, cifras heredadas. Presentar dato
+    #           heredado como dato del ciclo es justamente publicar algo falso.
+    #
+    #     Arranca en SOMBRA: FRESHNESS_HARD_ENFORCE=0 por defecto, de modo que se
+    #     registra y se ve en el informe sin abortar ningun ciclo. Se activa
+    #     cuando el owner lo autorice.
+    for a in real_accts:
+        login = a.get("login")
+        if expected_logins and login not in expected_logins:
+            hard.append(
+                f"freshness: cuenta real {login} presente en el snapshot pero AUSENTE "
+                f"del roster esperado ({len(expected_logins)} cuentas) — su saldo entra "
+                f"en el total de la cesta real sin autorizacion"
+            )
+        if a.get("carry_source") and not a.get("disconnected"):
+            hard.append(
+                f"freshness: cuenta real {login} se presenta como sana pero trae "
+                f"carry_source={a.get('carry_source')!r} — cifras heredadas publicadas "
+                f"como dato de este ciclo"
+            )
+
+    detail["hard_enforced"] = FRESHNESS_HARD_ENFORCE
+    detail["hard_shadow"] = list(hard)
+    if not FRESHNESS_HARD_ENFORCE:
+        for msg in hard:
+            warn.append(f"[sombra] {msg}")
+        hard = []
 
     detail["degraded"] = degraded
     return hard, warn, degraded, detail

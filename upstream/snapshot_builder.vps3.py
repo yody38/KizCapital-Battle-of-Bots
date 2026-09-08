@@ -103,6 +103,14 @@ def _pip_factor(symbol):
     return 10000.0
 
 
+# [2026-09-08] Contador de posiciones descartadas. Antes se hacia `continue` en
+# silencio: una posicion sin deal de entrada (historial recortado por el broker)
+# o sin deal de salida (sigue abierta) desaparecia sin contarse, sin registrarse
+# y sin alertar, y no habia forma de saber cuantas se estaban perdiendo. Ahora se
+# cuentan y el numero viaja en el snapshot; sigue sin abortar nada.
+DISCARDED = {"no_entry": 0, "no_exit": 0}
+
+
 def _trades_from_deals(deals):
     """Match IN/OUT deals by position_id to reconstruct closed trades."""
     by_pos = defaultdict(list)
@@ -114,6 +122,10 @@ def _trades_from_deals(deals):
         in_deal = next((x for x in ds_sorted if x.entry == 0), None)
         out_deals = [x for x in ds_sorted if x.entry in (1, 3)]
         if in_deal is None or not out_deals:
+            if in_deal is None:
+                DISCARDED["no_entry"] += 1
+            else:
+                DISCARDED["no_exit"] += 1
             continue
         last_out = out_deals[-1]
         total_profit = sum(x.profit for x in out_deals)
@@ -634,6 +646,9 @@ def main():
         "top_bot": all_bots[0] if all_bots else None,
         "bot_files_count": len(bot_files_written),
         "errors": errors,
+        # Posiciones que no pudieron reconstruirse como trade cerrado. Un valor
+        # que crece ciclo a ciclo significa historial incompleto del broker.
+        "discarded_positions": dict(DISCARDED),
     }
 
     if "--stdout" in sys.argv:
