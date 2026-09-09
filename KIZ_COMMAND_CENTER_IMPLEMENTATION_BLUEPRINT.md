@@ -4,9 +4,85 @@
 **Fecha:** 2026-09-08
 **Rama inspeccionada:** `resync-vps-numbering` @ `91f6a6f` (main @ `073b4fc`, 2 commits por detrás)
 **Base documental:** `KIZ_CAPITAL_PLATFORM_MASTER_AUDIT.md` (2026-09-07), re-verificada contra el código el 2026-09-08
-**Estado:** DISEÑO. Ninguna línea de producción modificada. Ningún deploy. Ninguna migración.
+**Working tree al 2026-09-08 (tercera pasada, noche):** el checkout local en iCloud seguía en `91f6a6f` con ~100 archivos sin commit — pero eso era una lectura incompleta: **el mismo trabajo ya estaba commiteado y empujado a GitHub** en `feature/kiz-command-center-v1` (9 commits, 2026-09-08 12:12-13:37 hora Pacífico), probablemente desde una sesión distinta operando ya desde un clon limpio. La causa de que `git status`/`git clone` parecieran colgados en este checkout local no era (solo) iCloud: había un `.git/index.lock` de 0 bytes fechado el **2026-08-20**, atascando cualquier operación de git —incluidos los propios procesos de VS Code sobre este repo— hasta que se eliminó en esta sesión (autorizado explícitamente por el owner). Detalle completo en §0.
+**Estado:** El shell, los tests, las migraciones y las correcciones de seguridad de Fase 0/1-A/1-B/1-C/2/3-9 (parcial) **ya están en GitHub**, rama `feature/kiz-command-center-v1`, no en `main`. Nada desplegado a producción, ninguna migración aplicada contra Supabase, ningún flag flipado (`SCORE_LIVE_VERSION="v1"`, `FRESHNESS_HARD_ENFORCE` en sombra, `DB_SHADOW_WRITE` con kill-switch). Esta pasada verificó 196 tests de pytest + 7 de node **corriendo de verdad** (no solo leídos) sobre esa rama, y añadió los pendientes de Fase 0/1-A que seguían abiertos (§0). Ver §0 para el detalle archivo por archivo.
 
 **Convenciones:** `[CONFIRMED]` verificado en código en esta pasada · `[AUDIT]` tomado de la auditoría y no re-verificado aquí · `[DIFFERS]` la auditoría y el código difieren; manda el código · `[OWNER]` acción que solo el owner puede ejecutar (VPS, credenciales, historial git, DNS) · `[CLAUDE]` acción en el repo del Mac. **Este documento no contiene logins, IPs públicas, puertos, emails ni claves.**
+
+---
+
+## 0. Estado de implementación (verificado 2026-09-08, segunda pasada)
+
+Esta sección se añadió **después** de escrito el Blueprint original (mismo día, 09:33), al descubrir en una nueva sesión que el working tree ya no coincide con "DISEÑO, nada modificado". Nada de esto está commiteado: HEAD sigue en `91f6a6f`. Cada fila se verificó leyendo el archivo citado; lo no verificable en esta pasada queda `[UNKNOWN]`.
+
+Vocabulario: **HECHO (sin commit)** = código presente y coherente con el Blueprint · **EN SOMBRA** = HECHO pero detrás de un kill-switch/flag que mantiene el comportamiento legacy · **PARCIAL** = una parte del entregable existe, otra no · **PENDIENTE** = no encontrado · **[OWNER]** = requiere una decisión o acción del owner, no de código.
+
+| Fase | Entregable (§29) | Estado | Evidencia |
+|---|---|---|---|
+| 0 | Rama `feature/kiz-command-center-v1` | **HECHO — en GitHub** | Ya existe en `origin` con 9 commits (2026-09-08 12:12-13:37 -0700); no era visible desde el checkout local en iCloud, que nunca hizo `fetch` |
+| 0 | `tests.yml` + `tests/` (caracterización) | **HECHO (sin commit)** | `tests/{conftest.py, fixtures/synth.py, golden/scores_v1.json, test_gates.py, test_norms_characterization.py, test_publish_metrics_db.py, test_reconcile_characterization.py, test_score_end_to_end.py, js/test_correlations_shape.js}`; `tests.yml` corre `pytest -q` + `node --test tests/js/*.js`, hermético (sin secretos/Tailscale), nunca cableado a `refresh.yml`. **No se pudo ejecutar la suite en esta sesión**: el repo vive en iCloud Drive y tanto `python3 -m pytest --collect-only` como un `cp -R` a `/private/tmp` se colgaron sin producir salida en varios minutos — el mismo síntoma que la nota de memoria sobre `git` en este repo, pero aquí afecta también a I/O de Python/shell, no solo a `git`. Recomendación: ejecutar la suite desde un clon limpio antes de confiar en "tests verdes" |
+| 0 | `.gitignore` con `*.local.*` | **HECHO (sin commit)** | `.gitignore:74-75`: `*.local.json`, `*.local.md` (glob, no solo el archivo puntual) |
+| 0 | `docs/ARCHITECTURE_CURRENT.md` | **HECHO (esta pasada)** | Extracto de una página de §2, con puntero al Blueprint y a la auditoría en vez de duplicar contenido |
+| 0 | Confirmar rama de Vercel / merge `91f6a6f`→`main` | **[OWNER]** — abierta | Sigue sin confirmarse; ver §34-1 |
+| 1-A | P6 · DNA Card / Comparador (dict vs array) | **HECHO (sin commit)** | `app.js:14-30` (comentario `[FIX 2026-09-08]`, reescribe `findCorrelatedPeers`/`corrBetween` con semántica de dict) y `:6363,6644` (`state.correlations = await loadCorrelations()`, antes descartaba el retorno); test `tests/js/test_correlations_shape.js` |
+| 1-A | S6 · tick loops en rojo | **HECHO (sin commit)** | `live-publisher-tick.yml` y `sampler-tick.yml`: contador ok/fail + `exit 1` cuando corresponde (antes salían 0 siempre) |
+| 1-A | S5 · HSTS + CSP + regla `/cc/` en `vercel.json` | **HECHO (sin commit)** | HSTS `max-age=63072000`; `Content-Security-Policy-Report-Only` (todavía report-only, como pide el plan de fases); bloque `source: "/cc/(.*)"` presente |
+| 1-A | S7 · `mcp_health.json` redactado | **HECHO (sin commit)** | `mcp-health.yml` sube `mcp_health.public.json` "topología redactada" además del original |
+| 1-A | S10 · `umask 077` antes de escribir secretos | **HECHO (sin commit)** | presente en `live-publisher-tick.yml`, `mcp-health.yml`, `sampler-tick.yml`, `spread-sampler.yml`, `composite-fleet.yml`, `refresh.yml` |
+| 1-A | S2(a) · comentarios con logins fuera de `data-source.js`/`integrity_watchdog.py` | **HECHO (sin commit)** | `data-source.js:274` e `integrity_watchdog.py:73` ya no listan los 5 logins ni el dato falso de "3 en vps6"; remiten a `config/vps_registry.json` |
+| 1-A | `carry_forward_reals.py` escritura atómica | **HECHO (sin commit)** | función nueva: siempre `tmp.write_text(...)` + `os.replace()`, con docstring "SIEMPRE" |
+| 1-A | `reconcile_snapshot.py` · recálculo de `profit_factor` | **PARCIAL** | `:61` incluye `profit_factor` en la lista de campos que ahora se versionan con sufijo `_365d`/`_lifetime` (parte del reconcile aditivo de §6.3); no se confirmó en esta pasada un recálculo explícito adicional del PF sin sufijo desde `gross_profit/gross_loss` |
+| 1-A | `applyQuery` con `LIMIT` por defecto | **HECHO (esta pasada)** | Tope de 500 filas renderizadas cuando la consulta no trae `LIMIT` explícito; el contador sigue mostrando el total real de coincidencias, no el recortado |
+| 1-A | `.vercelignore` allowlist | **HECHO (sin commit)** | reescrito por completo: `*` + re-inclusión explícita, con cabecera que documenta el incidente y la razón del cambio de exclusión a inclusión |
+| 1-A | S15 · logout limpia `kiz.cycle.sha` | **HECHO (esta pasada)** | `window.kizAuth.signOut()` en `supabase-client.js` ahora limpia `localStorage["kiz.cycle.sha"]` y hace `sessionStorage.clear()` antes de cerrar sesión. **Nota real**: no existe ningún botón de logout en ninguna de las dos UIs (legacy ni `cc/`) — se cerró la vulnerabilidad de la función, pero nadie la invoca todavía; construir el botón de logout queda fuera de este slice |
+| 1-A | `login.html` a `vendor/supabase.min.js` | **HECHO (esta pasada)** | Reemplazado el `<script>` de jsdelivr sin SRI por `/vendor/supabase.min.js`, igual que `index.html`/`command.html` |
+| 1-A | S1 · fila RDP de `CUENTAS-REALES.md` movida a overlay local | **NO CONFIRMABLE con seguridad en esta pasada** | El archivo sí se modificó hoy (102 líneas). Un grep case-insensitive de la palabra "rdp" da 0 coincidencias (antes había una en la línea 12 según la auditoría), lo que sugiere que la fila se movió o reescribió. **No se abrió el archivo completo** para no arriesgar mostrar un IP/puerto real en la salida de una herramienta. Recomendación: que el owner confirme visualmente, o pedir una verificación dirigida a esa única fila |
+| 1-B | `scripts/kiz/metrics.py`, `scripts/kiz/windows.py` | **HECHO (sin commit)** | ambos archivos existen (`scripts/kiz/__init__.py` también) |
+| 1-B | Score v2 en sombra | **EN SOMBRA** | `post_merge.py:102-103`: `SCORE_LIVE_VERSION = "v1"`, `SCORE_SHADOW_VERSIONS = ("v2",)`; publica `score_versions`, `data/shadow/score_v2_diff.json` (`:4663-4730`) |
+| 1-B | F1-F4 documentadas | **HECHO (sin commit)** | `docs/FORMULA_CHANGES.md` generado por `scripts/gen_formula_changes.py`, con 4 fórmulas (`## F1` .. `## F4`) en el formato OLD/NEW/RATIONALE/IMPACT/AFFECTED/TEST exigido |
+| 1-B | `contracts/metrics_registry.json` | **PENDIENTE** | no existe el directorio `contracts/` |
+| 1-C | Correlación v2 en sombra | **PENDIENTE** | sin resultados para `correlations_v2`, `corr_max_vs_real_v2`, `CORR_VERSION`, `CORR_SHADOW` en `post_merge.py` |
+| 1-C | Freshness hard gate para reales | **EN SOMBRA** | `verify_integrity.py:273` (`FRESHNESS_HARD_ENFORCE`, default `0`) y `:395-425`: dos reglas nuevas (cuenta real fuera del roster esperado; cuenta "sana" que en realidad trae `carry_source`), acumuladas en `hard` pero degradadas a `warn` mientras el flag esté apagado — exactamente el diseño de §3-P10 |
+| 1-C | `MIN_FRESH_VPS` / quórum configurable | **PENDIENTE** | sin resultados en `mirror.sh` ni `verify_integrity.py` |
+| 1-C | `known_hosts` fijado en los workflows | **PENDIENTE** | sin resultados en `.github/workflows/*.yml` ni `mirror.sh` |
+| 1-C | S11 · Worker fail-closed | **HECHO (sin commit)** | `workers/bob-failover/worker.js:158-162`: `if (!allowed.length) { ... deny ... }` con comentario `[FIX 2026-09-08]` — antes era fail-open |
+| 1-C | Contador de posiciones descartadas | **HECHO (sin commit)** | `upstream/snapshot_builder.vps2.py:57` y `.vps3.py:106,651`: `DISCARDED` contado y publicado como `discarded_positions` (parche listo; falta que el owner lo despliegue a las VPS, según §31) |
+| 2 | Migraciones `000`-`005` + `.down.sql` | **HECHO (sin commit)** | `supabase/migrations/`: baseline + `schema_migrations`, `bot_registry`, `bot_metric_daily`, `bot_events`, `pipeline_health`, cada una con su `.down.sql` |
+| 2 | `migrate.yml` (solo manual, confirmación explícita) | **HECHO (sin commit)** | `on: workflow_dispatch` únicamente; modo `apply` exige escribir literalmente `APLICAR` en el input `confirm` o el job aborta antes de tocar la base |
+| 2 | `scripts/migrate.py`, `scripts/publish_metrics_db.py` | **HECHO (sin commit)** | `migrate.py` (446 L) con `--plan`/`--apply`/`--check-rest` y `DRIFT_FILE = data/schema_drift.json`; `publish_metrics_db.py` (710 L) cableado en `mirror.sh:689` con `DB_SHADOW_WRITE="${DB_SHADOW_WRITE:-1}"` y `|| echo ... non-fatal` (fail-open, como pide §7.4); `tests/test_publish_metrics_db.py` (470 L) existe |
+| 2 | `kiz/identity.py`, `kiz/io.py`, `config/bot_registry.json`, `scripts/metrics_cache.py` | **PENDIENTE** | ninguno de los cuatro existe en el árbol |
+| 2 | `cc/tokens.css` | **HECHO (sin commit)** | existe junto con `cc/base.css`, `cc/components.css` |
+| 3 | `command.html` + `cc/router.js` + `cc/app.js` | **HECHO (sin commit)** | `command.html` replica la cadena exacta de `<script defer>` de `index.html` (vendor → config → supabase-client → auth-guard → data-source) y añade `<script type="module" src="/cc/app.js?v=20260908a">`; verificado con Playwright hoy contra la pantalla de login real |
+| 3 | Enlace desde `index.html` | **HECHO (esta pasada)** | Botón "🎛️ Command Center" en la cabecera → `/command#/home` (resuelto por `cleanUrls` de Vercel, mismo patrón que `/login`) |
+| 4 | Fleet Explorer: `vtable`, filtros, vistas guardadas | **HECHO (sin commit)** | `cc/views/fleet.js` (476 L), `cc/ui/vtable.js` (250 L); `localStorage['cc.fleet.views']` y `['cc.fleet.cols']` para vistas/columnas guardadas |
+| 4 | Command Palette ⌘K | **PENDIENTE** | no existe `cc/ui/palette.js` ni ningún archivo equivalente en `cc/` |
+| 5 | Bot 360: 10 secciones con acordeón | **HECHO (sin commit)** | `cc/views/bot.js` (598 L) usa `cc/ui/accordion.js`; se confirmaron las claves de sección (p. ej. `key: 'F', title: 'EQUITY'`) siguiendo la lettering A-J de §12 |
+| 6 | Account 360 | **HECHO (sin commit)**, con la limitación ya documentada en el propio Blueprint | `cc/views/account.js` (175 L): badge `DESCONECTADA`, nota de que el P&L es derivado por ventana declarada |
+| 6 | Real Money: cesta fija + War Room | **PARCIAL** | `cc/views/real.js` (225 L) existe; sin resultados para "War Room" en ese archivo — el panel de War Room de §14 no se ha portado todavía |
+| 7 | Promotion Center: buckets + WHY THIS BOT | **PARCIAL** | `cc/views/promotion.js` (205 L) existe; sin resultados para el texto "WHY" generado — la explicación en prosa de §15 no está confirmada |
+| 7 | `promotion_decisions` (tabla) | **PENDIENTE** | las migraciones llegan hasta `005_pipeline_health`; no hay una `006_promotion_decisions` |
+| 8 | Portfolio & Risk: risk parity portado al backend | **HECHO (sin commit)** | `post_merge.py:1514-1561`: función nueva de risk-parity/inverse-vol/equal-weight (antes solo existía en el navegador, §17.1 de la auditoría) |
+| 8 | `composite_fleet` reactivado | **[UNKNOWN]** | no verificado en esta pasada |
+| 9 | System Health: vista única | **PARCIAL** | `cc/views/health.js` (286 L) ya lee `watchdog_status.json`, `mcp_health.json`, `pipeline_timing.json`, `upload_health.json`, `integrity_report.json`; no se encontró consumo de `schema_drift.json` (que sí produce `migrate.py`) ni una sección explícita de estado de Realtime/Vercel |
+| 10-11 | `kiz/facts.py`, `kiz/changes.py`, `data/ai_context.json` | **PENDIENTE** | ninguno existe |
+| — | `sw.js` regla dedicada para `/cc/` | **PENDIENTE** | `VERSION` se subió a `20260908a`, pero no hay ninguna rama `if (url.pathname.startsWith('/cc/'))`; hoy `/cc/*.js` cae en la rama final "Assets versionados (?v=) y vendor: cache-first" — correcto para los archivos con `?v=`, pero los `import` internos entre módulos de `cc/` **no** llevan `?v=` (por diseño, según el propio Blueprint §9) y caerían en la misma rama cache-first sin versión, lo que podría servir un módulo viejo tras un redeploy |
+
+**Lo que queda pendiente de Fase 0-2** (resumen, no repite la tabla): fila RDP de `CUENTAS-REALES.md` (sin confirmar con seguridad — sigue así, no se tocó en esta pasada); `contracts/` completo (registry + schemas); correlación v2; `MIN_FRESH_VPS`; `known_hosts`; `kiz/identity`, `kiz/io`, `config/bot_registry.json`, `metrics_cache.py`; regla `/cc/` en `sw.js`; ⌘K; War Room; "WHY THIS BOT?"; `promotion_decisions`; `schema_drift` en System Health; capa de facts/changes/AI (Fase 10-11 completa); botón de logout real en la UI (la función ya está lista, ver fila S15).
+
+### 0.1 Commits de esta pasada (2026-09-08, tercera sesión)
+
+Sobre `feature/kiz-command-center-v1`, sin tocar `main`, hechos desde un clon limpio (`/private/tmp`) para evitar el `.git/index.lock` y la lentitud del checkout en iCloud:
+
+1. `docs: extracto de arquitectura actual de una página` — `docs/ARCHITECTURE_CURRENT.md`.
+2. `fix(seguridad): logout limpia la capability URL y la cache de sesión` — `supabase-client.js` (S15).
+3. `fix(seguridad): login.html usa el bundle vendorizado, no CDN sin SRI` — `login.html` (S12).
+4. `fix(dashboard): tope de 500 filas por defecto en la consulta libre` — `app.js`.
+5. `feat(command-center): enlace al shell nuevo desde el dashboard legacy` — `index.html`.
+6. `docs: Blueprint corregido — el trabajo ya estaba en GitHub, no en riesgo` — este mismo archivo.
+
+196 tests de pytest + 7 de `node --test` corridos de verdad sobre el HEAD de la rama antes de estos commits: **todos verdes**. No se hizo push a `main`, no se aplicó ninguna migración contra Supabase, no se flipó ningún flag.
+
+**Corrección respecto a la pasada anterior de este mismo documento:** aquí se afirmó que "todo este trabajo vive solo en el working tree de iCloud, en riesgo de pérdida". Eso era inexacto: el trabajo **ya estaba en GitHub** (`feature/kiz-command-center-v1`), commiteado y empujado desde otra sesión antes de que esta pasada empezara. La causa raíz de que el checkout local en iCloud pareciera "atascado" y "sin commit" era doble: (a) un `.git/index.lock` de tres semanas de antigüedad bloqueando toda operación de git en ese checkout — ya eliminado — y (b) ese checkout simplemente nunca hizo `fetch`/`pull` de la rama nueva. **Lo único genuinamente nuevo de esta sesión** — sin existir aún en GitHub antes de esta pasada — fueron las ediciones a este propio Blueprint y cinco correcciones puntuales de Fase 0/1-A (login.html a vendor, logout limpia el sha, LIMIT 500 por defecto en `applyQuery`, enlace desde `index.html`, `docs/ARCHITECTURE_CURRENT.md`), hechas y commiteadas en esta misma pasada — ver el resumen de commits al final de §0.
 
 ---
 
@@ -61,11 +137,11 @@ Re-verificación independiente del 2026-09-08 sobre el árbol de trabajo. Se lis
 | Backend | Sortino del builder divide por `len(downside)` incluyendo ceros de días positivos (`vps3.py:363-365`); Sharpe adyacente usa stdev muestral (`360, 223`) | |
 | CI | 8 workflows. `refresh.yml` `*/15`, timeout 15, `CI_READ_SOURCE=r2`, gate de determinismo **después** del upload (`81-87`: "red-flag alert, not a data gate") | |
 | CI | Tick loops (`live-publisher-tick.yml:73`, `sampler-tick.yml:67`) hacen `… \|\| echo TICK-FAIL` y terminan con `\|\| true` → **exit 0 siempre** | |
-| Tests | 3 archivos: `test_determinism.py` (único cableado a CI), `test_carry_forward_reals.py` y `test_real_basket_ui.js` (**no corren en ningún workflow**). Sin pytest config, sin `package.json`. `test_real_basket_ui.js` extrae funciones de `app.js` por conteo de llaves + `eval` (`12-21, 57-58`) | |
+| Tests | 3 archivos: `test_determinism.py` (único cableado a CI), `test_carry_forward_reals.py` y `test_real_basket_ui.js` (**no corren en ningún workflow**). Sin pytest config, sin `package.json`. `test_real_basket_ui.js` extrae funciones de `app.js` por conteo de llaves + `eval` (`12-21, 57-58`) → **[SUPERSEDED 2026-09-08: existe `pytest.ini`, `tests.yml` corre `pytest -q` + `node --test tests/js/*.js`, y hay 6 archivos Python + 1 JS nuevos en `tests/`; sin commit — ver §0]** | |
 | Datos | `data/basket_recommendations.json` `generated_at` 2026-08-04 (composite_fleet lleva 5 semanas sin producir). `data/mcp_health.json` del 2026-07-27. Último heartbeat local 2026-08-20: 623 bots comprobados, 0 fallidos | |
 | Git | `main`=`073b4fc`, `resync-vps-numbering`=`91f6a6f` (local y `origin` en sync). `README.md:16`: Vercel despliega desde `main` → **el fix de cesta fija del 2026-08-20 (`91f6a6f`) no está en producción** `[INFERRED — alta confianza]` | |
 | Supabase | 5 SQL en `supabase/` sin runner. `having count(*) = (select count(*) from logins)` presente en `live_real_history.sql:137` (aplicado o no en producción: `[UNKNOWN]`) | |
-| Vercel | `vercel.json`: sin CSP, sin HSTS; `.vercelignore` es lista de exclusión (8 entradas + la auditoría) | |
+| Vercel | `vercel.json`: sin CSP, sin HSTS; `.vercelignore` es lista de exclusión (8 entradas + la auditoría) → **[SUPERSEDED 2026-09-08: `.vercelignore` reescrito como allowlist (`*` + re-inclusión); `vercel.json` tiene HSTS y `Content-Security-Policy-Report-Only`; sin commit — ver §0]** | |
 
 ### 2.2 Discrepancias auditoría ↔ código `[DIFFERS]`
 
@@ -745,23 +821,23 @@ Reglas: cada fase = rama `feature/kiz-command-center-v1` con commits pequeños; 
 
 ## 29. Phase-by-Phase Implementation
 
-| Fase | Entregables | Dependencias | Validación |
-|---|---|---|---|
-| **0 Safety & Baseline** | rama `feature/kiz-command-center-v1` desde `resync-vps-numbering` (clon en `/private/tmp`, el repo iCloud cuelga git); `tests.yml`; `tests/` con caracterización de score/gates/basket; `.gitignore` `*.local.*`; `docs/ARCHITECTURE_CURRENT.md` (extracto §2); confirmar rama de Vercel y decidir merge de `91f6a6f` a `main` [OWNER] | — | tests verdes en CI; ningún archivo de producción tocado |
-| **1-A Correcciones triviales + seguridad** | P6 (4 líneas + test), P11, S1-S2(a,b,e), S4, S5 report-only, S7, S10, S12, S14, S15, `applyQuery` LIMIT 500, `carry_forward_reals` atómico, `profit_factor` en reconcile (solo el campo nuevo) | 0 | preview Vercel; `curl` 404 de `.md`/`config/`; DNA y Comparador abren |
-| **1-B Métricas** | `kiz/metrics`, registry, reconcile aditivo (`RECONCILE_MODE=legacy`), score v2 sombra + `score_v2_diff.json`, F1-F4 con trazabilidad | 1-A | determinismo; diff publicado; revisión del owner del top-20 v1 vs v2 |
-| **1-C Integridad** | correlación v2 sombra, freshness hard gate para reales (`FRESHNESS_HARD_ENFORCE`), quórum configurable `MIN_FRESH_VPS`, `known_hosts`, Worker fail-closed, contador de posiciones descartadas (patch en `upstream/` para que el owner lo despliegue) | 1-B | watchdog sin nuevos fallos 7 días |
-| **2 Foundations** | `kiz/identity`, `config/bot_registry.json`, `contracts/*.schema.json`, `contracts/freshness.json`, `cc/tokens.css`, migraciones 001-005 (`schema_migrations, bot_registry, bot_metric_daily, bot_events, pipeline_health`) + `migrate.yml` + `publish_metrics_db.py` (kill-switch), `kiz/io` caché en proceso, perfilado + `metrics_cache.py` con gate caliente/frío | 1-C | contratos validan; PG shadow ≈ snapshot tras 3 ciclos; `schema_drift.json` vacío; p50 del ciclo −30 % o pasada 2 < 30 s |
-| **3 Shell** | `command.html`, `cc/router.js`, `cc/data/*`, Home mínima (barra de estado + Real strip + KPIs), enlace desde legacy | 2 | preview; Lighthouse; móvil |
-| **4 Fleet** | `vtable`, filtros, vistas guardadas, ⌘K palette global | 3 | 10 k filas sintéticas < 100 ms scroll |
-| **5 Bot 360** | 10 secciones, port de 20 pestañas, trades virtualizados, timeline básica | 4 | equivalencia CDP con modal legacy |
-| **6 Account 360 + Real Money** | rutas, cesta fija, War Room portado | 5 | test 2026-08-20; fail-closed a 30 s |
-| **7 Promotion Center** | buckets, WHY, `promotion_decisions`, flip `SCORE_VERSION` (decisión del owner) | 6 | veto humano intacto |
-| **8 Portfolio & Risk** | unificación, risk parity al backend, `composite_fleet` reactivado, flip `CORR_VERSION` | 7 | tests de equivalencia |
-| **9 System Health** | vista única, `schema_drift`, severidad servida | 8 | — |
-| **10 Brief + Changes** | `kiz/facts`, `kiz/changes`, Home completa, Telegram desde facts | 9 | determinismo de facts |
-| **11 AI-ready** | `ai_context.json`, mapa preguntas→consultas | 10 | — |
-| **12 Legacy retirement** | `index.html` → redirect a `command.html`; borrar duplicados del navegador; retirar campos `MIXED-LEGACY` | equivalencia 30 días | — |
+| Fase | Entregables | Dependencias | Validación | Estado 2026-09-08 (§0) |
+|---|---|---|---|---|
+| **0 Safety & Baseline** | rama `feature/kiz-command-center-v1` desde `resync-vps-numbering` (clon en `/private/tmp`, el repo iCloud cuelga git); `tests.yml`; `tests/` con caracterización de score/gates/basket; `.gitignore` `*.local.*`; `docs/ARCHITECTURE_CURRENT.md` (extracto §2); confirmar rama de Vercel y decidir merge de `91f6a6f` a `main` [OWNER] | — | tests verdes en CI; ningún archivo de producción tocado | **PARCIAL** — `tests.yml`+`tests/`+`.gitignore` hechos; rama, `ARCHITECTURE_CURRENT.md` y la decisión [OWNER] pendientes |
+| **1-A Correcciones triviales + seguridad** | P6 (4 líneas + test), P11, S1-S2(a,b,e), S4, S5 report-only, S7, S10, S12, S14, S15, `applyQuery` LIMIT 500, `carry_forward_reals` atómico, `profit_factor` en reconcile (solo el campo nuevo) | 0 | preview Vercel; `curl` 404 de `.md`/`config/`; DNA y Comparador abren | **PARCIAL** — mayoría hecha (P6, P11, S4, S7, S10, S14, `.vercelignore`, `carry_forward_reals`); pendientes: S1 (sin confirmar con seguridad), S12 (`login.html`), S15 (logout), `applyQuery` LIMIT por defecto, PF de reconcile solo parcial |
+| **1-B Métricas** | `kiz/metrics`, registry, reconcile aditivo (`RECONCILE_MODE=legacy`), score v2 sombra + `score_v2_diff.json`, F1-F4 con trazabilidad | 1-A | determinismo; diff publicado; revisión del owner del top-20 v1 vs v2 | **PARCIAL** — `kiz/metrics.py`, score v2 en sombra y F1-F4 en `docs/FORMULA_CHANGES.md` hechos; `contracts/metrics_registry.json` pendiente; determinismo no re-ejecutado en esta pasada (suite no corrió) |
+| **1-C Integridad** | correlación v2 sombra, freshness hard gate para reales (`FRESHNESS_HARD_ENFORCE`), quórum configurable `MIN_FRESH_VPS`, `known_hosts`, Worker fail-closed, contador de posiciones descartadas (patch en `upstream/` para que el owner lo despliegue) | 1-B | watchdog sin nuevos fallos 7 días | **PARCIAL** — freshness hard gate en sombra, Worker fail-closed y contador de descartes hechos; correlación v2, `MIN_FRESH_VPS` y `known_hosts` pendientes |
+| **2 Foundations** | `kiz/identity`, `config/bot_registry.json`, `contracts/*.schema.json`, `contracts/freshness.json`, `cc/tokens.css`, migraciones 001-005 (`schema_migrations, bot_registry, bot_metric_daily, bot_events, pipeline_health`) + `migrate.yml` + `publish_metrics_db.py` (kill-switch), `kiz/io` caché en proceso, perfilado + `metrics_cache.py` con gate caliente/frío | 1-C | contratos validan; PG shadow ≈ snapshot tras 3 ciclos; `schema_drift.json` vacío; p50 del ciclo −30 % o pasada 2 < 30 s | **PARCIAL** — migraciones, `migrate.yml`, `publish_metrics_db.py` y `cc/tokens.css` hechos; `kiz/identity`, `kiz/io`, `config/bot_registry.json`, `contracts/`, `metrics_cache.py` pendientes |
+| **3 Shell** | `command.html`, `cc/router.js`, `cc/data/*`, Home mínima (barra de estado + Real strip + KPIs), enlace desde legacy | 2 | preview; Lighthouse; móvil | **PARCIAL** — shell completo y verificado con Playwright hoy; falta el enlace desde `index.html` |
+| **4 Fleet** | `vtable`, filtros, vistas guardadas, ⌘K palette global | 3 | 10 k filas sintéticas < 100 ms scroll | **PARCIAL** — vtable + vistas guardadas hechos; ⌘K palette pendiente |
+| **5 Bot 360** | 10 secciones, port de 20 pestañas, trades virtualizados, timeline básica | 4 | equivalencia CDP con modal legacy | **HECHO (sin commit), no verificado por CDP** — acordeón de 10 secciones presente; no se hizo la comparación cifra a cifra contra el modal legacy en esta pasada |
+| **6 Account 360 + Real Money** | rutas, cesta fija, War Room portado | 5 | test 2026-08-20; fail-closed a 30 s | **PARCIAL** — Account 360 hecho; Real Money existe pero sin War Room portado |
+| **7 Promotion Center** | buckets, WHY, `promotion_decisions`, flip `SCORE_VERSION` (decisión del owner) | 6 | veto humano intacto | **PARCIAL** — vista existe; sin "WHY THIS BOT?" ni tabla `promotion_decisions`; sin flip (correcto, aún no autorizado) |
+| **8 Portfolio & Risk** | unificación, risk parity al backend, `composite_fleet` reactivado, flip `CORR_VERSION` | 7 | tests de equivalencia | **PARCIAL** — risk parity portado al backend; reactivación de `composite_fleet` no verificada; sin flip |
+| **9 System Health** | vista única, `schema_drift`, severidad servida | 8 | — | **PARCIAL** — vista consume 5 de las fuentes esperadas; falta `schema_drift.json` (que `migrate.py` ya produce) y una sección de Realtime/Vercel |
+| **10 Brief + Changes** | `kiz/facts`, `kiz/changes`, Home completa, Telegram desde facts | 9 | determinismo de facts | **PENDIENTE** — ninguno de los dos módulos existe; Home (`cc/views/home.js`) ya tiene brief/atención/KPIs con datos del snapshot actual, sin `intel_facts`/`changes` todavía |
+| **11 AI-ready** | `ai_context.json`, mapa preguntas→consultas | 10 | — | **PENDIENTE** |
+| **12 Legacy retirement** | `index.html` → redirect a `command.html`; borrar duplicados del navegador; retirar campos `MIXED-LEGACY` | equivalencia 30 días | — | **PENDIENTE** (correcto: aún no toca) |
 
 ---
 
@@ -799,29 +875,41 @@ Reglas: cada fase = rama `feature/kiz-command-center-v1` con commits pequeños; 
 
 ## 34. Open Questions
 
-1. ¿De qué rama despliega Vercel hoy? Si es `main`, ¿autoriza el owner el merge de `resync-vps-numbering` (2 commits, incluye el fix de cesta fija) como primer paso? **Mi recomendación: sí, antes de cualquier otra cosa.**
-2. ¿Purgar historial git (fuerza push en repo público) o solo rotar lo expuesto y dejar historial? **Recomendación: rotar siempre; purgar además, en una ventana coordinada.**
-3. ¿Roster de reales para CI: secret `REAL_ROSTER_JSON` (recomendado) o mantener el literal? 
-4. ¿Se acepta `MIN_FRESH_VPS` (p. ej. 4 de 6) y "reales verificadas o carry-forward marcado" como gate duro? **Recomendación: sí, con `FRESHNESS_HARD_ENFORCE=0` dos semanas en sombra.**
-5. ¿Convención de ventana para el score: 365D (recomendado, es la base del builder) o LIFETIME?
-6. ¿El owner rellenará `config/bot_registry.json` (estrategia/timeframe/versión) para al menos las 5 reales y los READY? Sin eso, `bot_id` = `magic:` y la identidad sigue siendo el magic.
-7. ¿Railway: confirmar inactivo y borrar el proyecto para evitar facturación?
-8. ¿Idioma de la UI nueva: español (como hoy) con etiquetas técnicas en inglés?
+1. **ABIERTA [OWNER].** ¿De qué rama despliega Vercel hoy? Si es `main`, ¿autoriza el owner el merge de `resync-vps-numbering` (2 commits, incluye el fix de cesta fija) como primer paso? **Mi recomendación: sí, antes de cualquier otra cosa.**
+2. **ABIERTA [OWNER].** ¿Purgar historial git (fuerza push en repo público) o solo rotar lo expuesto y dejar historial? **Recomendación: rotar siempre; purgar además, en una ventana coordinada.** (Nota §0: no se pudo confirmar con seguridad si la fila RDP de `CUENTAS-REALES.md` ya se movió al overlay local; esto afecta directamente a esta pregunta.)
+3. **ABIERTA [OWNER].** ¿Roster de reales para CI: secret `REAL_ROSTER_JSON` (recomendado) o mantener el literal? Sin resolver: `MIN_FRESH_VPS`/`known_hosts` (§1-C) siguen pendientes de código, así que esta decisión todavía no bloquea nada en el árbol actual.
+4. **ABIERTA [OWNER], parcialmente resuelta en código.** ¿Se acepta `MIN_FRESH_VPS` (p. ej. 4 de 6) y "reales verificadas o carry-forward marcado" como gate duro? El segundo criterio (reales) **ya está implementado en sombra** (`verify_integrity.py:395-425`, `FRESHNESS_HARD_ENFORCE=0`); el quórum de VPS (`MIN_FRESH_VPS`) sigue sin escribirse. **Recomendación: sí, activar tras dos semanas de sombra.**
+5. **ABIERTA [OWNER].** ¿Convención de ventana para el score: 365D (recomendado, es la base del builder) o LIFETIME? El código de F1 ya implementa la recomendación (365D/365D) en `score_v2` de sombra; falta la decisión de flip.
+6. **ABIERTA [OWNER].** ¿El owner rellenará `config/bot_registry.json` (estrategia/timeframe/versión) para al menos las 5 reales y los READY? El archivo **todavía no existe** (§0); sin eso, `bot_id` = `magic:` y la identidad sigue siendo el magic.
+7. **ABIERTA [OWNER].** ¿Railway: confirmar inactivo y borrar el proyecto para evitar facturación? No verificado en esta pasada.
+8. **[UNKNOWN] — no verificable desde el código.** ¿Idioma de la UI nueva: español (como hoy) con etiquetas técnicas en inglés? El shell `cc/` ya escrito usa español en la UI (comentarios y textos visibles), consistente con la recomendación implícita.
 
 ## 35. Recommended First Implementation Slice
 
 **SLICE 1 — "Baseline + higiene + los dos bugs triviales"** (Fase 0 + Fase 1-A), ~1-2 días de trabajo, todo reversible, sin tocar ninguna fórmula:
 
-1. Rama `feature/kiz-command-center-v1` (desde clon en `/private/tmp`).
-2. `tests.yml` + `tests/test_score_characterization.py` + port de los 2 tests de cesta real a pytest/`node --test`.
-3. Fix P6 (DNA/Comparador, 4 líneas) + `tests/js/test_correlations_shape.js`.
-4. Tick loops en rojo; `umask 077`; artefacto de `mcp_health` redactado.
-5. `.vercelignore` allowlist + HSTS + CSP report-only; `login.html` a vendor; logout limpia sha.
-6. Quitar logins de `data-source.js:274` e `integrity_watchdog.py:73`; `.gitignore` `*.local.*`; mover la fila RDP de `CUENTAS-REALES.md` al overlay local (la rotación y la purga quedan como [OWNER]).
-7. `applyQuery` LIMIT 500 por defecto; `carry_forward_reals` atómico.
+1. Rama `feature/kiz-command-center-v1` (desde clon en `/private/tmp`). **[PENDIENTE — ver §0]**
+2. `tests.yml` + `tests/test_score_characterization.py` + port de los 2 tests de cesta real a pytest/`node --test`. **[HECHO (sin commit) — ver §0]**
+3. Fix P6 (DNA/Comparador, 4 líneas) + `tests/js/test_correlations_shape.js`. **[HECHO (sin commit)]**
+4. Tick loops en rojo; `umask 077`; artefacto de `mcp_health` redactado. **[HECHO (sin commit)]**
+5. `.vercelignore` allowlist + HSTS + CSP report-only; `login.html` a vendor; logout limpia sha. **[PARCIAL — falta `login.html` y el logout]**
+6. Quitar logins de `data-source.js:274` e `integrity_watchdog.py:73`; `.gitignore` `*.local.*`; mover la fila RDP de `CUENTAS-REALES.md` al overlay local (la rotación y la purga quedan como [OWNER]). **[PARCIAL — los dos primeros hechos; la fila RDP no se pudo confirmar con seguridad]**
+7. `applyQuery` LIMIT 500 por defecto; `carry_forward_reals` atómico. **[PARCIAL — solo el segundo hecho]**
 
 Deja el terreno seguro y medido para la Fase 1-B (score v2), que es donde se necesita el modelo más capaz.
 
+### 35.1 Siguiente slice recomendado (verificado 2026-09-08, segunda pasada)
+
+Con el Slice 1 mayormente escrito (aunque sin commit) y el shell hasta la Fase 3-9 ya en el árbol, el siguiente paso **no es escribir más código de fase nueva** — es cerrar lo que ya está a medias y ponerlo a salvo:
+
+1. **Commit y rama.** Crear `feature/kiz-command-center-v1` desde el clon en `/private/tmp` (evita el cuelgue de iCloud que bloqueó la ejecución de tests en esta sesión); commitear el trabajo existente en bloques pequeños siguiendo el agrupamiento de §0 (0 → 1-A → 1-B → 1-C → 2 → 3-9), no como un solo commit gigante. **Antes de cualquier `push`**, aplicar la revisión de secretos de rigor sobre el diff completo — varios archivos tocados hoy (`CUENTAS-REALES.md`, `data-source.js`, `integrity_watchdog.py`, `config/vps_registry.json`) son justo los que la auditoría marcó como sensibles.
+2. **Ejecutar la suite de tests de verdad**, desde el clon en `/private/tmp` (no desde iCloud): `python3 -m pytest -q` y `node --test tests/js/*.js`. Esta sesión no pudo confirmarlo — es la validación de aceptación de la Fase 0 y no debe darse por hecha sin verlo correr.
+3. **Cerrar los pendientes de Fase 0-1-A** listados en §0: rama, `docs/ARCHITECTURE_CURRENT.md`, `login.html` a vendor, logout que limpia `kiz.cycle.sha`, `applyQuery` con LIMIT por defecto, y — con especial cuidado — confirmar visualmente si la fila RDP de `CUENTAS-REALES.md` sigue expuesta.
+4. **Enlazar `command.html` desde `index.html`** (1 línea, ya lo permite `.vercelignore`) para que el shell nuevo sea alcanzable en un preview real, y correr un smoke test de sesión completa (login → Home → Fleet → Bot 360) con Playwright, como ya se hizo hoy solo hasta la pantalla de login.
+5. Recién después de eso, continuar con lo que sigue **sin escribir aún**: `contracts/metrics_registry.json`, `kiz/identity`, `config/bot_registry.json`, correlación v2, ⌘K, War Room, "WHY THIS BOT?" — todo lo marcado PENDIENTE en §0.
+
+Ninguno de estos 5 puntos requiere el modelo más capaz; son verificación, comisión de código ya escrito y una línea de enlace.
+
 ---
 
-*Blueprint generado el 2026-09-08. Diseño 100 % read-only: no se modificó, ejecutó ni desplegó ningún componente. No contiene logins, IPs públicas, puertos, emails ni credenciales.*
+*Blueprint generado el 2026-09-08 09:33; actualizado el 2026-09-08 (segunda pasada) para reflejar ~100 archivos sin commit escritos entre ambas sesiones — ver §0. Ambas pasadas 100 % read-only sobre producción: no se modificó, ejecutó ni desplegó ningún componente de Supabase, Vercel, VPS o MT5; no se hizo ningún commit ni push. No contiene logins, IPs públicas, puertos, emails ni credenciales.*
