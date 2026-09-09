@@ -52,6 +52,14 @@ window.kizAuth = {
   },
 
   async signOut() {
+    // [FIX 2026-09-08] El sha del ciclo (capability URL /d/<sha>/...) y la
+    // cache de URLs firmadas viven en localStorage/sessionStorage y
+    // sobreviven al logout: en una maquina compartida, cualquiera que abra
+    // el navegador despues sigue teniendo acceso de lectura al ultimo
+    // snapshot. Se limpian ANTES de cerrar sesion, no despues.
+    try { localStorage.removeItem("kiz.cycle.sha"); } catch { /* quota/priv mode */ }
+    try { sessionStorage.clear(); } catch { /* quota/priv mode */ }
+    try { delete window.kizCycleSha; } catch { /* noop */ }
     await window.kizSupabase.auth.signOut();
   },
 
