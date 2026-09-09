@@ -4712,8 +4712,20 @@ function applyQuery(text) {
       return q.sortDir === 'desc' ? (Number(vc || 0) - Number(va || 0)) : (Number(va || 0) - Number(vc || 0));
     });
   }
-  if (q.limit != null) bots = bots.slice(0, q.limit);
-  if (cntEl) cntEl.textContent = `${bots.length} bots`;
+  // [FIX 2026-09-08] Sin LIMIT explicito, `applyQuery` pintaba el resultado
+  // completo con un solo innerHTML: con miles de bots eso es una tabla que
+  // congela la pestana. Tope por defecto de 500 filas renderizadas; el
+  // conteo mostrado sigue siendo el total real de bots que cumplen el
+  // filtro, no el recortado, para que nunca parezca que hay menos de los
+  // que hay. `LIMIT <n>` explicito en la consulta sigue mandando.
+  const totalMatched = bots.length;
+  const effectiveLimit = q.limit != null ? q.limit : 500;
+  bots = bots.slice(0, effectiveLimit);
+  if (cntEl) {
+    cntEl.textContent = totalMatched > bots.length
+      ? `${bots.length} de ${totalMatched} bots — LIMIT 500 por defecto, agrega "LIMIT <n>" a la consulta para ver más`
+      : `${bots.length} bots`;
+  }
   if (!bots.length) {
     if (results) results.hidden = false;
     tbody.innerHTML = '<tr><td colspan="13" class="empty-state" style="padding:24px;text-align:center">Sin bots que cumplan el query.</td></tr>';
